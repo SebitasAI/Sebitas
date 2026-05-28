@@ -18,7 +18,6 @@ import structlog
 from app.agent.router import run_cheap
 from app.agent.sandbox import run_code as _sandbox_run_code
 from app.integrations import gateway as _gateway
-from app.skills.registry import load_skill_md as _load_skill_md
 
 log = structlog.get_logger(__name__)
 
@@ -156,7 +155,61 @@ async def _run_code(code: str) -> str:
 
 
 async def _load_skill(name: str) -> str:
-    return await _load_skill_md(name)
+    """Per-user skill loader. Resolves the current user from contextvars
+    (set by the runner), fetches the body via the registry (which handles R2
+    + LRU + cross-reference detection), and returns a model-friendly text
+    block. The body is wrapped in `<skill name="...">` so the model treats it
+    as content, not instructions."""
+    import uuid as _uuid
+    from app.agent.context import app_user_id_var, run_id_var
+    from app.skills import registry as _sk_registry
+
+    user_str = app_user_id_var.get()
+    if not user_str:
+        return (
+            "Error: no hay contexto de usuario, no puedo cargar la skill. "
+            "Esto es un bug del runner; reintentá."
+        )
+    try:
+        user_id = _uuid.UUID(user_str)
+    except (ValueError, TypeError):
+        return "Error: contexto de usuario corrupto."
+    thread_id = run_id_var.get()
+    try:
+        loaded = await _sk_registry.load_skill_body_for_user(
+            user_id, name, thread_id=thread_id
+        )
+    except _sk_registry.SkillNotFound:
+        return (
+            f"Skill {name!r} no instalada para este usuario. Pedile al humano "
+            "que la instale con `/sebitas skill upload` (o que te diga si la "
+            "instaló bajo otro nombre)."
+        )
+    except _sk_registry.SkillError as exc:
+        return f"Error cargando la skill {name!r}: {exc}"
+
+    # Escape the name in the wrapper. The body itself is markdown and we trust
+    # markdown; what we don't trust is the skill body trying to break out of
+    # the wrapper. Names are slug-validated so this is mostly defensive.
+    safe_name = name.replace('"', "&quot;").replace("<", "&lt;")
+    lines = [
+        f'<skill name="{safe_name}">',
+        loaded.body.strip(),
+        "</skill>",
+        "",
+        f"Skill `{loaded.name}` cargada. {loaded.description}",
+    ]
+    if loaded.links:
+        installed = [link for link in loaded.links if link not in loaded.missing_links]
+        if installed:
+            lines.append(
+                "Referencias internas instaladas: "
+                + ", ".join(f"`{link}`" for link in installed)
+                + ". Si necesitás su contenido, cargalas con load_skill."
+            )
+    if loaded.warning:
+        lines.append(loaded.warning)
+    return "\n".join(lines)
 
 
 register(Tool(

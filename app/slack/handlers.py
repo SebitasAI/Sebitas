@@ -18,6 +18,11 @@ from app.concurrency import (
     mark_event_seen,
     try_acquire_thread_lock,
 )
+from app.slack.skill_commands import (
+    handle_skill_file_upload,
+    is_skill_upload_pending,
+    register_skill_handlers,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -39,10 +44,22 @@ def _spawn(coro) -> None:
 
 
 _MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
+# Mirror of `_looks_like_markdown` in skill_commands.py; kept inline so the
+# precursor check in `on_message` stays a cheap predicate.
+_MD_EXT_RE = re.compile(r"\.md$", re.IGNORECASE)
+_MD_MIMES = {"text/markdown", "text/x-markdown", "text/plain"}
 
 
 def _clean(text: str) -> str:
     return _MENTION_RE.sub("", text or "").strip()
+
+
+def _looks_like_md(f: dict) -> bool:
+    if f.get("filetype") == "markdown":
+        return True
+    if (f.get("mimetype") or "") in _MD_MIMES:
+        return True
+    return bool(_MD_EXT_RE.search(f.get("name") or ""))
 
 
 def _coalesce(queued: list[dict], current: dict) -> dict:
@@ -155,6 +172,31 @@ def register_handlers(app: AsyncApp) -> None:
         if bot_user_id and f"<@{bot_user_id}>" in text:
             return  # handled by app_mention
 
+        # Skill upload precursor interception: if the user ran `/sebitas skill
+        # upload` within the last 5 min AND this message brings a `.md` file,
+        # we process it as a skill (not as agent content) and stop here. The
+        # skill_commands module decides whether the file looks like markdown.
+        files = event.get("files") or []
+        team_id_pre = body.get("team_id") or event.get("team")
+        user_pre = event.get("user")
+        if (
+            sub == "file_share"
+            and team_id_pre
+            and user_pre
+            and is_skill_upload_pending(team_id_pre, user_pre)
+            and any(_looks_like_md(f) for f in files)
+        ):
+            md = next(f for f in files if _looks_like_md(f))
+            _spawn(handle_skill_file_upload(
+                client=client,
+                team_id=team_id_pre,
+                slack_user_id=user_pre,
+                channel=event["channel"],
+                file_obj=md,
+                thread_ts=event.get("thread_ts"),
+            ))
+            return
+
         channel_type = event.get("channel_type")
         channel = event["channel"]
         ts = event["ts"]
@@ -213,3 +255,8 @@ def register_handlers(app: AsyncApp) -> None:
     @app.action("connect_url_button")
     async def on_connect_url_click(ack):  # noqa: ANN001
         await ack()
+
+    # /sebitas slash command + skill install/uninstall actions + edit modal.
+    # Kept in its own module since it owns its own in-memory state (preview
+    # cache + precursor pending) and doesn't share routing with anything else.
+    register_skill_handlers(app)

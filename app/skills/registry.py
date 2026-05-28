@@ -1,144 +1,438 @@
-"""Skill registry: register packages, install/uninstall per workspace, and load
-them dynamically at runtime (progressive: descriptions always, SKILL.md on demand).
+"""Skills registry: workspace-scoped uploads, per-user installs, per-user loads.
 
-A skill package lives in R2 under `skills/{name}/{version}/` (SKILL.md +
-manifest.json + resources); the DB row holds metadata + that prefix
-(`manifest_ref`). Nothing here is hardcoded; the demo skill is seeded through
-register_skill + install, exactly like any other skill.
+Tenancy model:
+
+- `skill` rows live in a workspace and are unique by (workspace_id, name).
+  Anyone in the workspace can see them; installing is a per-user decision.
+- `skill_install` is the per-user opt-in; one user's installs are private to
+  that user even from coworkers in the same workspace. Every query in this
+  module filters by `user_id` first.
+
+There is no "global catalog" surface anymore: a skill uploaded in workspace A
+is invisible to workspace B even if both happen to use the same `name`.
+
+Public surface (used by Slack handlers + the runner + the load_skill tool):
+
+- create_skill(...) -> Skill: persist a new skill from a resolved frontmatter
+  + body, including R2 upload. Rejects name collisions explicitly.
+- update_skill_body(skill_id, content): replace the body, bump version, keep
+  R2 key, invalidate LRU.
+- delete_skill(skill_id): drop the skill row + R2 body + cached install rows
+  cascade automatically.
+- install_for_user(user_id, skill_id, activation_override=None): idempotent.
+- uninstall_for_user(user_id, skill_id): removes the install only, not the
+  workspace-level skill.
+- list_for_user(user_id) -> list[SkillWithInstall]: every install for that
+  user, joined with the parent skill row + effective activation pre-computed.
+- get_skill_for_user(user_id, name) -> SkillWithInstall | None: name lookup
+  for the load_skill tool path. Returns None if not installed by the user.
+- load_skill_body_for_user(user_id, name) -> LoadedSkill: full body + warnings
+  about cross-references the user has not installed.
 """
 
 from __future__ import annotations
 
-import json
 import uuid
+from dataclasses import dataclass
+from typing import Literal
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import and_, select
 
-from app.agent.context import workspace_id_var
-from app.artifacts import r2
-from app.db.models import Skill, SkillInstall
+from app.db.models import AppUser, Skill, SkillInstall
 from app.db.session import get_session
+from app.skills import storage
 
 log = structlog.get_logger(__name__)
 
+Activation = Literal["always_active", "on_demand"]
 
-async def register_skill(manifest: dict, skill_md: str, resources: dict[str, bytes] | None = None) -> str:
-    """Upload a skill package to R2 and upsert its registry row. Returns the name."""
-    name = manifest["name"]
-    version = manifest.get("version", "0.1.0")
-    prefix = f"skills/{name}/{version}/"
 
-    await r2.put_bytes(prefix + "manifest.json", json.dumps(manifest, ensure_ascii=False).encode(), "application/json")
-    await r2.put_bytes(prefix + "SKILL.md", skill_md.encode(), "text/markdown")
-    for fname, data in (resources or {}).items():
-        await r2.put_bytes(prefix + "resources/" + fname, data)
+class SkillError(Exception):
+    """Base class for registry errors the Slack layer surfaces back to users."""
 
+
+class SkillNameTaken(SkillError):
+    """Raised when a (workspace_id, name) already exists. The Slack flow
+    catches this to force the user into the Edit modal."""
+
+
+class SkillNotFound(SkillError):
+    """Raised when looking up a skill the user doesn't own or that doesn't
+    exist in the workspace. Surface to the user as a friendly message."""
+
+
+@dataclass
+class SkillWithInstall:
+    """A skill row + the install row (for the user being queried) + the
+    effective activation (override winning over default). Used everywhere we
+    need to render or filter skills for a user."""
+
+    skill: Skill
+    install: SkillInstall
+    effective_activation: Activation
+
+
+@dataclass
+class LoadedSkill:
+    """Return shape of load_skill_body_for_user. Mirrors the LoadSkillOutput
+    schema in the spec (the tool wraps this into a user-facing string)."""
+
+    name: str
+    description: str
+    body: str
+    links: list[str]
+    missing_links: list[str]
+    warning: str | None
+
+
+def _effective(activation_default: str, activation_override: str | None) -> Activation:
+    return activation_override or activation_default  # type: ignore[return-value]
+
+
+# --------------------------------------------------------------------------- #
+# Mutations
+# --------------------------------------------------------------------------- #
+
+
+async def create_skill(
+    *,
+    workspace_id: uuid.UUID,
+    name: str,
+    description: str,
+    activation_default: Activation,
+    body: str,
+    links: list[str],
+    size_bytes: int,
+    created_by_user_id: uuid.UUID | None,
+    source: str = "upload",
+) -> Skill:
+    """Persist + upload. Two writes, in this order: insert the skill row to
+    reserve (workspace_id, name) atomically; if R2 fails, the row is rolled
+    back. Returns the persisted Skill (refreshed)."""
     async with get_session() as session:
-        existing = (await session.execute(select(Skill).where(Skill.name == name))).scalar_one_or_none()
-        if existing is None:
-            existing = Skill(name=name)
-            session.add(existing)
-        existing.description = manifest.get("description", "")
-        existing.tags = manifest.get("tags")
-        existing.author = manifest.get("author")
-        existing.category = manifest.get("category")
-        existing.version = version
-        existing.manifest_ref = prefix
+        existing = (
+            await session.execute(
+                select(Skill).where(
+                    Skill.workspace_id == workspace_id, Skill.name == name
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            raise SkillNameTaken(
+                f"ya existe una skill llamada {name!r} en este workspace"
+            )
+
+        row = Skill(
+            workspace_id=workspace_id,
+            name=name,
+            description=description,
+            body_r2_ref="",  # filled below; the column is NOT NULL so we use ""
+            version=1,
+            source=source,
+            activation_default=activation_default,
+            links=links,
+            size_bytes=size_bytes,
+            created_by_user_id=created_by_user_id,
+        )
+        session.add(row)
+        await session.flush()  # need row.id for the R2 key
+
+        try:
+            r2_ref = await storage.upload_skill_body(
+                workspace_id=workspace_id,
+                skill_id=row.id,
+                version=row.version,
+                content=body,
+            )
+        except Exception:
+            await session.rollback()
+            raise
+        row.body_r2_ref = r2_ref
         await session.commit()
-    log.info("skill_registered", name=name, version=version)
-    return name
+        await session.refresh(row)
+
+    log.info(
+        "skill_uploaded",
+        workspace_id=str(workspace_id),
+        user_id=str(created_by_user_id) if created_by_user_id else None,
+        skill_name=name,
+        skill_id=str(row.id),
+        size_bytes=size_bytes,
+        source=source,
+        activation_default=activation_default,
+    )
+    return row
 
 
-async def install(workspace_id: uuid.UUID, skill_name: str) -> None:
+async def update_skill_body(
+    *, skill_id: uuid.UUID, new_body: str, new_size_bytes: int
+) -> Skill:
+    """Bump version, re-upload to the same R2 key. LRU cache uses version in
+    its key so subsequent reads see a miss + re-pop with the new content."""
     async with get_session() as session:
-        skill = (await session.execute(select(Skill).where(Skill.name == skill_name))).scalar_one_or_none()
-        if skill is None:
-            raise ValueError(f"skill {skill_name!r} no está en el registro")
+        row = await session.get(Skill, skill_id)
+        if row is None:
+            raise SkillNotFound(f"skill {skill_id} no encontrada")
+        row.version = (row.version or 1) + 1
+        row.size_bytes = new_size_bytes
+        await storage.upload_skill_body(
+            workspace_id=row.workspace_id,
+            skill_id=row.id,
+            version=row.version,
+            content=new_body,
+        )
+        await session.commit()
+        await session.refresh(row)
+    log.info(
+        "skill_body_updated",
+        skill_id=str(skill_id),
+        version=row.version,
+        size_bytes=new_size_bytes,
+    )
+    return row
+
+
+async def delete_skill(*, skill_id: uuid.UUID) -> None:
+    """Drop the workspace-level skill. CASCADE removes every install. R2 body
+    is deleted best-effort; we tolerate a leaked object so a failed R2 call
+    doesn't block the user's intent."""
+    async with get_session() as session:
+        row = await session.get(Skill, skill_id)
+        if row is None:
+            return
+        workspace_id = row.workspace_id
+        r2_ref = row.body_r2_ref
+        await session.delete(row)
+        await session.commit()
+    await storage.delete_skill_body(workspace_id, skill_id, r2_ref)
+    log.info("skill_deleted", skill_id=str(skill_id))
+
+
+async def install_for_user(
+    *,
+    user_id: uuid.UUID,
+    skill_id: uuid.UUID,
+    activation_override: Activation | None = None,
+) -> SkillInstall:
+    """Idempotent: re-installing flips activation_override if it differs.
+    Cross-tenant defence: we verify that the user and the skill belong to the
+    same workspace before persisting (otherwise it's a programming bug or a
+    malicious payload)."""
+    async with get_session() as session:
+        skill = await session.get(Skill, skill_id)
+        user = await session.get(AppUser, user_id)
+        if skill is None or user is None:
+            raise SkillNotFound("skill o usuario no existe")
+        if skill.workspace_id != user.workspace_id:
+            raise SkillError(
+                "no se puede instalar una skill de otro workspace"
+            )
+
         existing = (
             await session.execute(
                 select(SkillInstall).where(
-                    SkillInstall.workspace_id == workspace_id, SkillInstall.skill_id == skill.id
+                    SkillInstall.user_id == user_id,
+                    SkillInstall.skill_id == skill_id,
                 )
             )
         ).scalar_one_or_none()
-        if existing is None:
-            session.add(SkillInstall(workspace_id=workspace_id, skill_id=skill.id, version=skill.version, enabled=True))
-        else:
-            existing.enabled = True
-            existing.version = skill.version
+        if existing is not None:
+            if existing.activation_override != activation_override:
+                existing.activation_override = activation_override
+                await session.commit()
+                await session.refresh(existing)
+            return existing
+        row = SkillInstall(
+            user_id=user_id, skill_id=skill_id, activation_override=activation_override
+        )
+        session.add(row)
         await session.commit()
-    log.info("skill_installed", workspace_id=str(workspace_id), skill=skill_name)
+        await session.refresh(row)
+    log.info(
+        "skill_installed",
+        user_id=str(user_id),
+        skill_id=str(skill_id),
+        activation_override=activation_override,
+    )
+    return row
 
 
-async def uninstall(workspace_id: uuid.UUID, skill_name: str) -> None:
+async def uninstall_for_user(*, user_id: uuid.UUID, skill_id: uuid.UUID) -> None:
+    """Removes the install row only. The workspace-level skill stays so other
+    users who installed it keep it. Idempotent."""
     async with get_session() as session:
-        skill = (await session.execute(select(Skill).where(Skill.name == skill_name))).scalar_one_or_none()
-        if skill is None:
-            return
-        install_row = (
+        row = (
             await session.execute(
                 select(SkillInstall).where(
-                    SkillInstall.workspace_id == workspace_id, SkillInstall.skill_id == skill.id
+                    SkillInstall.user_id == user_id,
+                    SkillInstall.skill_id == skill_id,
                 )
             )
         ).scalar_one_or_none()
-        if install_row is not None:
-            install_row.enabled = False
-            await session.commit()
-    log.info("skill_uninstalled", workspace_id=str(workspace_id), skill=skill_name)
+        if row is None:
+            return
+        await session.delete(row)
+        await session.commit()
+    log.info("skill_uninstalled", user_id=str(user_id), skill_id=str(skill_id))
 
 
-async def list_installed(workspace_id: uuid.UUID) -> list[Skill]:
+# --------------------------------------------------------------------------- #
+# Queries
+# --------------------------------------------------------------------------- #
+
+
+async def list_for_user(user_id: uuid.UUID) -> list[SkillWithInstall]:
+    """Every install for the user, joined to the skill row, sorted by install
+    recency. Eager: a user with hundreds of skills is rare; if it becomes a
+    problem, paginate at the Slack layer."""
     async with get_session() as session:
         rows = (
             await session.execute(
-                select(Skill)
+                select(Skill, SkillInstall)
                 .join(SkillInstall, SkillInstall.skill_id == Skill.id)
-                .where(SkillInstall.workspace_id == workspace_id, SkillInstall.enabled.is_(True))
+                .where(SkillInstall.user_id == user_id)
+                .order_by(SkillInstall.installed_at.desc())
             )
-        ).scalars().all()
-    return list(rows)
+        ).all()
+    out: list[SkillWithInstall] = []
+    for skill, install in rows:
+        out.append(
+            SkillWithInstall(
+                skill=skill,
+                install=install,
+                effective_activation=_effective(
+                    skill.activation_default, install.activation_override
+                ),
+            )
+        )
+    return out
 
 
-async def installed_descriptions_text(workspace_id: uuid.UUID) -> str:
-    """Compact list of installed skills for the model (progressive loading: only
-    descriptions go to context; SKILL.md is fetched on demand via load_skill)."""
-    skills = await list_installed(workspace_id)
-    if not skills:
-        return ""
-    lines = "\n".join(f"• {s.name} — {s.description}" for s in skills)
-    return (
-        "Skills instaladas en este workspace. Cuando una aplique a la tarea, llamá "
-        "la tool `load_skill` con su nombre para cargar sus instrucciones completas:\n"
-        f"{lines}"
+async def list_for_workspace(workspace_id: uuid.UUID) -> list[Skill]:
+    """All workspace skills regardless of install status. Used by the Slack
+    catalogue-style flows (future) and admin tools; the per-user flow uses
+    `list_for_user` instead."""
+    async with get_session() as session:
+        return list(
+            (
+                await session.execute(
+                    select(Skill)
+                    .where(Skill.workspace_id == workspace_id)
+                    .order_by(Skill.created_at.desc())
+                )
+            ).scalars()
+        )
+
+
+async def get_skill_for_user(
+    user_id: uuid.UUID, name: str
+) -> SkillWithInstall | None:
+    """Resolve `name` to the skill row, restricted to skills the user has
+    installed. Returns None if not installed (the load_skill tool surfaces
+    that to the model as a friendly error)."""
+    async with get_session() as session:
+        result = (
+            await session.execute(
+                select(Skill, SkillInstall)
+                .join(SkillInstall, SkillInstall.skill_id == Skill.id)
+                .where(
+                    SkillInstall.user_id == user_id,
+                    Skill.name == name,
+                )
+            )
+        ).first()
+    if result is None:
+        return None
+    skill, install = result
+    return SkillWithInstall(
+        skill=skill,
+        install=install,
+        effective_activation=_effective(
+            skill.activation_default, install.activation_override
+        ),
     )
 
 
-async def load_skill_md(name: str) -> str:
-    """Fetch the full SKILL.md of an installed skill for the current workspace.
-    Hook: when the library grows, this is where semantic skill-search (pgvector)
-    would narrow candidates before loading."""
-    ws = workspace_id_var.get()
-    if not ws:
-        return "Error: sin contexto de workspace."
-    workspace_id = uuid.UUID(ws)
+async def get_skill_in_workspace(
+    workspace_id: uuid.UUID, name: str
+) -> Skill | None:
+    """Workspace-level lookup, used when we need to install a skill someone
+    else uploaded. No install relationship implied."""
     async with get_session() as session:
-        skill = (
+        return (
             await session.execute(
-                select(Skill)
-                .join(SkillInstall, SkillInstall.skill_id == Skill.id)
-                .where(
-                    Skill.name == name,
-                    SkillInstall.workspace_id == workspace_id,
-                    SkillInstall.enabled.is_(True),
+                select(Skill).where(
+                    Skill.workspace_id == workspace_id, Skill.name == name
                 )
             )
         ).scalar_one_or_none()
-    if skill is None:
-        return f"La skill {name!r} no está instalada en este workspace."
-    try:
-        return await r2.get_text(skill.manifest_ref + "SKILL.md")
-    except Exception as exc:  # noqa: BLE001
-        log.warning("skill_md_load_failed", name=name, error=str(exc))
-        return f"No pude cargar el SKILL.md de {name!r}: {exc}"
+
+
+async def load_skill_body_for_user(
+    user_id: uuid.UUID, name: str, *, thread_id: str | None = None
+) -> LoadedSkill:
+    """Fetch the full body for the agent's `load_skill` tool. Cross-reference
+    handling per spec: returns the list of `[[link]]` slugs the user has NOT
+    installed, plus a structured-log event per missing link so analytics can
+    tell us which bundles to surface next."""
+    swi = await get_skill_for_user(user_id, name)
+    if swi is None:
+        raise SkillNotFound(f"Skill {name!r} no instalada para este usuario.")
+    body = await storage.download_skill_body(
+        workspace_id=swi.skill.workspace_id,
+        skill_id=swi.skill.id,
+        version=swi.skill.version,
+        r2_ref=swi.skill.body_r2_ref,
+    )
+
+    links = list(swi.skill.links or [])
+    missing: list[str] = []
+    if links:
+        async with get_session() as session:
+            rows = (
+                await session.execute(
+                    select(Skill.name)
+                    .join(SkillInstall, SkillInstall.skill_id == Skill.id)
+                    .where(
+                        SkillInstall.user_id == user_id,
+                        Skill.name.in_(links),
+                    )
+                )
+            ).all()
+        installed = {r[0] for r in rows}
+        missing = [link for link in links if link not in installed]
+
+    log.info(
+        "skill_loaded",
+        user_id=str(user_id),
+        skill_id=str(swi.skill.id),
+        skill_name=swi.skill.name,
+        thread_id=thread_id,
+        size_bytes=swi.skill.size_bytes,
+        source="load_skill_tool",
+    )
+    for link in missing:
+        log.info(
+            "skill_missing_link_referenced",
+            user_id=str(user_id),
+            loaded_skill_name=swi.skill.name,
+            missing_link_name=link,
+        )
+
+    warning = None
+    if missing:
+        formatted = ", ".join(f"`{m}`" for m in missing)
+        warning = (
+            f"Esta skill referencia skills no instaladas: {formatted}. "
+            "Si las necesitás, pedile al usuario que las instale; no las "
+            "auto-cargo."
+        )
+    return LoadedSkill(
+        name=swi.skill.name,
+        description=swi.skill.description,
+        body=body,
+        links=links,
+        missing_links=missing,
+        warning=warning,
+    )

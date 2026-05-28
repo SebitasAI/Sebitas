@@ -6,7 +6,16 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    Enum,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -103,30 +112,26 @@ class Message(TimestampMixin, Base):
     user: Mapped["AppUser | None"] = relationship()
 
 
+# Postgres-side enums; reused in SkillInstall.activation_override so both sides
+# agree on the discriminator values. `create_type=False` on the column types
+# keeps Alembic from recreating the type on every metadata.create_all.
+_SkillSourceEnum = Enum("upload", "catalog", name="skill_source", create_type=False)
+_SkillActivationEnum = Enum(
+    "always_active", "on_demand", name="skill_activation", create_type=False
+)
+
+
 class Skill(Base):
-    """A skill is DATA: metadata in this row, package (SKILL.md + manifest +
-    resources) in R2 at `manifest_ref`. Never hardcoded; entered via the registry."""
+    """A skill: markdown body uploaded to a workspace. The body lives in R2 at
+    `body_r2_ref`; this row holds the metadata used for discovery (description),
+    discrimination (activation_default), tenancy (workspace_id), provenance
+    (created_by_user_id, source), and cross-reference (links).
+
+    The per-user install row (SkillInstall) sits on top: each user picks which
+    workspace skills they install and may override activation per install."""
 
     __tablename__ = "skill"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False)
-    tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    author: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    version: Mapped[str] = mapped_column(String(32), nullable=False)
-    manifest_ref: Mapped[str] = mapped_column(String(512), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
-
-
-class SkillInstall(Base):
-    """A skill installed in a workspace. (workspace_id, skill_id) unique."""
-
-    __tablename__ = "skill_install"
-    __table_args__ = (UniqueConstraint("workspace_id", "skill_id"),)
+    __table_args__ = (UniqueConstraint("workspace_id", "name", name="uq_skill_workspace_name"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -134,12 +139,56 @@ class SkillInstall(Base):
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    # Slug, kebab-case, max ~40 chars in practice. Unique per workspace.
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # One-line, <= 280 chars in practice. Used in the discovery system prompt.
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    # R2 key, NOT a URL. Looked up via app.skills.storage.download_skill_body.
+    body_r2_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    source: Mapped[str] = mapped_column(_SkillSourceEnum, nullable=False, default="upload")
+    activation_default: Mapped[str] = mapped_column(
+        _SkillActivationEnum, nullable=False, default="on_demand"
+    )
+    # Slugs extracted from `[[name]]` references in the body. Not foreign-key
+    # constrained: a body may reference a sibling skill that doesn't exist yet.
+    links: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class SkillInstall(Base):
+    """One workspace skill installed by one user. `activation_override` lets
+    a user pin a skill as always-active even if its default is on_demand (or
+    vice versa). (user_id, skill_id) UNIQUE prevents double installs."""
+
+    __tablename__ = "skill_install"
+    __table_args__ = (
+        UniqueConstraint("user_id", "skill_id", name="uq_skill_install_user_skill"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     skill_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("skill.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    version: Mapped[str] = mapped_column(String(32), nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    installed_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+    # Null = inherit `skill.activation_default`.
+    activation_override: Mapped[str | None] = mapped_column(
+        _SkillActivationEnum, nullable=True
+    )
+    installed_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(), nullable=False
+    )
 
 
 class IntegrationConnection(Base):
