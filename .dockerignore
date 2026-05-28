@@ -1,0 +1,38 @@
+# Keep build context small. Everything below stays out of the image.
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Secrets / local env (Render env vars come from Doppler integration).
+.env
+.env.*
+*.local
+
+# Git + CI metadata
+.git/
+.github/
+.gitignore
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Claude Code session state (machine-specific).
+.claude/
+
+# spaces-template build artifacts (we ship the SOURCE; CF Pages does its own build).
+spaces-template/node_modules/
+spaces-template/dist/
+spaces-template/.wrangler/
+spaces-template/convex/_generated/
+
+# Docs / repo metadata
+README.md
+*.md
