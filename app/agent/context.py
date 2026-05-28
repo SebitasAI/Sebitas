@@ -12,10 +12,18 @@ import contextvars
 workspace_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "workspace_id", default=None
 )
+# Per-user identity inside the workspace, used by per-user features (Skills:
+# install list, load_skill scoping). Resolved by the runner from slack_user_id
+# at the start of each run; None until set.
+app_user_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "app_user_id", default=None
+)
 run_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "run_id", default=None
 )
-# Compact list of installed-skill descriptions for the current workspace.
+# Pre-built system-prompt fragment with the skills the current user has
+# installed (always-active bodies + on-demand descriptions). The runner
+# computes this once per turn so the model call doesn't re-query.
 skills_context_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "skills_context", default=""
 )
@@ -33,8 +41,10 @@ def set_run_context(
     run_id: str,
     skills_context: str,
     channel_roster: str = "",
+    app_user_id: str | None = None,
 ) -> None:
     workspace_id_var.set(workspace_id)
+    app_user_id_var.set(app_user_id)
     run_id_var.set(run_id)
     skills_context_var.set(skills_context)
     channel_roster_var.set(channel_roster)

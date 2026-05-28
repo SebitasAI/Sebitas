@@ -24,6 +24,7 @@ dependencies = [
     "boto3>=1.43.16",
     "youtube-transcript-api>=1.2.4",
     "cryptography>=48.0.0",
+    "pyyaml>=6.0",
 ]
 
 # This is an application, not a library: uv manages the venv + deps but does not
@@ -31,3 +32,19 @@ dependencies = [
 # (uvicorn / `python -m` add the cwd to sys.path; alembic uses prepend_sys_path).
 [tool.uv]
 package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# DB-dependent tests are marked `integration` and skip when TEST_DATABASE_URL
+# isn't set. Unit tests (frontmatter, storage, prompt_builder logic with
+# fakes) always run.
+markers = [
+    "integration: requires a live Postgres at TEST_DATABASE_URL",
+]

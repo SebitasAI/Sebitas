@@ -29,7 +29,7 @@ from app.concurrency import (
 from app.config import get_settings
 from app.db import repository as repo
 from app.db.session import get_session
-from app.skills.registry import installed_descriptions_text
+from app.skills.prompt_builder import build_skills_context
 from app.slack import mentions as _mentions
 from app.slack import roster as _roster
 
@@ -254,7 +254,9 @@ async def _persist_user(
     text: str,
     ts: str,
     attachments: list[dict] | None = None,
-) -> uuid.UUID:
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Returns (workspace_id, app_user_id). The user id is used to scope
+    per-user features (Skills) without re-resolving it later in the run."""
     async with get_session() as session:
         workspace = await repo.upsert_workspace(session, team_id)
         user = await repo.upsert_app_user(session, workspace.id, slack_user_id)
@@ -275,7 +277,7 @@ async def _persist_user(
                 attachment_metadata=a.get("attachment_metadata"),
             )
         await session.commit()
-        return workspace.id
+        return workspace.id, user.id
 
 
 def _text_of(content: Any) -> str:
@@ -628,7 +630,7 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
         full_text = (text_prepend + "\n\n" + text) if text else text_prepend
 
     history = await _load_history(team_id, channel, conversation_key)
-    workspace_id = await _persist_user(
+    workspace_id, app_user_id = await _persist_user(
         team_id, channel, conversation_key, slack_user_id, full_text, user_ts,
         attachments=attachments_records,
     )
@@ -642,7 +644,9 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
     seed = history + [{"role": "user", "content": seed_user_content}]
 
     run_id = f"{conversation_key}:{user_ts}"
-    skills_context = await installed_descriptions_text(workspace_id)
+    # Per-user skills context (always_active bodies + on_demand descriptions,
+    # built fresh each turn so install/uninstall takes effect on the next reply).
+    skills_context = await build_skills_context(app_user_id)
     # Slack roster: ensure the workspace's user list is synced (lazy, cheap on
     # warm cache) then build a compact channel-member block for this run so the
     # agent can use real <@U...> mentions without an extra tool round-trip.
@@ -654,10 +658,12 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
     set_run_context(
         workspace_id=str(workspace_id), run_id=run_id,
         skills_context=skills_context, channel_roster=channel_roster_text,
+        app_user_id=str(app_user_id),
     )
     ctx = {
         "run_id": run_id, "seed_len": len(seed), "team_id": team_id,
         "workspace_id": str(workspace_id),
+        "app_user_id": str(app_user_id),
         "channel": channel, "conversation_key": conversation_key,
         "reply_thread_ts": reply_thread_ts, "user_ts": user_ts,
     }
@@ -685,13 +691,28 @@ async def resume_run(*, client, ctx: dict, decision: str) -> None:
         return
 
     # Restore tenancy context for the resumed portion (this is a new task).
+    # The original ctx carries `app_user_id` so the skills context is rebuilt
+    # for the same user who opened the run; if for some reason it's missing
+    # (older ctx from before this slice), skills_context degrades to "" and
+    # only the non-skill prompt is sent.
     async with get_session() as session:
         workspace = await repo.get_workspace(session, ctx["team_id"])
     if workspace is not None:
+        app_user_str = ctx.get("app_user_id")
+        skills_ctx = ""
+        if app_user_str:
+            try:
+                skills_ctx = await build_skills_context(uuid.UUID(app_user_str))
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "skills_context_rebuild_failed",
+                    error=str(exc), app_user_id=app_user_str,
+                )
         set_run_context(
             workspace_id=str(workspace.id),
             run_id=ctx["run_id"],
-            skills_context=await installed_descriptions_text(workspace.id),
+            skills_context=skills_ctx,
+            app_user_id=app_user_str,
         )
 
     with _langfuse.start_as_current_observation(

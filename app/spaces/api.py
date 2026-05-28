@@ -26,7 +26,6 @@ from app.db.session import get_session
 from app.integrations import gateway as _integrations
 from app.integrations.errors import to_user_message
 from app.integrations.provider import IntegrationError
-from app.skills.registry import installed_descriptions_text
 
 log = structlog.get_logger(__name__)
 _langfuse = get_client()
