@@ -212,7 +212,11 @@ async def _run_action_gate(inp: dict) -> bool:
 
 register(Tool(
     name="list_integrations",
-    description="List the integration apps this workspace has connected (via Pipedream).",
+    description=(
+        "List the workspace's connected integrations (apps), each with its "
+        "current status and the date it was connected. Use when the user asks "
+        "what is connected / 'qué tengo conectado' / 'mis integraciones'."
+    ),
     input_schema={"type": "object", "properties": {}, "required": []},
     handler=_list_integrations,
 ))
@@ -232,6 +236,52 @@ register(Tool(
     },
     handler=_find_actions,
 ))
+async def _disconnect_integration(app: str) -> str:
+    return await _gateway.disconnect_integration(app)
+
+
+register(Tool(
+    name="disconnect_integration",
+    description=(
+        "Disconnect an integration: deletes the connected account at the provider "
+        "(via Pipedream) and marks it as disconnected for this workspace. "
+        "Idempotent (no-op if not connected). Use when the user says "
+        "'desconectá X / quitá X / sacá la conexión de X / disconnect X'."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {"app": {"type": "string", "description": "Connected app slug"}},
+        "required": ["app"],
+    },
+    handler=_disconnect_integration,
+    risky=True,
+))
+
+
+async def _request_integration_noop(app: str) -> str:
+    # The tools node intercepts this tool (it triggers an interrupt + connect flow).
+    # This handler is a fallback safety net and should not normally be invoked.
+    return f"Solicitada la conexión de {app}; esperando confirmación."
+
+
+register(Tool(
+    name="request_integration",
+    description=(
+        "Ask the user to connect an integration app that is needed but not yet "
+        "connected in this workspace. Use this when list_integrations does not "
+        "include the app the task needs. Provide the canonical app slug (e.g. "
+        "'notion', 'google_sheets', 'gmail'). Posts a connect link in Slack and "
+        "pauses the run; it auto-resumes once the user finishes connecting."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {"app": {"type": "string", "description": "Canonical app slug"}},
+        "required": ["app"],
+    },
+    handler=_request_integration_noop,
+))
+
+
 register(Tool(
     name="run_action",
     description=(
@@ -250,4 +300,179 @@ register(Tool(
     },
     handler=_run_integration_action,
     risky_check=_run_action_gate,
+))
+
+
+# --------------------------------------------------------------------------- #
+# Spaces: live, isolated read-only dashboards backed by the integrations
+# gateway (slice 4a). Single fixed template parametrized by config; the
+# agent provides config, NEVER generates code.
+# --------------------------------------------------------------------------- #
+
+from app.spaces import gateway as _spaces
+
+
+# --------------------------------------------------------------------------- #
+# Slack mentions: roster lookup. Used by the agent when it wants to mention a
+# user but doesn't have their Slack id. Read-only, no gate.
+# --------------------------------------------------------------------------- #
+
+async def _find_slack_user(query: str) -> str:
+    from app.agent.context import workspace_id_var
+    from app.slack import roster as _roster
+    ws_str = workspace_id_var.get()
+    if not ws_str:
+        return "Error: sin contexto de workspace."
+    import uuid as _uuid
+    ws = _uuid.UUID(ws_str)
+    candidates = await _roster.find_user(ws, query)
+    candidates = [c for c in candidates if not c.get("is_bot")]
+    if not candidates:
+        return (
+            f"No encontré ningún usuario para `{query}` en este workspace. "
+            "Pedile al humano que confirme el nombre exacto o su handle de Slack."
+        )
+    if len(candidates) == 1:
+        c = candidates[0]
+        return (
+            f"Found: <@{c['slack_user_id']}> "
+            f"(display: {c.get('display_name') or '?'}, real: {c.get('real_name') or '?'}). "
+            f"Usá `<@{c['slack_user_id']}>` cuando quieras mencionarlo."
+        )
+    lines = [
+        f"• {c.get('display_name') or '?'} / {c.get('real_name') or '?'} — <@{c['slack_user_id']}>"
+        for c in candidates[:10]
+    ]
+    extra = f"\n(+{len(candidates)-10} más)" if len(candidates) > 10 else ""
+    return (
+        f"Ambiguous: {len(candidates)} matches for `{query}`. Pedile al humano "
+        f"cuál de estos quería:\n" + "\n".join(lines) + extra
+    )
+
+
+register(Tool(
+    name="find_slack_user",
+    description=(
+        "Find a Slack user in the current workspace by display name, real name, "
+        "or email. Returns the canonical Slack user id ready to use as <@U...> "
+        "for a mention. If there's ambiguity (e.g. two users named Sam), "
+        "returns the candidates so you can ask the human to disambiguate. "
+        "Call this BEFORE writing `@name` plain in a message -- Slack only "
+        "renders + notifies for the <@U...> form. Never invent a user id."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Name, partial name, or email (or its prefix) of the Slack user.",
+            },
+        },
+        "required": ["query"],
+    },
+    handler=_find_slack_user,
+))
+
+
+async def _deploy_space(name: str, data_binding: dict, access_list: list | None = None) -> str:
+    return await _spaces.deploy_space(name, data_binding, access_list or [])
+
+
+async def _list_spaces() -> str:
+    return await _spaces.list_spaces()
+
+
+async def _delete_space(space_id: str) -> str:
+    return await _spaces.delete_space(space_id)
+
+
+async def _update_space_access(space_id: str, access_list: list) -> str:
+    return await _spaces.update_space_access(space_id, access_list)
+
+
+async def _update_space_binding(space_id: str, data_binding: dict) -> str:
+    return await _spaces.update_space_binding(space_id, data_binding)
+
+
+register(Tool(
+    name="deploy_space",
+    description=(
+        "Deploy a Space: a live, isolated read-only dashboard for this "
+        "workspace, backed by the integrations gateway. `data_binding` "
+        "describes WHAT to query (must include `app` and `action_id`, "
+        "optionally `params` and `refresh_interval` in seconds). `access_list` "
+        "is the list of users authorized to view it. The Space has its own URL "
+        "and is logically isolated from other Spaces. Single fixed template; "
+        "do NOT generate code. Use list_integrations + find_actions FIRST to "
+        "pick the right app/action and discover params."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Human-friendly Space name."},
+            "data_binding": {
+                "type": "object",
+                "description": "What the Space queries via the gateway. Keys: app, action_id, params (object), refresh_interval (seconds).",
+            },
+            "access_list": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "List of {user_id|email, role} entries authorized to view the Space.",
+            },
+        },
+        "required": ["name", "data_binding"],
+    },
+    handler=_deploy_space,
+    risky=True,
+))
+
+register(Tool(
+    name="list_spaces",
+    description="List the Spaces deployed in this workspace (status, URL, access count).",
+    input_schema={"type": "object", "properties": {}, "required": []},
+    handler=_list_spaces,
+))
+
+register(Tool(
+    name="delete_space",
+    description=(
+        "Permanently delete a Space (data + URL). Idempotent: missing space is a no-op."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {"space_id": {"type": "string", "description": "Space UUID."}},
+        "required": ["space_id"],
+    },
+    handler=_delete_space,
+    risky=True,
+))
+
+register(Tool(
+    name="update_space_access",
+    description="Replace who can view a Space. Does NOT re-provision.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "space_id": {"type": "string"},
+            "access_list": {"type": "array", "items": {"type": "object"}},
+        },
+        "required": ["space_id", "access_list"],
+    },
+    handler=_update_space_access,
+    risky=True,
+))
+
+register(Tool(
+    name="update_space_binding",
+    description="Change what a Space queries (data_binding). Does NOT re-provision.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "space_id": {"type": "string"},
+            "data_binding": {"type": "object"},
+        },
+        "required": ["space_id", "data_binding"],
+    },
+    handler=_update_space_binding,
+    risky=True,
 ))

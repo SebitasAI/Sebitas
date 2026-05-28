@@ -21,6 +21,20 @@ _BASE = "https://api.pipedream.com/v1"
 _token: dict = {"value": None, "exp": 0.0}
 
 
+class PipedreamHTTPError(Exception):
+    """Raised when Pipedream Connect returns a non-2xx status. Carries the status
+    code and the raw body so the provider layer can map it to a structured
+    IntegrationError (and the gateway in turn to an actionable user message).
+
+    This module stays a low-level HTTP client; it doesn't try to classify the
+    error. Classification lives in PipedreamProvider."""
+
+    def __init__(self, status: int, body: str) -> None:
+        self.status = status
+        self.body = body or ""
+        super().__init__(f"Pipedream HTTP {status}: {self.body[:200]}")
+
+
 async def _access_token() -> str:
     now = time.time()
     if _token["value"] and _token["exp"] - 60 > now:
@@ -54,6 +68,12 @@ async def _headers() -> dict:
     }
 
 
+async def _check(resp, data) -> None:
+    if resp.status >= 400:
+        body = data if isinstance(data, str) else str(data)
+        raise PipedreamHTTPError(resp.status, body)
+
+
 async def list_accounts(external_user_id: str) -> list[dict]:
     async with aiohttp.ClientSession() as session:
         async with session.get(
@@ -62,7 +82,7 @@ async def list_accounts(external_user_id: str) -> list[dict]:
             headers=await _headers(),
         ) as resp:
             data = await resp.json()
-            resp.raise_for_status()
+            await _check(resp, data)
     return data.get("data", []) if isinstance(data, dict) else (data or [])
 
 
@@ -75,7 +95,7 @@ async def search_actions(app: str, query: str | None = None) -> list[dict]:
             f"{_project_base()}/actions", params=params, headers=await _headers()
         ) as resp:
             data = await resp.json()
-            resp.raise_for_status()
+            await _check(resp, data)
     return data.get("data", []) if isinstance(data, dict) else (data or [])
 
 
@@ -92,18 +112,47 @@ async def run_action(external_user_id: str, component_id: str, configured_props:
             f"{_project_base()}/actions/run", json=body, headers=await _headers()
         ) as resp:
             data = await resp.json()
-            if resp.status >= 400:
-                raise RuntimeError(f"Pipedream {resp.status}: {data}")
+            await _check(resp, data)
     return data
 
 
-async def create_connect_token(external_user_id: str) -> dict:
+async def delete_account(account_id: str) -> bool:
+    """Delete a connected account at Pipedream. Returns False if it didn't
+    exist (idempotent), True if it was deleted, raises on other errors."""
     async with aiohttp.ClientSession() as session:
-        async with session.post(
-            f"{_project_base()}/tokens",
-            json={"external_user_id": external_user_id},
-            headers=await _headers(),
+        async with session.delete(
+            f"{_project_base()}/accounts/{account_id}", headers=await _headers()
+        ) as resp:
+            if resp.status == 404:
+                return False
+            if resp.status >= 400:
+                body = await resp.text()
+                raise PipedreamHTTPError(resp.status, body)
+            return True
+
+
+async def get_component(component_id: str) -> dict:
+    """Component (action / source) definition, including its configurable_props.
+    Used to discover the AUTH prop name for an action (Pipedream's convention is
+    `name = "app"` with `type = "app"` and `app = <slug>`, NOT the slug itself
+    as a top-level key)."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f"{_project_base()}/components/{component_id}", headers=await _headers()
         ) as resp:
             data = await resp.json()
-            resp.raise_for_status()
+            await _check(resp, data)
+    return data.get("data") if isinstance(data, dict) and "data" in data else data
+
+
+async def create_connect_token(external_user_id: str, webhook_uri: str | None = None) -> dict:
+    body: dict = {"external_user_id": external_user_id}
+    if webhook_uri:
+        body["webhook_uri"] = webhook_uri
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{_project_base()}/tokens", json=body, headers=await _headers()
+        ) as resp:
+            data = await resp.json()
+            await _check(resp, data)
     return data

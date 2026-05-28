@@ -50,6 +50,22 @@ class Settings(BaseSettings):
     r2_secret_access_key: str | None = None
     r2_bucket: str | None = None
     artifact_url_expiry: int = 3600  # signed-URL lifetime (seconds)
+    # Slack file ingest limits. The per-file generic cap covers images / PDFs /
+    # text / audio. Video gets a separate, much larger cap because we don't
+    # send the raw video anywhere -- we extract audio (typically <10% of the
+    # original size) and then chunk that into <=25MB pieces for Whisper.
+    attachment_max_file_bytes: int = 50 * 1024 * 1024           # 50 MB
+    attachment_max_video_bytes: int = 500 * 1024 * 1024         # 500 MB
+    attachment_max_total_bytes: int = 1024 * 1024 * 1024        # 1 GB / msg
+    attachment_max_text_chars: int = 200_000
+    # Whisper hard per-call limit; used inside transcription.py to decide when
+    # to chunk. Independent of the per-file caps above.
+    attachment_max_audio_bytes: int = 25 * 1024 * 1024
+
+    # Cloudflare Workers AI (used for Whisper transcription). Token must have
+    # the Workers AI:Read scope on the account.
+    cloudflare_api_token: str | None = None
+    cloudflare_account_id: str | None = None
 
     # Pipedream Connect (credentialed integrations gateway). We never store the
     # provider credentials, only the connected-account reference per workspace.
@@ -58,6 +74,29 @@ class Settings(BaseSettings):
     pipedream_project_id: str | None = None
     pipedream_environment: str = "development"
     integration_action_timeout: int = 60
+    # Public base URL (e.g. a cloudflared tunnel) for the Pipedream connect webhook.
+    public_base_url: str | None = None
+    pipedream_webhook_secret: str | None = None
+    # Polling fallback for in-conversation connect auto-resume.
+    connect_poll_interval: int = 5
+    connect_poll_timeout: int = 180
+
+    # Spaces (slice 4B). The shared-deployment Convex backend uses these three;
+    # if any is missing the platform falls back to MockSpaceBackend at startup.
+    convex_url: str | None = None              # e.g. https://<slug>.convex.cloud
+    # Convex's standard naming -- found at dashboard.convex.dev -> Settings ->
+    # Deploy Keys. Used in `Authorization: Convex <key>` for /api/mutation calls.
+    convex_deploy_key: str | None = None
+    convex_hosting_site_url: str | None = None # public site URL of Convex Hosting (frontend)
+    internal_spaces_token: str | None = None   # shared secret with Convex refresh action
+
+    # Clerk (slice 4B-iii). Frontend uses publishable_key; Python backend uses
+    # secret_key to resolve email -> user_id at deploy time; jwt_issuer is the
+    # URL Convex Auth validates JWTs against (must also be set in the Convex
+    # dashboard env vars, not just here).
+    clerk_publishable_key: str | None = None
+    clerk_secret_key: str | None = None
+    clerk_jwt_issuer: str | None = None
 
     log_level: str = "INFO"
 

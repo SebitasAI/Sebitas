@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import operator
+import uuid
 from typing import Annotated, Any, TypedDict
 
 import structlog
@@ -20,8 +21,10 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from app.agent.claude import call_claude
+from app.agent.context import workspace_id_var
 from app.agent.tools import get_tool
 from app.config import get_settings
+from app.integrations import gateway
 
 log = structlog.get_logger(__name__)
 _langfuse = get_client()
@@ -30,6 +33,33 @@ _langfuse = get_client()
 class AgentState(TypedDict):
     messages: Annotated[list[dict], operator.add]
     iterations: int
+
+
+async def _has_recent_pending_connect(workspace_id: uuid.UUID, app: str) -> bool:
+    """Has there been a connect request for (workspace, app) recently enough
+    that a button is likely still actionable? Avoids posting a duplicate link.
+
+    Local import to keep the module load light and avoid an import cycle."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from app.db.models import IntegrationConnection
+    from app.db.session import get_session
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                select(IntegrationConnection).where(
+                    IntegrationConnection.workspace_id == workspace_id,
+                    IntegrationConnection.app == app,
+                    IntegrationConnection.status == "pending",
+                    IntegrationConnection.created_at > cutoff,
+                )
+            )
+        ).scalar_one_or_none()
+    return row is not None
 
 
 def _tool_use_blocks(message: dict) -> list[dict]:
@@ -60,6 +90,35 @@ def _route_after_agent(state: AgentState):
 
 async def _tools_node(state: AgentState) -> dict:
     tool_uses = _tool_use_blocks(state["messages"][-1])
+
+    # In-conversation connect flow: if the agent calls request_integration,
+    # handle it FIRST. Idempotency: if already connected, return a tool_result
+    # nudging it to retry. Otherwise interrupt + checkpoint; the runner will
+    # post the connect button and start the polling fallback. On resume (from
+    # webhook or poll), interrupt() returns and we yield the "connected" result.
+    connect_calls = [tu for tu in tool_uses if tu["name"] == "request_integration"]
+    if connect_calls:
+        tu = connect_calls[0]
+        app = (tu.get("input") or {}).get("app", "")
+        ws_str = workspace_id_var.get()
+        ws_uuid = uuid.UUID(ws_str) if ws_str else None
+        if ws_uuid and app and await gateway.is_connected(ws_uuid, app):
+            content = f"La integración {app!r} ya está conectada en este workspace. Reintentá la action."
+        elif ws_uuid and app and await _has_recent_pending_connect(ws_uuid, app):
+            # Idempotency: a pending connect already has a button posted; don't
+            # duplicate it. The user should complete that one (or wait for it
+            # to time out). The runner won't post another link.
+            content = (
+                f"Ya hay una solicitud de conexión abierta para {app!r}. "
+                "El usuario tiene que completarla (o esperar a que expire) "
+                "antes de reintentar."
+            )
+        else:
+            interrupt({"type": "connect", "app": app})
+            content = f"Integración {app!r} conectada. Reintentá la action."
+        return {"messages": [{"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tu["id"], "content": content}
+        ]}]}
 
     # Per-call risk: a tool may decide riskiness dynamically (risky_check) — e.g.
     # run_action gating writes/ambiguous actions — otherwise its static `risky`.

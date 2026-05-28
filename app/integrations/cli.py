@@ -18,7 +18,7 @@ from sqlalchemy import select
 
 from app.db.models import IntegrationConnection, Workspace
 from app.db.session import get_session
-from app.integrations import pipedream
+from app.integrations.pipedream_provider import get_provider
 
 
 async def _resolve_workspace(team_id: str):
@@ -34,7 +34,7 @@ async def _resolve_workspace(team_id: str):
 
 async def do_connect(app: str, team: str) -> None:
     ws = await _resolve_workspace(team)
-    data = await pipedream.create_connect_token(str(ws))
+    data = await get_provider().create_connect_link(str(ws))
     url = data.get("connect_link_url")
     if url and app:
         url = url + ("&" if "?" in url else "?") + f"app={app}"
@@ -45,7 +45,7 @@ async def do_connect(app: str, team: str) -> None:
 
 async def do_sync(team: str) -> None:
     ws = await _resolve_workspace(team)
-    accounts = await pipedream.list_accounts(str(ws))
+    accounts = await get_provider().list_accounts(str(ws))
     count = 0
     async with get_session() as session:
         for acc in accounts:
@@ -63,9 +63,9 @@ async def do_sync(team: str) -> None:
             ).scalar_one_or_none()
             if existing:
                 existing.pipedream_account_id = acc_id
-                existing.status = "active"
+                existing.status = "connected"
             else:
-                session.add(IntegrationConnection(workspace_id=ws, app=app, pipedream_account_id=acc_id, status="active"))
+                session.add(IntegrationConnection(workspace_id=ws, app=app, pipedream_account_id=acc_id, status="connected"))
             count += 1
         await session.commit()
     print(f"Sincronizadas {count} cuenta(s) para workspace {ws}")

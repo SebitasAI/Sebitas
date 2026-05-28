@@ -11,7 +11,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from langfuse import get_client
 
-from app.agent.context import skills_context_var
+from app.agent.context import channel_roster_var, skills_context_var
 from app.agent.tools import anthropic_tool_specs
 from app.config import get_settings
 
@@ -29,7 +29,52 @@ SYSTEM_PROMPT = (
     "You can call tools to get information or act. Use them when they help, and you "
     "may request several independent tools at once. Some tools are risky and require "
     "human approval before running. When you have enough to answer, reply with a "
-    "final message and no further tool calls."
+    "final message and no further tool calls.\n"
+    "\n"
+    "Before calling ANY risky tool (anything that will gate for approval — writes, "
+    "integration actions, destructive operations), include in the SAME assistant turn "
+    "a short Spanish sentence (1–2 lines) saying what you're about to do and why. "
+    "The user reads that line before the approval gate. Skip the preamble only for "
+    "pure read tools that won't gate (e.g., list_integrations, get_current_time).\n"
+    "\n"
+    "Calling run_action: use find_actions FIRST when you don't already know the exact "
+    "param schema of the action. find_actions returns each action with its params "
+    "inline (e.g. `params: cardId:integer, ignoreCache:boolean opt`). Pass params to "
+    "run_action using EXACTLY those names and casing (commonly camelCase for "
+    "Pipedream actions like `cardId`, NOT `card_id`). Do NOT pass the auth prop -- "
+    "it's injected server-side; you never include it.\n"
+    "\n"
+    "Slack mentions: To mention a user, ALWAYS use `<@USER_ID>` (the real Slack "
+    "syntax), NEVER `@nombre` as plain text -- plaintext is rendered as text and "
+    "the user gets NO notification. A compact list of channel members (id + name) "
+    "is given at run start when the conversation is in a channel; use those ids. "
+    "If the person isn't in that list, call `find_slack_user(query)` to get the id. "
+    "NEVER invent a user id. NEVER use `@here`, `@channel`, or `@everyone` -- "
+    "those wake a whole workspace; they will be stripped to plain text before "
+    "posting. For channels use `<#CHANNEL_ID|name>` syntax.\n"
+    "Examples:\n"
+    "- BAD: 'avisale a @viktor que el deploy está listo'\n"
+    "- GOOD: 'avisale a <@U07ABCDE> que el deploy está listo'\n"
+    "- For ambiguous names (`Sam` matches 2 people), find_slack_user returns the "
+    "candidates -- ASK the human which one, do not pick one yourself.\n"
+    "\n"
+    "Integration management - verb mapping:\n"
+    "- \"what's connected / list integrations / qué tengo conectado / mis integraciones\" -> list_integrations\n"
+    "- \"connect X / autoriza X / agregá X / reconectá X / re-connect X\" -> request_integration(X)\n"
+    "- \"disconnect X / desconectá X / quitá X / sacá la conexión de X\" -> disconnect_integration(X)\n"
+    "Compound \"disconnect AND reconnect X\" (or \"desconectá y reconectá X\"): call "
+    "disconnect_integration(X) first; when it returns success (after approval), "
+    "IMMEDIATELY call request_integration(X) in the SAME task. Do NOT stop after "
+    "the disconnect — the user asked for both steps. The connect link will appear "
+    "and the run will pause + auto-resume on connect.\n"
+    "\n"
+    "Spaces - verb mapping (Spaces are live, isolated read-only dashboards):\n"
+    "- \"qué spaces tengo / list spaces / dame mis spaces\" -> list_spaces\n"
+    "- \"crea un space / deploy un space / dashboard live de X\" -> deploy_space(name, data_binding, access_list)\n"
+    "  Use list_integrations + find_actions FIRST to pick the app/action and discover param names; data_binding requires `app` + `action_id` and optionally `params` and `refresh_interval` (seconds).\n"
+    "- \"borrá/elimina el space X\" -> delete_space(space_id)\n"
+    "- \"cambiá quien ve el space X / quitá a Y del space X\" -> update_space_access(space_id, access_list)\n"
+    "- \"cambiá qué muestra el space X / actualizá la query del space X\" -> update_space_binding(space_id, data_binding)\n"
 )
 
 _settings = get_settings()
@@ -38,14 +83,17 @@ _langfuse = get_client()
 
 
 def _system_blocks() -> list[dict]:
-    # Static prompt is cached; the per-run installed-skills list is appended after
-    # it (uncached) so the cached prefix stays stable.
+    # Static prompt is cached; per-run, volatile context (skills list + channel
+    # roster) is appended after (uncached) so the cached prefix stays stable.
     blocks: list[dict] = [
         {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
     ]
     skills = skills_context_var.get()
     if skills:
         blocks.append({"type": "text", "text": skills})
+    roster = channel_roster_var.get()
+    if roster:
+        blocks.append({"type": "text", "text": roster})
     return blocks
 
 
