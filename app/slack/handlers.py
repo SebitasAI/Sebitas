@@ -204,3 +204,12 @@ def register_handlers(app: AsyncApp) -> None:
     async def on_deny(ack, body, client):  # noqa: ANN001
         await ack()
         _spawn(_decide(client, body, "deny"))
+
+    # --- No-op handlers for URL-style buttons. Slack fires block_actions on
+    # every URL button click (for tracking) even though the link is handled
+    # client-side. Without a handler Bolt logs "Unhandled request" for each
+    # such click. We just ack and do nothing.
+
+    @app.action("connect_url_button")
+    async def on_connect_url_click(ack):  # noqa: ANN001
+        await ack()

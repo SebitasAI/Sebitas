@@ -70,8 +70,16 @@ async def start_connect(client, ctx: dict, app: str) -> None:
     blocks = [{"type": "section", "text": {"type": "mrkdwn",
         "text": f":electric_plug: Para continuar necesito acceso a *{app}*. Conectalo acá y sigo solo:"}}]
     if url:
+        # Explicit action_id so Bolt has a known handler for the click event
+        # (URL buttons fire a block_actions to Slack on click even though
+        # the navigation is client-side; without a handler Bolt logs
+        # "Unhandled request" for every connect button click).
         blocks.append({"type": "actions", "elements": [
-            {"type": "button", "text": {"type": "plain_text", "text": f"Conectar {app}"}, "style": "primary", "url": url}
+            {"type": "button",
+             "text": {"type": "plain_text", "text": f"Conectar {app}"},
+             "style": "primary",
+             "url": url,
+             "action_id": "connect_url_button"}
         ]})
     resp = await client.chat_postMessage(
         channel=ctx["channel"], thread_ts=ctx.get("reply_thread_ts"),
