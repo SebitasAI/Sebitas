@@ -179,17 +179,75 @@ async def _persist_run_messages(team_id: str, channel: str, conversation_key: st
 # Slack output
 # --------------------------------------------------------------------------- #
 
+def _fmt_params(params: dict, limit: int = 80) -> str:
+    """Render tool input params as a short human-friendly suffix. Skips empty
+    values; truncates long values; never echoes raw JSON to the user."""
+    if not isinstance(params, dict) or not params:
+        return ""
+    parts = []
+    for k, v in params.items():
+        s = "" if v is None else str(v)
+        if len(s) > limit:
+            s = s[:limit].rstrip() + "…"
+        parts.append(f"`{k}`=`{s}`" if s else f"`{k}`")
+    return " · " + ", ".join(parts) if parts else ""
+
+
+def _render_tool_call(t: dict) -> str:
+    """One bullet line per pending risky tool call. Per-tool rendering so the
+    user sees what's about to happen in plain language, not raw JSON."""
+    name = t.get("name") or "?"
+    inp = t.get("input") if isinstance(t.get("input"), dict) else {}
+    if name == "run_action":
+        app = inp.get("app", "?")
+        action = inp.get("action_id", "?")
+        return f"• Ejecutar `{action}` en *{app}*{_fmt_params(inp.get('params') or {})}"
+    if name == "disconnect_integration":
+        return f"• Desconectar *{inp.get('app', '?')}*"
+    if name == "simulate_destructive_action":
+        return f"• (demo) acción destructiva sobre `{inp.get('target', '?')}`"
+    return f"• `{name}`{_fmt_params(inp)}"
+
+
+async def _post_preamble_before_gate(client, ctx: dict, result: dict) -> None:
+    """If the model emitted text alongside the risky tool_use blocks, post it
+    as a normal message before the approval gate so the user has context
+    ("voy a hacer X y para qué") before they decide. Best-effort: no preamble
+    text -> silent no-op."""
+    messages = result.get("messages", [])
+    last_assistant = next(
+        (m for m in reversed(messages) if m.get("role") == "assistant"), None
+    )
+    if not last_assistant:
+        return
+    text = _text_of(last_assistant.get("content")).strip()
+    if not text:
+        return
+    try:
+        await client.chat_postMessage(
+            channel=ctx["channel"], thread_ts=ctx.get("reply_thread_ts"), text=text,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("preamble_post_failed", error=str(exc))
+
+
 async def _post_approval(client, ctx: dict, payload: dict) -> None:
     tools = payload.get("tools", [])
-    lines = "\n".join(f"• `{t['name']}` con `{json.dumps(t['input'], ensure_ascii=False)}`" for t in tools)
+    lines = "\n".join(_render_tool_call(t) for t in tools)
+    n = len(tools)
+    header = (
+        "*Aprobación requerida.* Sebitas quiere ejecutar:"
+        if n == 1
+        else f"*Aprobación requerida.* Sebitas quiere ejecutar {n} acciones:"
+    )
     value = json.dumps(ctx)
     await client.chat_postMessage(
         channel=ctx["channel"],
         thread_ts=ctx.get("reply_thread_ts"),
-        text="Aprobación requerida para una acción riesgosa.",
+        text="Aprobación requerida.",
         blocks=[
             {"type": "section", "text": {"type": "mrkdwn",
-                "text": f":warning: *Sebitas quiere ejecutar una acción riesgosa:*\n{lines}"}},
+                "text": f":warning: {header}\n{lines}"}},
             {"type": "actions", "elements": [
                 {"type": "button", "text": {"type": "plain_text", "text": "Aprobar"},
                  "style": "primary", "action_id": "agent_approve", "value": value},
@@ -209,6 +267,10 @@ async def _drive(client, ctx: dict, result: dict) -> None:
             from app.integrations import connect  # lazy: avoid import cycle
             await connect.start_connect(client, ctx, payload.get("app", ""))
         else:
+            # Surface any preamble text the model emitted alongside the risky
+            # tool call so the user sees "what and why" before the gate (the
+            # system prompt asks for this; also resilient if the model skips).
+            await _post_preamble_before_gate(client, ctx, result)
             await _post_approval(client, ctx, payload)
         return  # state is checkpointed; resumes on the button click
 
