@@ -7,7 +7,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import AppUser, Message, Thread, Workspace
+from app.db.models import AppUser, Message, MessageAttachment, Thread, Workspace
 
 
 async def upsert_workspace(
@@ -91,6 +91,47 @@ async def add_message(
     session.add(message)
     await session.flush()
     return message
+
+
+async def add_attachment(
+    session: AsyncSession,
+    message_id: uuid.UUID,
+    *,
+    slack_file_id: str,
+    mime_type: str,
+    r2_ref: str,
+    original_name: str | None = None,
+    size_bytes: int | None = None,
+) -> "MessageAttachment":
+    attachment = MessageAttachment(
+        message_id=message_id,
+        slack_file_id=slack_file_id,
+        mime_type=mime_type,
+        r2_ref=r2_ref,
+        original_name=original_name,
+        size_bytes=size_bytes,
+    )
+    session.add(attachment)
+    await session.flush()
+    return attachment
+
+
+async def get_attachments_for_messages(
+    session: AsyncSession, message_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list["MessageAttachment"]]:
+    """Returns a dict {message_id: [MessageAttachment...]} for all attachments
+    of the given messages, in stable order. Single query."""
+    if not message_ids:
+        return {}
+    result = await session.execute(
+        select(MessageAttachment)
+        .where(MessageAttachment.message_id.in_(message_ids))
+        .order_by(MessageAttachment.created_at)
+    )
+    by_msg: dict[uuid.UUID, list[MessageAttachment]] = {mid: [] for mid in message_ids}
+    for row in result.scalars().all():
+        by_msg.setdefault(row.message_id, []).append(row)
+    return by_msg
 
 
 async def get_workspace(session: AsyncSession, slack_team_id: str) -> Workspace | None:
