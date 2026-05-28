@@ -12,6 +12,12 @@ import structlog
 from slack_bolt.app.async_app import AsyncApp
 
 from app.agent.runner import resume_run, run_agent
+from app.concurrency import (
+    drain_inbox,
+    enqueue_message,
+    mark_event_seen,
+    try_acquire_thread_lock,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -39,6 +45,64 @@ def _clean(text: str) -> str:
     return _MENTION_RE.sub("", text or "").strip()
 
 
+def _coalesce(queued: list[dict], current: dict) -> dict:
+    """Merge queued payloads + the current trigger into a single run_agent
+    invocation. Texts joined oldest-first with `\\n---\\n` so the model can
+    see distinct user turns; files are unioned. `user_ts` stays the current
+    (latest) so the reaction / reply lands on the most recent message."""
+    if not queued:
+        return current
+    texts = [q.get("user_text") or "" for q in queued] + [current.get("user_text") or ""]
+    files: list[dict] = []
+    for q in queued:
+        qf = q.get("files")
+        if qf:
+            files.extend(qf)
+    cf = current.get("files")
+    if cf:
+        files.extend(cf)
+    out = dict(current)
+    out["user_text"] = "\n---\n".join(t for t in texts if t)
+    out["files"] = files or None
+    return out
+
+
+async def _route_message(
+    *,
+    client,
+    team_id: str | None,
+    event_id: str | None,
+    conv_key: str,
+    payload: dict,
+) -> None:
+    """The common entry path: dedupe by event_id, try the per-thread mutex,
+    and either spawn the agent (draining queued items first) or enqueue this
+    message for the active holder to coalesce later."""
+    if event_id and not await mark_event_seen(event_id):
+        log.info("slack_event_duplicate", event_id=event_id)
+        return
+    if not team_id:
+        return
+
+    handle = await try_acquire_thread_lock(team_id, conv_key)
+    if handle is None:
+        await enqueue_message(team_id, conv_key, payload)
+        log.info("message_queued", team_id=team_id, conv_key=conv_key)
+        return
+
+    queued = await drain_inbox(team_id, conv_key)
+    coalesced = _coalesce(queued, payload)
+    _spawn(
+        run_agent(
+            client=client,
+            team_id=team_id,
+            conversation_key=conv_key,
+            lock_handle=handle,
+            **coalesced,
+        )
+    )
+
+
 async def _decide(client, body: dict, decision: str) -> None:
     """Replace the approval message (removing the buttons so it can't be clicked
     again), then resume the paused run."""
@@ -62,22 +126,29 @@ def register_handlers(app: AsyncApp) -> None:
     async def on_mention(event, body, say, client):  # noqa: ANN001
         ts = event["ts"]
         key = event.get("thread_ts") or ts
-        _spawn(
-            run_agent(
-                client=client,
-                team_id=body.get("team_id") or event.get("team"),
+        await _route_message(
+            client=client,
+            team_id=body.get("team_id") or event.get("team"),
+            event_id=body.get("event_id"),
+            conv_key=key,
+            payload=dict(
                 slack_user_id=event.get("user"),
                 channel=event["channel"],
                 user_text=_clean(event.get("text", "")),
                 user_ts=ts,
-                conversation_key=key,
                 reply_thread_ts=key,
-            )
+                files=event.get("files"),
+            ),
         )
 
     @app.event("message")
     async def on_message(event, body, say, client, context):  # noqa: ANN001
-        if event.get("subtype") or event.get("bot_id"):
+        # Skip bots and Slack's bookkeeping subtypes, but allow file_share — that's
+        # how the API delivers a user message with attachments.
+        if event.get("bot_id"):
+            return
+        sub = event.get("subtype")
+        if sub and sub != "file_share":
             return
         text = event.get("text", "")
         bot_user_id = context.get("bot_user_id")
@@ -88,35 +159,38 @@ def register_handlers(app: AsyncApp) -> None:
         channel = event["channel"]
         ts = event["ts"]
         thread_ts = event.get("thread_ts")
-        common = dict(
-            client=client,
-            team_id=body.get("team_id") or event.get("team"),
+        team_id = body.get("team_id") or event.get("team")
+        event_id = body.get("event_id")
+        base_payload = dict(
             slack_user_id=event.get("user"),
             channel=channel,
             user_text=_clean(text),
             user_ts=ts,
+            files=event.get("files"),
         )
 
         # DMs and group DMs: respond to every message (flat conversation keyed by
         # channel; reply inline unless already inside a thread).
         if channel_type in ("im", "mpim"):
             if thread_ts:
-                _spawn(run_agent(**common, conversation_key=thread_ts, reply_thread_ts=thread_ts))
+                await _route_message(
+                    client=client, team_id=team_id, event_id=event_id, conv_key=thread_ts,
+                    payload={**base_payload, "reply_thread_ts": thread_ts},
+                )
             else:
-                _spawn(run_agent(**common, conversation_key=channel, reply_thread_ts=None))
+                await _route_message(
+                    client=client, team_id=team_id, event_id=event_id, conv_key=channel,
+                    payload={**base_payload, "reply_thread_ts": None},
+                )
             return
 
         # Channels: only continue a thread Sebitas already started.
         if channel_type in ("channel", "group"):
             if not thread_ts:
                 return
-            _spawn(
-                run_agent(
-                    **common,
-                    conversation_key=thread_ts,
-                    reply_thread_ts=thread_ts,
-                    require_existing_thread=True,
-                )
+            await _route_message(
+                client=client, team_id=team_id, event_id=event_id, conv_key=thread_ts,
+                payload={**base_payload, "reply_thread_ts": thread_ts, "require_existing_thread": True},
             )
 
     # --- Approval gate buttons (human-in-the-loop) ---

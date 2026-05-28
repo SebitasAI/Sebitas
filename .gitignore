@@ -19,3 +19,12 @@ __pycache__/
 
 # OS
 .DS_Store
+spaces-template/.env.local
+
+# spaces-template build / install / runtime artifacts. node_modules is 369 MB;
+# dist/ is the Vite output (regenerated on build); .wrangler/ is local CF state;
+# convex/_generated/ is regenerated on `convex dev` / `convex deploy`.
+spaces-template/node_modules/
+spaces-template/dist/
+spaces-template/.wrangler/
+spaces-template/convex/_generated/

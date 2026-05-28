@@ -19,9 +19,22 @@ run_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 skills_context_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "skills_context", default=""
 )
+# Compact list of channel members for the current run (id + display name),
+# fed into Claude as an uncached system block so the model can mention without
+# a tool round-trip. Empty when the run is in a DM or roster sync failed.
+channel_roster_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "channel_roster", default=""
+)
 
 
-def set_run_context(*, workspace_id: str, run_id: str, skills_context: str) -> None:
+def set_run_context(
+    *,
+    workspace_id: str,
+    run_id: str,
+    skills_context: str,
+    channel_roster: str = "",
+) -> None:
     workspace_id_var.set(workspace_id)
     run_id_var.set(run_id)
     skills_context_var.set(skills_context)
+    channel_roster_var.set(channel_roster)

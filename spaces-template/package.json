@@ -1,0 +1,33 @@
+{
+  "name": "sebitas-spaces-template",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Fixed template for Sebitas Spaces (live read-only dashboards). Parametrized by config (data_binding + access_list) per-space-id. Single shared Convex deployment, multi-tenant by space_id.",
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:frontend dev:backend",
+    "dev:backend": "convex dev",
+    "dev:frontend": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "convex deploy && vite build",
+    "test": "convex-test"
+  },
+  "dependencies": {
+    "@clerk/clerk-react": "^5.61.8",
+    "convex": "^1.17.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "convex-test": "^0.0.34",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.0",
+    "vitest": "^2.1.6",
+    "wrangler": "^4.95.0"
+  }
+}

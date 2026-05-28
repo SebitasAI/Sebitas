@@ -22,6 +22,7 @@ dependencies = [
     "litellm>=1.86.2",
     "e2b-code-interpreter>=2.7.0",
     "boto3>=1.43.16",
+    "youtube-transcript-api>=1.2.4",
 ]
 
 # This is an application, not a library: uv manages the venv + deps but does not
