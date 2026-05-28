@@ -420,11 +420,86 @@ def _render_tool_call(t: dict) -> str:
     return f"• {pretty}{_humanize_params(inp)}"
 
 
+# Module-level cache of the last preamble we posted, keyed by run_id. The
+# model occasionally re-states the same plan after a resume; we silence the
+# duplicate so the thread doesn't show the same paragraph twice. Process-local;
+# resets on restart, which is fine.
+_last_preamble_by_run: dict[str, str] = {}
+
+
+# Heartbeat: kicks in after the agent has been working for HEARTBEAT_FIRST_S
+# without producing user-visible output, then updates every HEARTBEAT_TICK_S.
+# Updates the SAME message in place (chat_update) instead of spamming new
+# posts, and deletes it on completion. Run via asyncio task; cancelled when
+# the graph returns (interrupt OR final).
+HEARTBEAT_FIRST_S = 30
+HEARTBEAT_TICK_S = 60
+
+
+async def _heartbeat(client, *, channel: str, thread_ts: str | None) -> None:
+    """Tell the user we're still working when the graph runs long. No-op if
+    Slack rejects the post; the worst case is silence (the original UX)."""
+    msg_ts: str | None = None
+    elapsed = 0
+    try:
+        await asyncio.sleep(HEARTBEAT_FIRST_S)
+        elapsed = HEARTBEAT_FIRST_S
+        while True:
+            minutes = max(1, elapsed // 60)
+            text = (
+                f":hourglass_flowing_sand: Sigo trabajando ({minutes} min). "
+                "Si tarda mucho más, escribime para cortar."
+            )
+            try:
+                if msg_ts is None:
+                    resp = await client.chat_postMessage(
+                        channel=channel, thread_ts=thread_ts, text=text,
+                    )
+                    msg_ts = resp.get("ts") if isinstance(resp, dict) else resp["ts"]
+                else:
+                    await client.chat_update(
+                        channel=channel, ts=msg_ts, text=text,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("heartbeat_post_failed", error=str(exc)[:200])
+            await asyncio.sleep(HEARTBEAT_TICK_S)
+            elapsed += HEARTBEAT_TICK_S
+    except asyncio.CancelledError:
+        # Best-effort delete so the heartbeat doesn't clutter the thread once
+        # the real reply lands. Swallow failures (message gone, scope missing,
+        # etc.); we don't want cleanup errors masking the real outcome.
+        if msg_ts is not None:
+            try:
+                await client.chat_delete(channel=channel, ts=msg_ts)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("heartbeat_delete_failed", error=str(exc)[:200])
+        raise
+
+
+async def _post_user_facing_error(client, ctx: dict, exc: BaseException) -> None:
+    """Post a short, friendly message when the agent loop crashes. The full
+    error is in structlog (`agent_invoke_failed`); the user just needs to know
+    Sebitas died so they don't sit waiting forever."""
+    try:
+        await client.chat_postMessage(
+            channel=ctx["channel"],
+            thread_ts=ctx.get("reply_thread_ts"),
+            text=(
+                ":warning: Algo me tropezó internamente y no pude terminar la tarea. "
+                "Pedímela de nuevo o reformulá; ya queda en los logs para revisarlo."
+            ),
+        )
+    except Exception as post_exc:  # noqa: BLE001
+        log.warning("user_facing_error_post_failed", error=str(post_exc)[:200])
+    log.error("agent_invoke_failed", error=str(exc)[:500], run_id=ctx.get("run_id"))
+
+
 async def _post_preamble_before_gate(client, ctx: dict, result: dict) -> None:
     """If the model emitted text alongside the risky tool_use blocks, post it
     as a normal message before the approval gate so the user has context
     ("voy a hacer X y para qué") before they decide. Best-effort: no preamble
-    text -> silent no-op."""
+    text -> silent no-op. Duplicates of the previous preamble in the same
+    run are skipped so the thread doesn't repeat the same paragraph."""
     messages = result.get("messages", [])
     last_assistant = next(
         (m for m in reversed(messages) if m.get("role") == "assistant"), None
@@ -434,6 +509,14 @@ async def _post_preamble_before_gate(client, ctx: dict, result: dict) -> None:
     text = _text_of(last_assistant.get("content")).strip()
     if not text:
         return
+    run_id = ctx.get("run_id") or ""
+    # Compare normalised (strip + lower) so trivial whitespace / case
+    # differences still dedupe; a real follow-up plan will differ in content.
+    norm = text.strip().lower()
+    if _last_preamble_by_run.get(run_id) == norm:
+        log.info("preamble_dedup_skipped", run_id=run_id, len=len(text))
+        return
+    _last_preamble_by_run[run_id] = norm
     rendered = await _render_outbound(text, ctx)
     try:
         await client.chat_postMessage(
@@ -746,7 +829,22 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
         session_id=f"{team_id}:{channel}:{conversation_key}",
         user_id=slack_user_id, tags=["slack", "agent"], metadata={"tenant": team_id},
     ):
-        result = await get_graph().ainvoke({"messages": seed, "iterations": 0}, config)
+        hb_task = asyncio.create_task(_heartbeat(
+            client, channel=channel, thread_ts=reply_thread_ts or user_ts,
+        ))
+        try:
+            result = await get_graph().ainvoke(
+                {"messages": seed, "iterations": 0}, config,
+            )
+        except Exception as exc:
+            await _post_user_facing_error(client, ctx, exc)
+            return
+        finally:
+            hb_task.cancel()
+            try:
+                await hb_task
+            except asyncio.CancelledError:
+                pass
         await _drive(client, ctx, result, lock_handle=lock_handle)
 
 
@@ -791,7 +889,20 @@ async def resume_run(*, client, ctx: dict, decision: str) -> None:
         session_id=f"{ctx['team_id']}:{ctx['channel']}:{ctx['conversation_key']}",
         tags=["slack", "agent", "resume"], metadata={"tenant": ctx["team_id"]},
     ):
-        result = await get_graph().ainvoke(Command(resume=decision), config)
+        hb_task = asyncio.create_task(_heartbeat(
+            client, channel=ctx["channel"], thread_ts=ctx.get("reply_thread_ts"),
+        ))
+        try:
+            result = await get_graph().ainvoke(Command(resume=decision), config)
+        except Exception as exc:
+            await _post_user_facing_error(client, ctx, exc)
+            return
+        finally:
+            hb_task.cancel()
+            try:
+                await hb_task
+            except asyncio.CancelledError:
+                pass
         await _drive(client, ctx, result)
 
 
