@@ -32,6 +32,14 @@ class Workspace(TimestampMixin, Base):
     )
     slack_team_id: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Per-tenant Slack install (slice multi-workspace). bot_token is Fernet-
+    # encrypted at rest -- decrypt only via app.slack.crypto. Null until the
+    # workspace is actually installed (e.g. a workspace row was created from
+    # a message event before install completed; should be rare).
+    bot_token: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    bot_user_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    bot_scopes: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    installed_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     users: Mapped[list["AppUser"]] = relationship(back_populates="workspace")
     threads: Mapped[list["Thread"]] = relationship(back_populates="workspace")

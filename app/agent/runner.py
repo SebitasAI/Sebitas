@@ -571,7 +571,13 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
             log.warning("status_post_failed", error=str(exc))
         from app.slack import files as sf
         try:
-            result_files = await sf.process_files(str(workspace_id_pre), files, settings.slack_bot_token)
+            # Resolve the per-workspace bot token. If the workspace isn't
+            # installed (shouldn't happen if we got an event from there), the
+            # file download will 401 and we'll surface that as "unsupported".
+            from app.slack.tokens import get_bot_token_by_workspace
+            _ws_pair = await get_bot_token_by_workspace(workspace_id_pre)
+            _bot_token = _ws_pair[0] if _ws_pair else ""
+            result_files = await sf.process_files(str(workspace_id_pre), files, _bot_token)
         except Exception as exc:  # noqa: BLE001
             log.warning("process_files_failed", error=str(exc))
             result_files = {
@@ -701,9 +707,16 @@ async def resume_run(*, client, ctx: dict, decision: str) -> None:
 async def resume_after_connect(ctx: dict) -> None:
     """Resume a run paused waiting for an integration connection. Called by the
     webhook + polling fallback, which don't have a request-bound Slack `client`
-    — build one from the bot token. Idempotent via resume_run's snapshot guard."""
-    from app.config import get_settings  # local to avoid module-load side effects
+    — build one from the workspace's bot token. Idempotent via resume_run's
+    snapshot guard."""
     from slack_sdk.web.async_client import AsyncWebClient
 
-    client = AsyncWebClient(token=get_settings().slack_bot_token)
+    # Resolve per-workspace bot token from the ctx. Without it we can't post
+    # back to that Slack workspace -- log + bail rather than crash.
+    from app.slack.tokens import get_bot_token_by_workspace
+    ws_pair = await get_bot_token_by_workspace(uuid.UUID(ctx["workspace_id"]))
+    if not ws_pair:
+        log.warning("resume_after_connect_no_token", workspace_id=ctx.get("workspace_id"))
+        return
+    client = AsyncWebClient(token=ws_pair[0])
     await resume_run(client=client, ctx=ctx, decision="connected")
