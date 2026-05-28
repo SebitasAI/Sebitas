@@ -54,6 +54,21 @@ SYSTEM_PROMPT = (
     "metric query, asking the user to paste the data). Saying \"I don't have an "
     "action for X\" without having checked is a hallucination -- avoid it.\n"
     "\n"
+    "Web access (Anthropic-hosted tools):\n"
+    "- `web_search` — search the public web. Use when the user asks about "
+    "current events, recent news, today's data, or anything that requires "
+    "live knowledge beyond your training cutoff. Each search costs money "
+    "(~$0.01); don't search for things you already know, but do search "
+    "whenever recency or factual accuracy matters.\n"
+    "- `web_fetch` — read the full content of a specific URL. Use when the "
+    "user pastes a link and asks you to read, summarize, or extract info "
+    "from it. Also use to follow up on a web_search result (search first, "
+    "then fetch the most relevant link). You can only fetch URLs that have "
+    "appeared in the conversation (user-provided or from a previous search "
+    "result); you cannot fetch URLs you invent. Citations are enabled.\n"
+    "Both tools execute server-side at Anthropic; results come back inline "
+    "and you can reason over them in the same turn.\n"
+    "\n"
     "Slack mentions: To mention a user, ALWAYS use `<@USER_ID>` (the real Slack "
     "syntax), NEVER `@nombre` as plain text -- plaintext is rendered as text and "
     "the user gets NO notification. A compact list of channel members (id + name) "
@@ -114,6 +129,42 @@ def _system_blocks() -> list[dict]:
     return blocks
 
 
+def _server_side_tools() -> list[dict]:
+    """Anthropic-hosted tools, declared alongside our custom tools. Anthropic
+    executes them server-side and returns results inline -- no `handler`,
+    no Pipedream, no E2B in the loop.
+
+    - `web_search`: search the public web. Required for "what's happening
+      with X" queries. Costs $10 / 1000 searches at the API; cap with
+      max_uses so a single message can't burn through the budget.
+    - `web_fetch`: read the full content of a URL the user (or a prior
+      web_search result) provided. Free above standard token cost. Capped
+      via max_content_tokens to avoid pulling 500KB PDFs into context.
+
+    Both basic versions (no dynamic filtering); the `*_20260209` variants
+    require the code_execution tool, which conflicts with our E2B sandbox."""
+    return [
+        {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 5,
+        },
+        {
+            "type": "web_fetch_20250910",
+            "name": "web_fetch",
+            "max_uses": 5,
+            "citations": {"enabled": True},
+            "max_content_tokens": 100_000,
+        },
+    ]
+
+
+def _all_tools() -> list[dict]:
+    """Custom tools + Anthropic server-side tools, in one list, ready for
+    `client.messages.create(tools=...)`."""
+    return anthropic_tool_specs() + _server_side_tools()
+
+
 async def call_claude(messages: list[dict]) -> Any:
     """One Opus turn with tools. Returns the raw Anthropic response so the caller
     can read text + tool_use blocks (and preserve thinking blocks across turns)."""
@@ -130,7 +181,7 @@ async def call_claude(messages: list[dict]) -> Any:
             thinking={"type": "adaptive"},
             output_config={"effort": settings.claude_effort},
             system=_system_blocks(),
-            tools=anthropic_tool_specs(),
+            tools=_all_tools(),
             messages=messages,
         )
         text = "".join(b.text for b in response.content if b.type == "text").strip()
