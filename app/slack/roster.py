@@ -184,7 +184,9 @@ async def get_channel_members(
 
     if row is None or not row.members:
         return []
-    # Hydrate display_name / real_name from slack_user, excluding bots + deleted.
+    # Hydrate display_name / real_name from slack_user. We INCLUDE bots/apps:
+    # mentioning another app is a legit trigger (bot-to-bot collaboration in
+    # shared channels). Only `deleted` users are filtered.
     async with get_session() as session:
         users = (
             await session.execute(
@@ -192,7 +194,6 @@ async def get_channel_members(
                     SlackUser.workspace_id == workspace_id,
                     SlackUser.slack_user_id.in_(row.members),
                     SlackUser.deleted == False,  # noqa: E712
-                    SlackUser.is_bot == False,  # noqa: E712
                 )
             )
         ).scalars().all()
@@ -201,6 +202,7 @@ async def get_channel_members(
             "slack_user_id": u.slack_user_id,
             "display_name": u.display_name,
             "real_name": u.real_name,
+            "is_bot": u.is_bot,
         }
         for u in users[:limit]
     ]

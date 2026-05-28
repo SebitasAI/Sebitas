@@ -110,8 +110,9 @@ async def _resolve_user_mentions(text: str, workspace_id: uuid.UUID) -> str:
     resolved: dict[str, str] = {}  # token -> user_id (only unique matches)
     for tok in tokens:
         candidates = await roster.find_user(workspace_id, tok)
-        # Filter bots (don't auto-mention them).
-        candidates = [c for c in candidates if not c.get("is_bot")]
+        # Bots/apps are mention-able too -- Slack apps have user IDs and the
+        # <@U...> syntax triggers them just like humans. (Mass mentions
+        # @here/@channel/@everyone are stripped earlier; that policy stays.)
         if len(candidates) == 1:
             resolved[tok] = candidates[0]["slack_user_id"]
         elif len(candidates) == 0:

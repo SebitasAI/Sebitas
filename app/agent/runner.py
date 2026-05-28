@@ -145,7 +145,8 @@ async def _build_channel_roster_block(workspace_id: uuid.UUID, channel: str | No
     if not members:
         return ""
     lines = [
-        f"• {m.get('display_name') or m.get('real_name') or '?'} — <@{m['slack_user_id']}>"
+        f"• {m.get('display_name') or m.get('real_name') or '?'}"
+        f"{' [app]' if m.get('is_bot') else ''} — <@{m['slack_user_id']}>"
         for m in members
     ]
     suffix = (
