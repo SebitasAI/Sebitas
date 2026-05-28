@@ -33,10 +33,13 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 log = structlog.get_logger(__name__)
 _langfuse = get_client()
 
-# Hard-coded per spec: haiku is plenty for JSON metadata extraction. Using a
-# specific ID (not get_settings().cheap_model) so this stays predictable even
-# if the cheap-model default moves.
-FRONTMATTER_MODEL = "claude-haiku-4-5"
+# Haiku is plenty for JSON metadata extraction. We use LiteLLM's
+# provider-prefixed identifier (`anthropic/claude-haiku-4-5`) for the same
+# reason `app.config.Settings.cheap_model` does: without the prefix LiteLLM
+# can fall back to a heuristic that picks the wrong provider when multiple
+# are configured. Pinned literal (not `settings.cheap_model`) so this stays
+# predictable if the cheap-model default moves.
+FRONTMATTER_MODEL = "anthropic/claude-haiku-4-5"
 
 # Public, per spec.
 NAME_MAX_LEN = 40
