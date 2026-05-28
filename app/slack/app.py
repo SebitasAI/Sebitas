@@ -81,14 +81,22 @@ def build_app() -> AsyncApp:
     # For OAuth callbacks it WILL be checked.
     signing_secret = s.slack_signing_secret or "not-used-in-socket-mode"
     if oauth:
+        # When oauth_settings + installation_store are present, Bolt resolves
+        # tokens for incoming events via the installation_store automatically
+        # (it calls `async_find_bot(team_id=...)`). Passing a separate
+        # `authorize` here is a conflict and raises BoltError at init -- our
+        # SebitasInstallationStore already implements the lookup we'd put in
+        # `_authorize`, so removing it is correct.
         app = AsyncApp(
             signing_secret=signing_secret,
-            authorize=_authorize,
             oauth_settings=oauth,
             installation_store=_install_store,
         )
         log.info("slack_app_built", oauth=True)
     else:
+        # No OAuth configured -> manual CLI install path. The installation
+        # store doesn't get wired by Bolt, so we use the lightweight
+        # `_authorize` callback that reads the same `workspace.bot_token`.
         app = AsyncApp(signing_secret=signing_secret, authorize=_authorize)
         log.info("slack_app_built", oauth=False, reason="missing client_id/secret/signing_secret")
     register_handlers(app)
