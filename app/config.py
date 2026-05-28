@@ -89,6 +89,15 @@ class Settings(BaseSettings):
     cloudflare_api_token: str | None = None
     cloudflare_account_id: str | None = None
 
+    # Datadog (HTTP-direct query tool, covers APM endpoints the Pipedream
+    # connector doesn't expose). Generate keys at Datadog -> Organization
+    # Settings -> API Keys + Application Keys.
+    dd_api_key: str | None = None
+    dd_app_key: str | None = None
+    # API host. US1 default; change to datadoghq.eu / us3.datadoghq.com /
+    # us5.datadoghq.com / ap1.datadoghq.com depending on your Datadog region.
+    dd_site: str = "datadoghq.com"
+
     # Pipedream Connect (credentialed integrations gateway). We never store the
     # provider credentials, only the connected-account reference per workspace.
     pipedream_client_id: str | None = None
