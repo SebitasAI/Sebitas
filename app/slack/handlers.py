@@ -72,12 +72,18 @@ def register_handlers(app: AsyncApp) -> None:
                 user_ts=ts,
                 conversation_key=key,
                 reply_thread_ts=key,
+                files=event.get("files"),
             )
         )
 
     @app.event("message")
     async def on_message(event, body, say, client, context):  # noqa: ANN001
-        if event.get("subtype") or event.get("bot_id"):
+        # Skip bots and Slack's bookkeeping subtypes, but allow file_share — that's
+        # how the API delivers a user message with attachments.
+        if event.get("bot_id"):
+            return
+        sub = event.get("subtype")
+        if sub and sub != "file_share":
             return
         text = event.get("text", "")
         bot_user_id = context.get("bot_user_id")
@@ -95,6 +101,7 @@ def register_handlers(app: AsyncApp) -> None:
             channel=channel,
             user_text=_clean(text),
             user_ts=ts,
+            files=event.get("files"),
         )
 
         # DMs and group DMs: respond to every message (flat conversation keyed by

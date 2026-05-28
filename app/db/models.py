@@ -155,3 +155,25 @@ class IntegrationConnection(Base):
     pending_run_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     pending_ctx: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+
+
+class MessageAttachment(Base):
+    """A file attached to a user message. The bytes live in R2 (`r2_ref`); this
+    row keeps the reference so multi-turn re-attachment works without
+    re-downloading from Slack (Slack file URLs are short-lived)."""
+
+    __tablename__ = "message_attachment"
+    __table_args__ = (UniqueConstraint("message_id", "slack_file_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("message.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    slack_file_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    original_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(nullable=True)
+    r2_ref: Mapped[str] = mapped_column(String(512), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)

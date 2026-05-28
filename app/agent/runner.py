@@ -20,6 +20,7 @@ from langgraph.types import Command
 from app.agent.context import set_run_context
 from app.agent.graph import get_graph
 from app.agent.sandbox import close_run_sandbox
+from app.config import get_settings
 from app.db import repository as repo
 from app.db.session import get_session
 from app.skills.registry import installed_descriptions_text
@@ -49,7 +50,11 @@ async def _remove_reaction(client, channel: str, ts: str) -> None:
 # --------------------------------------------------------------------------- #
 
 async def _load_history(team_id: str, channel: str, conversation_key: str) -> list[dict]:
-    """Prior user/assistant text turns of the thread, for multi-turn context."""
+    """Prior user/assistant turns of the thread, for multi-turn context. User
+    messages with persisted attachments are re-hydrated from R2 into Anthropic
+    content blocks (image/document via fresh presigned URL, text inline)."""
+    from app.slack import files as sf  # lazy: avoid import cycle at module load
+
     async with get_session() as session:
         workspace = await repo.get_workspace(session, team_id)
         if workspace is None:
@@ -58,24 +63,74 @@ async def _load_history(team_id: str, channel: str, conversation_key: str) -> li
         if thread is None:
             return []
         rows = await repo.get_thread_messages(session, thread.id, limit=30)
+        user_msg_ids = [m.id for m in rows if m.role == "user" and m.tool_calls is None]
+        attachments_by_msg = await repo.get_attachments_for_messages(session, user_msg_ids)
+
+    settings = get_settings()
     history: list[dict] = []
     for m in rows:
-        if m.role in ("user", "assistant") and m.tool_calls is None and m.text:
-            if history and history[-1]["role"] == m.role:
-                history[-1]["content"] += "\n" + m.text
+        if m.role not in ("user", "assistant") or m.tool_calls is not None:
+            continue
+        text = m.text or ""
+        if m.role == "user":
+            atts = attachments_by_msg.get(m.id, [])
+            if atts:
+                blocks, prepend = await sf.build_attachment_blocks(atts, settings.attachment_max_text_chars)
+                combined = ((prepend + "\n\n" + text) if prepend and text else (prepend or text)) or " "
+                content: Any = list(blocks) + [{"type": "text", "text": combined}]
+                history.append({"role": "user", "content": content})
+                continue
+            if not text:
+                continue
+            if history and history[-1]["role"] == "user" and isinstance(history[-1]["content"], str):
+                history[-1]["content"] += "\n" + text
             else:
-                history.append({"role": m.role, "content": m.text})
+                history.append({"role": "user", "content": text})
+        else:  # assistant
+            if not text:
+                continue
+            if history and history[-1]["role"] == "assistant" and isinstance(history[-1]["content"], str):
+                history[-1]["content"] += "\n" + text
+            else:
+                history.append({"role": "assistant", "content": text})
     return history
 
 
-async def _persist_user(team_id: str, channel: str, conversation_key: str, slack_user_id: str, text: str, ts: str) -> uuid.UUID:
+async def _ensure_workspace(team_id: str) -> uuid.UUID:
+    """Resolve (and create if needed) the workspace id without persisting any
+    message. Used by the file-ingest path which needs the R2 prefix before the
+    user message can be written (attachments depend on its row)."""
+    async with get_session() as session:
+        workspace = await repo.upsert_workspace(session, team_id)
+        await session.commit()
+        return workspace.id
+
+
+async def _persist_user(
+    team_id: str,
+    channel: str,
+    conversation_key: str,
+    slack_user_id: str,
+    text: str,
+    ts: str,
+    attachments: list[dict] | None = None,
+) -> uuid.UUID:
     async with get_session() as session:
         workspace = await repo.upsert_workspace(session, team_id)
         user = await repo.upsert_app_user(session, workspace.id, slack_user_id)
         thread = await repo.get_or_create_thread(session, workspace.id, channel, conversation_key)
-        await repo.add_message(
+        message = await repo.add_message(
             session, thread.id, role="user", text=text, app_user_id=user.id, slack_ts=ts
         )
+        for a in attachments or []:
+            await repo.add_attachment(
+                session, message.id,
+                slack_file_id=a["slack_file_id"],
+                mime_type=a["mime_type"],
+                r2_ref=a["r2_ref"],
+                original_name=a.get("original_name"),
+                size_bytes=a.get("size_bytes"),
+            )
         await session.commit()
         return workspace.id
 
@@ -180,9 +235,11 @@ async def _drive(client, ctx: dict, result: dict) -> None:
 
 async def run_agent(*, client, team_id: str | None, slack_user_id: str | None, channel: str,
                     user_text: str, user_ts: str, conversation_key: str, reply_thread_ts: str | None,
-                    require_existing_thread: bool = False) -> None:
+                    require_existing_thread: bool = False,
+                    files: list[dict] | None = None) -> None:
     text = user_text.strip()
-    if not text or not team_id or not slack_user_id:
+    has_files = bool(files)
+    if (not text and not has_files) or not team_id or not slack_user_id:
         return
 
     # Channel follow-ups: only continue a thread Sebitas already started.
@@ -193,13 +250,73 @@ async def run_agent(*, client, team_id: str | None, slack_user_id: str | None, c
                 return
 
     await _add_reaction(client, channel, user_ts)
-    history = await _load_history(team_id, channel, conversation_key)
-    workspace_id = await _persist_user(team_id, channel, conversation_key, slack_user_id, text, user_ts)
+    settings = get_settings()
 
-    seed = history + [{"role": "user", "content": text}]
+    # Process file attachments before the agent loop. Needs workspace_id first
+    # (for the per-tenant R2 prefix); persistence of the user message + the
+    # attachment rows happens after, in a single transaction.
+    file_blocks: list[dict] = []
+    text_prepend = ""
+    attachments_records: list[dict] = []
+    if has_files:
+        workspace_id_pre = await _ensure_workspace(team_id)
+        try:
+            await client.chat_postMessage(
+                channel=channel, thread_ts=reply_thread_ts or user_ts,
+                text=f":paperclip: Procesando {len(files)} archivo(s)...",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("status_post_failed", error=str(exc))
+        from app.slack import files as sf
+        try:
+            result_files = await sf.process_files(str(workspace_id_pre), files, settings.slack_bot_token)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("process_files_failed", error=str(exc))
+            result_files = {
+                "blocks": [], "text_prepend": "", "attachments": [],
+                "unsupported": [f"Error procesando archivos: {exc}"],
+                "supported_count": 0, "types": [],
+            }
+        file_blocks = result_files["blocks"]
+        text_prepend = result_files["text_prepend"]
+        attachments_records = result_files["attachments"]
+        if result_files["unsupported"]:
+            try:
+                await client.chat_postMessage(
+                    channel=channel, thread_ts=reply_thread_ts or user_ts,
+                    text=":warning: Algunos archivos no los procesé:\n• " + "\n• ".join(result_files["unsupported"]),
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("unsupported_post_failed", error=str(exc))
+        log.info(
+            "file_ingest_done",
+            n_files=len(files), supported=result_files["supported_count"],
+            types=result_files["types"],
+        )
+        # Nothing usable and no user text: bail out gracefully (no agent run).
+        if result_files["supported_count"] == 0 and not text:
+            await _remove_reaction(client, channel, user_ts)
+            return
+
+    full_text = text
+    if text_prepend:
+        full_text = (text_prepend + "\n\n" + text) if text else text_prepend
+
+    history = await _load_history(team_id, channel, conversation_key)
+    workspace_id = await _persist_user(
+        team_id, channel, conversation_key, slack_user_id, full_text, user_ts,
+        attachments=attachments_records,
+    )
+
+    # Build the seed user content: blocks first (so the model "reads" attachments
+    # before the question), then text last. Plain string for the no-attachment path.
+    if file_blocks:
+        seed_user_content: Any = list(file_blocks) + [{"type": "text", "text": full_text or " "}]
+    else:
+        seed_user_content = full_text
+    seed = history + [{"role": "user", "content": seed_user_content}]
+
     run_id = f"{conversation_key}:{user_ts}"
-    # Tenancy context for the run: the sandbox and skills scope to this workspace,
-    # and the installed-skills list is surfaced to the model (progressive loading).
     skills_context = await installed_descriptions_text(workspace_id)
     set_run_context(workspace_id=str(workspace_id), run_id=run_id, skills_context=skills_context)
     ctx = {
@@ -211,7 +328,8 @@ async def run_agent(*, client, team_id: str | None, slack_user_id: str | None, c
     config = {"configurable": {"thread_id": run_id}}
 
     with _langfuse.start_as_current_observation(
-        as_type="span", name="agent-run", input={"text": text}
+        as_type="span", name="agent-run",
+        input={"text": text, "n_files": len(files or [])},
     ), propagate_attributes(
         session_id=f"{team_id}:{channel}:{conversation_key}",
         user_id=slack_user_id, tags=["slack", "agent"], metadata={"tenant": team_id},

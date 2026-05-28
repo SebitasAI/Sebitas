@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     r2_secret_access_key: str | None = None
     r2_bucket: str | None = None
     artifact_url_expiry: int = 3600  # signed-URL lifetime (seconds)
+    # Slack file ingest limits
+    attachment_max_file_bytes: int = 25 * 1024 * 1024
+    attachment_max_total_bytes: int = 50 * 1024 * 1024
+    attachment_max_text_chars: int = 200_000
 
     # Pipedream Connect (credentialed integrations gateway). We never store the
     # provider credentials, only the connected-account reference per workspace.
