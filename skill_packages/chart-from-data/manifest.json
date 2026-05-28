@@ -1,0 +1,9 @@
+{
+  "name": "chart-from-data",
+  "description": "Genera una gráfica (PNG) a partir de datos numéricos que el usuario provee en el mensaje.",
+  "tags": ["chart", "visualization", "demo"],
+  "author": "sebitas",
+  "category": "data",
+  "version": "0.1.0",
+  "tools": ["run_code"]
+}
