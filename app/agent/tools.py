@@ -313,6 +313,63 @@ from app.spaces import gateway as _spaces
 
 
 # --------------------------------------------------------------------------- #
+# Datadog: HTTP-direct query tool. Covers /api/v1/query (the endpoint that
+# powers every Datadog dashboard widget). For when the Pipedream connector
+# doesn't expose the action you need -- which is most of APM. Read-only.
+# --------------------------------------------------------------------------- #
+
+async def _datadog_query(
+    query: str, from_seconds_ago: int = 3600, to_seconds_ago: int = 0
+) -> str:
+    from app.integrations.datadog import DatadogError, format_query_result, query_metrics
+    try:
+        result = await query_metrics(query, from_seconds_ago, to_seconds_ago)
+    except DatadogError as exc:
+        return f"Error de Datadog: {exc}"
+    return format_query_result(result, query)
+
+
+register(Tool(
+    name="datadog_query",
+    description=(
+        "Run a Datadog metric query and return the result. Uses Datadog's "
+        "/api/v1/query endpoint -- the same one every dashboard widget uses, "
+        "so anything visible in a Datadog dashboard is queryable here. "
+        "Examples of useful queries:\n"
+        "  - `sum:users.unique{*}` -- total unique users.\n"
+        "  - `avg:trace.web.request.duration{*} by {service}` -- avg latency per service.\n"
+        "  - `top(sum:trace.web.request.errors{*} by {resource_name}, 10, 'sum', 'desc')` "
+        "-- top 10 resources by errors (APM).\n"
+        "  - `sum:datadog.estimated_usage.logs.events{*}.as_count()` -- log volume.\n"
+        "The query is the same syntax used in Datadog dashboards. When the "
+        "user asks 'what does this widget show', either ask them for the "
+        "metric/query of the widget or compose a sensible query yourself. "
+        "Time window: from_seconds_ago=3600 means last hour (default), "
+        "to_seconds_ago=0 means up to now (default). Read-only, no approval gate."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Datadog query string (same syntax as a dashboard widget query).",
+            },
+            "from_seconds_ago": {
+                "type": "integer",
+                "description": "Start of time window, seconds ago. Default 3600 (1h).",
+            },
+            "to_seconds_ago": {
+                "type": "integer",
+                "description": "End of time window, seconds ago. Default 0 (now).",
+            },
+        },
+        "required": ["query"],
+    },
+    handler=_datadog_query,
+))
+
+
+# --------------------------------------------------------------------------- #
 # Slack mentions: roster lookup. Used by the agent when it wants to mention a
 # user but doesn't have their Slack id. Read-only, no gate.
 # --------------------------------------------------------------------------- #
