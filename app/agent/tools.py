@@ -326,7 +326,9 @@ async def _find_slack_user(query: str) -> str:
     import uuid as _uuid
     ws = _uuid.UUID(ws_str)
     candidates = await _roster.find_user(ws, query)
-    candidates = [c for c in candidates if not c.get("is_bot")]
+    # Apps/bots are valid mention targets (the <@U...> syntax triggers them
+    # like humans). We surface `is_bot` in the output so the model can warn
+    # the user if it's about to ping another bot.
     if not candidates:
         return (
             f"No encontré ningún usuario para `{query}` en este workspace. "
@@ -334,13 +336,15 @@ async def _find_slack_user(query: str) -> str:
         )
     if len(candidates) == 1:
         c = candidates[0]
+        tag = " [app/bot]" if c.get("is_bot") else ""
         return (
-            f"Found: <@{c['slack_user_id']}> "
+            f"Found: <@{c['slack_user_id']}>{tag} "
             f"(display: {c.get('display_name') or '?'}, real: {c.get('real_name') or '?'}). "
             f"Usá `<@{c['slack_user_id']}>` cuando quieras mencionarlo."
         )
     lines = [
-        f"• {c.get('display_name') or '?'} / {c.get('real_name') or '?'} — <@{c['slack_user_id']}>"
+        f"• {c.get('display_name') or '?'} / {c.get('real_name') or '?'}"
+        f"{' [app/bot]' if c.get('is_bot') else ''} — <@{c['slack_user_id']}>"
         for c in candidates[:10]
     ]
     extra = f"\n(+{len(candidates)-10} más)" if len(candidates) > 10 else ""

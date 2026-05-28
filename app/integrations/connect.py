@@ -162,7 +162,18 @@ async def complete(external_user_id: str, app: str, account_id: str | None) -> N
     if buttons:
         from slack_sdk.web.async_client import AsyncWebClient
 
-        slack = AsyncWebClient(token=get_settings().slack_bot_token)
+        # Per-workspace token (multi-tenant install). We resolve from the
+        # connection row's workspace_id; without a token we just skip the
+        # button deactivation (cosmetic) -- not a hard failure.
+        from app.slack.tokens import get_bot_token_by_workspace
+        ws_pair = await get_bot_token_by_workspace(workspace_id)
+        if not ws_pair:
+            log.warning("connect_complete_no_token", workspace_id=external_user_id)
+            slack = None
+        else:
+            slack = AsyncWebClient(token=ws_pair[0])
+        if slack is None:
+            buttons = []  # skip the loop below; just resume the run
         for b in buttons:
             ch, ts = b.get("channel"), b.get("ts")
             if not ch or not ts:
