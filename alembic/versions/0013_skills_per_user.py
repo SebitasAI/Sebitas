@@ -17,6 +17,13 @@ The legacy tables were a stub with no productive rows, so this migration is
 destructive (drop + recreate). The downgrade restores the legacy shape so a
 rollback leaves Alembic linear, though existing data is lost in both
 directions (consistent with how the legacy tables were used).
+
+We use VARCHAR + CHECK constraints instead of Postgres ENUM types for the
+discriminators. ENUMs interact badly with SQLAlchemy 2.x + asyncpg + Alembic
+on migration replay (the `create_type=False` hint on the column type does NOT
+prevent `op.create_table` from issuing CREATE TYPE, which then collides with a
+type left over from a prior failed run). VARCHAR + CHECK gives us the same
+guarantee at the DB level with none of the transactional complexity.
 """
 
 from __future__ import annotations
@@ -34,23 +41,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Idempotency: a previous deploy crashed mid-migration after creating the
-    # new ENUM types (CREATE TYPE was not rolled back cleanly under asyncpg).
-    # We now DROP IF EXISTS everything we're about to create, then recreate
-    # fresh. Safe because the legacy stub had no productive rows (confirmed
-    # at slice start) and the new tables haven't shipped to users yet.
+    # Idempotency: previous deploy attempts crashed mid-migration, leaving the
+    # new tables and (under the old enum approach) ENUM types half-created.
+    # We DROP IF EXISTS everything we're about to create so the migration is
+    # always replay-safe. Safe to drop: legacy stub had no productive rows
+    # (confirmed at slice start) and the new tables haven't shipped to users.
     op.execute("DROP TABLE IF EXISTS skill_install CASCADE")
     op.execute("DROP TABLE IF EXISTS skill CASCADE")
+    # Leftover ENUM types from earlier broken attempts. NO-OP if absent.
     op.execute("DROP TYPE IF EXISTS skill_activation CASCADE")
     op.execute("DROP TYPE IF EXISTS skill_source CASCADE")
-
-    # Postgres enums for the two discriminators. Created as types so the
-    # column types pin them; the migration sets `create_type=False` on the
-    # columns to avoid duplicate CREATE TYPE inside op.create_table.
-    skill_source = sa.Enum("upload", "catalog", name="skill_source")
-    skill_activation = sa.Enum("always_active", "on_demand", name="skill_activation")
-    skill_source.create(op.get_bind(), checkfirst=False)
-    skill_activation.create(op.get_bind(), checkfirst=False)
 
     op.create_table(
         "skill",
@@ -66,24 +66,11 @@ def upgrade() -> None:
         sa.Column("body_r2_ref", sa.Text(), nullable=False),
         sa.Column("version", sa.Integer(), nullable=False, server_default=sa.text("1")),
         sa.Column(
-            "source",
-            sa.Enum(
-                "upload",
-                "catalog",
-                name="skill_source",
-                create_type=False,
-            ),
-            nullable=False,
-            server_default="upload",
+            "source", sa.String(length=32), nullable=False, server_default="upload"
         ),
         sa.Column(
             "activation_default",
-            sa.Enum(
-                "always_active",
-                "on_demand",
-                name="skill_activation",
-                create_type=False,
-            ),
+            sa.String(length=32),
             nullable=False,
             server_default="on_demand",
         ),
@@ -98,6 +85,13 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.UniqueConstraint("workspace_id", "name", name="uq_skill_workspace_name"),
+        sa.CheckConstraint(
+            "source IN ('upload', 'catalog')", name="ck_skill_source"
+        ),
+        sa.CheckConstraint(
+            "activation_default IN ('always_active', 'on_demand')",
+            name="ck_skill_activation_default",
+        ),
     )
     op.create_index(
         "ix_skill_workspace_created",
@@ -125,20 +119,16 @@ def upgrade() -> None:
             sa.ForeignKey("skill.id", ondelete="CASCADE"),
             nullable=False,
         ),
-        sa.Column(
-            "activation_override",
-            sa.Enum(
-                "always_active",
-                "on_demand",
-                name="skill_activation",
-                create_type=False,
-            ),
-            nullable=True,
-        ),
+        sa.Column("activation_override", sa.String(length=32), nullable=True),
         sa.Column(
             "installed_at", sa.DateTime(), server_default=sa.func.now(), nullable=False
         ),
         sa.UniqueConstraint("user_id", "skill_id", name="uq_skill_install_user_skill"),
+        sa.CheckConstraint(
+            "activation_override IS NULL OR activation_override IN "
+            "('always_active', 'on_demand')",
+            name="ck_skill_install_activation_override",
+        ),
     )
     op.create_index(
         "ix_skill_install_user_installed",
@@ -153,10 +143,6 @@ def downgrade() -> None:
     op.drop_index("ix_skill_workspace_activation", table_name="skill")
     op.drop_index("ix_skill_workspace_created", table_name="skill")
     op.drop_table("skill")
-
-    # Drop enums after both tables that referenced them are gone.
-    sa.Enum(name="skill_activation").drop(op.get_bind(), checkfirst=True)
-    sa.Enum(name="skill_source").drop(op.get_bind(), checkfirst=True)
 
     # Recreate the legacy stub shape so the chain stays linear if someone
     # downgrades. No data restoration; the legacy tables were stubs.

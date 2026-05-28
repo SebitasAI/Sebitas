@@ -8,7 +8,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
-    Enum,
+    CheckConstraint,
     ForeignKey,
     Integer,
     String,
@@ -112,13 +112,14 @@ class Message(TimestampMixin, Base):
     user: Mapped["AppUser | None"] = relationship()
 
 
-# Postgres-side enums; reused in SkillInstall.activation_override so both sides
-# agree on the discriminator values. `create_type=False` on the column types
-# keeps Alembic from recreating the type on every metadata.create_all.
-_SkillSourceEnum = Enum("upload", "catalog", name="skill_source", create_type=False)
-_SkillActivationEnum = Enum(
-    "always_active", "on_demand", name="skill_activation", create_type=False
-)
+# Allowed discriminator values, enforced at the DB layer via CheckConstraint
+# and at the application layer by the registry's type annotations. We use
+# VARCHAR + CHECK instead of Postgres ENUM because SQLAlchemy 2.x + asyncpg
+# + Alembic interact badly on enum-type migrations (the `create_type=False`
+# hint does not prevent op.create_table from issuing CREATE TYPE, causing
+# collisions on replay after a partial failure).
+_SKILL_SOURCES = ("upload", "catalog")
+_SKILL_ACTIVATIONS = ("always_active", "on_demand")
 
 
 class Skill(Base):
@@ -131,7 +132,16 @@ class Skill(Base):
     workspace skills they install and may override activation per install."""
 
     __tablename__ = "skill"
-    __table_args__ = (UniqueConstraint("workspace_id", "name", name="uq_skill_workspace_name"),)
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "name", name="uq_skill_workspace_name"),
+        CheckConstraint(
+            "source IN ('upload', 'catalog')", name="ck_skill_source"
+        ),
+        CheckConstraint(
+            "activation_default IN ('always_active', 'on_demand')",
+            name="ck_skill_activation_default",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -146,9 +156,11 @@ class Skill(Base):
     # R2 key, NOT a URL. Looked up via app.skills.storage.download_skill_body.
     body_r2_ref: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
-    source: Mapped[str] = mapped_column(_SkillSourceEnum, nullable=False, default="upload")
+    source: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="upload", server_default="upload"
+    )
     activation_default: Mapped[str] = mapped_column(
-        _SkillActivationEnum, nullable=False, default="on_demand"
+        String(32), nullable=False, default="on_demand", server_default="on_demand"
     )
     # Slugs extracted from `[[name]]` references in the body. Not foreign-key
     # constrained: a body may reference a sibling skill that doesn't exist yet.
@@ -171,6 +183,11 @@ class SkillInstall(Base):
     __tablename__ = "skill_install"
     __table_args__ = (
         UniqueConstraint("user_id", "skill_id", name="uq_skill_install_user_skill"),
+        CheckConstraint(
+            "activation_override IS NULL OR activation_override IN "
+            "('always_active', 'on_demand')",
+            name="ck_skill_install_activation_override",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -183,9 +200,7 @@ class SkillInstall(Base):
         ForeignKey("skill.id", ondelete="CASCADE"), nullable=False, index=True
     )
     # Null = inherit `skill.activation_default`.
-    activation_override: Mapped[str | None] = mapped_column(
-        _SkillActivationEnum, nullable=True
-    )
+    activation_override: Mapped[str | None] = mapped_column(String(32), nullable=True)
     installed_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )
