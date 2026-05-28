@@ -27,8 +27,14 @@ class Settings(BaseSettings):
     database_url: str
 
     # Slack (Socket Mode)
-    slack_bot_token: str  # xoxb-...
-    slack_app_token: str  # xapp-... (Socket Mode app-level token)
+    # bot_token now lives per-workspace in DB (slice 4B-* multi-tenant);
+    # this stays optional for backward compat + the backfill CLI step.
+    slack_bot_token: str | None = None  # xoxb-... (legacy single-workspace fallback)
+    slack_app_token: str  # xapp-... (Socket Mode app-level token; one per app, multi-workspace)
+
+    # Fernet key for encrypting per-workspace bot tokens at rest. Generate with
+    # `python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`.
+    workspace_token_encryption_key: str | None = None
 
     # Model / runtime knobs
     claude_model: str = "claude-opus-4-7"

@@ -24,7 +24,6 @@ import structlog
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy import select
 
-from app.config import get_settings
 from app.db.models import SlackChannel, SlackUser
 from app.db.session import get_session
 
@@ -35,8 +34,14 @@ _USERS_STALE_AFTER = timedelta(hours=12)
 _CHANNEL_STALE_AFTER = timedelta(hours=1)  # channel membership shifts faster
 
 
-def _client() -> AsyncWebClient:
-    return AsyncWebClient(token=get_settings().slack_bot_token)
+async def _client_for_workspace(workspace_id: uuid.UUID) -> AsyncWebClient | None:
+    """Per-workspace Slack client. Returns None if the workspace isn't
+    installed (no bot_token) -- callers no-op gracefully."""
+    from app.slack.tokens import get_bot_token_by_workspace
+    pair = await get_bot_token_by_workspace(workspace_id)
+    if pair is None:
+        return None
+    return AsyncWebClient(token=pair[0])
 
 
 # --------------------------------------------------------------------------- #
@@ -60,7 +65,10 @@ async def _users_last_sync(workspace_id: uuid.UUID) -> datetime | None:
 async def sync_workspace_users(workspace_id: uuid.UUID, client: AsyncWebClient | None = None) -> int:
     """Paginated users.list -> upsert into slack_user. Returns the row count
     seen. Idempotent: rerunning updates last_synced_at + any changed fields."""
-    c = client or _client()
+    c = client or await _client_for_workspace(workspace_id)
+    if c is None:
+        log.warning("roster_sync_skipped_no_token", workspace_id=str(workspace_id))
+        return 0
     cursor: str | None = None
     seen_user_ids: list[str] = []
     upserts = 0
@@ -210,7 +218,10 @@ async def get_channel_members(
 
 
 async def _refresh_channel(workspace_id: uuid.UUID, slack_channel_id: str) -> None:
-    c = _client()
+    c = await _client_for_workspace(workspace_id)
+    if c is None:
+        log.warning("roster_channel_skipped_no_token", workspace_id=str(workspace_id), channel=slack_channel_id)
+        return
     # Pull members (paginated) + metadata in one shot.
     member_ids: list[str] = []
     cursor: str | None = None
