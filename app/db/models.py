@@ -148,6 +148,10 @@ class IntegrationConnection(Base):
         ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
     )
     app: Mapped[str] = mapped_column(String(64), nullable=False)
-    pipedream_account_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    # Empty until connected; "pending" while awaiting an in-conversation connect.
+    pipedream_account_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="connected")
+    # In-conversation connect flow: the paused run to auto-resume once connected.
+    pending_run_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    pending_ctx: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)

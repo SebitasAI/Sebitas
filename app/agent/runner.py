@@ -146,10 +146,15 @@ async def _post_approval(client, ctx: dict, payload: dict) -> None:
 
 
 async def _drive(client, ctx: dict, result: dict) -> None:
-    """Handle a graph result: pause for approval, or finish (persist + reply)."""
+    """Handle a graph result: pause for approval/connect, or finish (persist + reply)."""
     interrupts = result.get("__interrupt__")
     if interrupts:
-        await _post_approval(client, ctx, interrupts[0].value)
+        payload = interrupts[0].value
+        if isinstance(payload, dict) and payload.get("type") == "connect":
+            from app.integrations import connect  # lazy: avoid import cycle
+            await connect.start_connect(client, ctx, payload.get("app", ""))
+        else:
+            await _post_approval(client, ctx, payload)
         return  # state is checkpointed; resumes on the button click
 
     messages = result.get("messages", [])
@@ -199,6 +204,7 @@ async def run_agent(*, client, team_id: str | None, slack_user_id: str | None, c
     set_run_context(workspace_id=str(workspace_id), run_id=run_id, skills_context=skills_context)
     ctx = {
         "run_id": run_id, "seed_len": len(seed), "team_id": team_id,
+        "workspace_id": str(workspace_id),
         "channel": channel, "conversation_key": conversation_key,
         "reply_thread_ts": reply_thread_ts, "user_ts": user_ts,
     }
@@ -242,3 +248,14 @@ async def resume_run(*, client, ctx: dict, decision: str) -> None:
     ):
         result = await get_graph().ainvoke(Command(resume=decision), config)
         await _drive(client, ctx, result)
+
+
+async def resume_after_connect(ctx: dict) -> None:
+    """Resume a run paused waiting for an integration connection. Called by the
+    webhook + polling fallback, which don't have a request-bound Slack `client`
+    — build one from the bot token. Idempotent via resume_run's snapshot guard."""
+    from app.config import get_settings  # local to avoid module-load side effects
+    from slack_sdk.web.async_client import AsyncWebClient
+
+    client = AsyncWebClient(token=get_settings().slack_bot_token)
+    await resume_run(client=client, ctx=ctx, decision="connected")

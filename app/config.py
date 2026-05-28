@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     pipedream_project_id: str | None = None
     pipedream_environment: str = "development"
     integration_action_timeout: int = 60
+    # Public base URL (e.g. a cloudflared tunnel) for the Pipedream connect webhook.
+    public_base_url: str | None = None
+    pipedream_webhook_secret: str | None = None
+    # Polling fallback for in-conversation connect auto-resume.
+    connect_poll_interval: int = 5
+    connect_poll_timeout: int = 180
 
     log_level: str = "INFO"
 

@@ -97,12 +97,28 @@ async def run_action(external_user_id: str, component_id: str, configured_props:
     return data
 
 
-async def create_connect_token(external_user_id: str) -> dict:
+async def delete_account(account_id: str) -> bool:
+    """Delete a connected account at Pipedream. Returns False if it didn't
+    exist (idempotent), True if it was deleted, raises on other errors."""
+    async with aiohttp.ClientSession() as session:
+        async with session.delete(
+            f"{_project_base()}/accounts/{account_id}", headers=await _headers()
+        ) as resp:
+            if resp.status == 404:
+                return False
+            if resp.status >= 400:
+                body = await resp.text()
+                raise RuntimeError(f"Pipedream {resp.status}: {body[:200]}")
+            return True
+
+
+async def create_connect_token(external_user_id: str, webhook_uri: str | None = None) -> dict:
+    body: dict = {"external_user_id": external_user_id}
+    if webhook_uri:
+        body["webhook_uri"] = webhook_uri
     async with aiohttp.ClientSession() as session:
         async with session.post(
-            f"{_project_base()}/tokens",
-            json={"external_user_id": external_user_id},
-            headers=await _headers(),
+            f"{_project_base()}/tokens", json=body, headers=await _headers()
         ) as resp:
             data = await resp.json()
             resp.raise_for_status()

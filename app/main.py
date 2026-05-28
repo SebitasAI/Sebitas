@@ -14,6 +14,7 @@ from app.agent.claude import flush_langfuse
 from app.agent.graph import build_graph, set_graph
 from app.config import get_settings
 from app.db.engine import engine
+from app.integrations.webhook import router as pipedream_webhook_router
 from app.logging import configure_logging
 from app.slack.app import build_app, build_socket_handler
 
@@ -48,6 +49,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Sebitas", lifespan=lifespan)
+app.include_router(pipedream_webhook_router)
 
 
 @app.get("/health")

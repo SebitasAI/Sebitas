@@ -29,7 +29,17 @@ SYSTEM_PROMPT = (
     "You can call tools to get information or act. Use them when they help, and you "
     "may request several independent tools at once. Some tools are risky and require "
     "human approval before running. When you have enough to answer, reply with a "
-    "final message and no further tool calls."
+    "final message and no further tool calls.\n"
+    "\n"
+    "Integration management - verb mapping:\n"
+    "- \"what's connected / list integrations / qué tengo conectado / mis integraciones\" -> list_integrations\n"
+    "- \"connect X / autoriza X / agregá X / reconectá X / re-connect X\" -> request_integration(X)\n"
+    "- \"disconnect X / desconectá X / quitá X / sacá la conexión de X\" -> disconnect_integration(X)\n"
+    "Compound \"disconnect AND reconnect X\" (or \"desconectá y reconectá X\"): call "
+    "disconnect_integration(X) first; when it returns success (after approval), "
+    "IMMEDIATELY call request_integration(X) in the SAME task. Do NOT stop after "
+    "the disconnect — the user asked for both steps. The connect link will appear "
+    "and the run will pause + auto-resume on connect."
 )
 
 _settings = get_settings()
