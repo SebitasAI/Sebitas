@@ -58,6 +58,19 @@ export const refreshSpace = internalAction({
             }),
           }
         );
+        if (resp.status === 404) {
+          // Backend says this space_id doesn't exist in Postgres -- we're an
+          // orphan refresh loop. Stop rescheduling so the loop dies. Mark
+          // the local config as deleted so the frontend renders accordingly.
+          await ctx.runMutation(internal.spaces._writeSnapshot, {
+            space_id, rows: [], schema: [], row_count: 0,
+            error: "space removed from backend; refresh loop stopped",
+          });
+          // Flip config status so subsequent ticks (if any race in) also bail.
+          // We can't await a separate mutation cleanly without losing the
+          // "no reschedule" intent; the early return below handles it.
+          return null;
+        }
         if (!resp.ok) {
           await ctx.runMutation(internal.spaces._writeSnapshot, {
             space_id,
