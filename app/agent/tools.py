@@ -537,7 +537,7 @@ register(Tool(
         "required": ["name", "data_binding"],
     },
     handler=_deploy_space,
-    risky=True,
+    # Reversible: a created Space can be deleted with `delete_space`. No gate.
 ))
 
 register(Tool(
@@ -573,7 +573,7 @@ register(Tool(
         "required": ["space_id", "access_list"],
     },
     handler=_update_space_access,
-    risky=True,
+    # Reversible: another update_space_access call restores the previous list.
 ))
 
 register(Tool(
@@ -588,5 +588,5 @@ register(Tool(
         "required": ["space_id", "data_binding"],
     },
     handler=_update_space_binding,
-    risky=True,
+    # Reversible: another update_space_binding call restores the previous query.
 ))

@@ -6,8 +6,13 @@ added by the provider and the underlying credential never enters our process,
 the model, or the sandbox. This module depends on the IntegrationProvider
 interface, not on any specific backend.
 
-Risk classification is fail-safe: read verbs are safe, write verbs gate, and
-anything ambiguous/unknown gates (never default to safe)."""
+Risk classification (v2): only destructive or irreversible verbs gate for
+approval. Reversible writes (create, update, send, post, etc.) and reads
+flow through without a gate. The previous fail-safe-on-ambiguity policy
+was too noisy in practice; most "writes" the agent issues are reversible
+side-effects (a new draft, a posted message, an updated row) where the
+gate added friction without protecting anything. Truly destructive verbs
+are a small, enumerable set."""
 
 from __future__ import annotations
 
@@ -28,18 +33,22 @@ from app.integrations.provider import IntegrationError
 log = structlog.get_logger(__name__)
 _langfuse = get_client()
 
-_READ_VERBS = {"get", "list", "search", "find", "read", "fetch", "retrieve", "lookup", "describe", "count", "view", "show"}
-_WRITE_VERBS = {"create", "update", "delete", "remove", "send", "post", "put", "add", "set", "write", "insert", "upsert", "charge", "pay", "cancel", "archive", "move", "rename", "share", "invite", "modify", "edit", "append", "replace", "trigger", "run", "execute", "drop"}
+# Verbs that destroy data, charge money, or otherwise can't be undone with
+# another action call. These trigger the approval gate. Everything else,
+# including ambiguous / unknown verbs, runs without a gate.
+_DESTRUCTIVE_VERBS = {
+    "delete", "remove", "drop", "destroy", "purge", "wipe", "erase",
+    "trash", "archive",
+    "cancel", "refund", "charge", "pay", "transfer", "withdraw",
+    "expire", "kill", "terminate", "revoke", "deactivate", "disable",
+    "suspend", "ban", "block", "uninstall", "shutdown",
+}
 
 
 def _classify(action_id: str) -> bool:
-    """Return True if the action should be gated (risky). Fail-safe on ambiguity."""
+    """Return True if the action should be gated (destructive/irreversible)."""
     tokens = re.split(r"[-_.\s]+", (action_id or "").lower())
-    if any(t in _WRITE_VERBS for t in tokens):
-        return True
-    if any(t in _READ_VERBS for t in tokens):
-        return False
-    return True  # ambiguous / unknown verb (run_query, execute_sql, ...) -> gate
+    return any(t in _DESTRUCTIVE_VERBS for t in tokens)
 
 
 async def should_gate(action_id: str, metadata: dict | None = None) -> bool:

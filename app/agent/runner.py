@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from typing import Any
 
@@ -338,6 +339,66 @@ def _fmt_params(params: dict, limit: int = 80) -> str:
     return " · " + ", ".join(parts) if parts else ""
 
 
+# Param keys that identify the thing being acted on. Surfaced first in the
+# approval message so the user immediately sees "what" without scanning every
+# key. Order matters: earlier keys win.
+_IDENTITY_PARAM_KEYS = (
+    "name", "title", "subject", "id",
+    "card_id", "dashboard_id", "file_id", "message_id", "user_id", "thread_id",
+    "channel", "to", "target", "url", "path", "query",
+)
+
+
+def _humanize_action(action_id: str, app: str) -> str:
+    """Strip the app prefix (when it duplicates the app column) and convert
+    dashes/underscores to spaces. `metabase-archive-card` with app=`metabase`
+    becomes `Archive card`; `gdrive_trash_file` becomes `Trash file`. Keeps
+    the original casing of any words past the first."""
+    if not action_id:
+        return "(acción desconocida)"
+    s = action_id.strip()
+    for sep in ("-", "_", "."):
+        prefix = f"{app}{sep}".lower()
+        if s.lower().startswith(prefix):
+            s = s[len(prefix):]
+            break
+    s = re.sub(r"[-_.]+", " ", s).strip()
+    if not s:
+        return action_id
+    return s[0].upper() + s[1:]
+
+
+def _humanize_params(
+    params: dict, *, value_limit: int = 60, max_shown: int = 2
+) -> str:
+    """Show up to `max_shown` parameter VALUES (no `key=`), picking
+    identity-like keys first. Trailing `(+N more)` if we truncated."""
+    if not isinstance(params, dict) or not params:
+        return ""
+
+    def _priority(k: str) -> int:
+        try:
+            return _IDENTITY_PARAM_KEYS.index(k.lower())
+        except ValueError:
+            return len(_IDENTITY_PARAM_KEYS)
+
+    ordered = sorted(params.keys(), key=_priority)
+    shown: list[str] = []
+    for k in ordered:
+        v = params[k]
+        if v is None or v == "":
+            continue
+        s = str(v)
+        if len(s) > value_limit:
+            s = s[:value_limit].rstrip() + "…"
+        shown.append(f"`{s}`")
+        if len(shown) >= max_shown:
+            break
+    remaining = sum(1 for v in params.values() if v not in (None, "")) - len(shown)
+    suffix = f" (+{remaining} más)" if remaining > 0 else ""
+    return " · " + ", ".join(shown) + suffix if shown else ""
+
+
 def _render_tool_call(t: dict) -> str:
     """One bullet line per pending risky tool call. Per-tool rendering so the
     user sees what's about to happen in plain language, not raw JSON."""
@@ -346,12 +407,17 @@ def _render_tool_call(t: dict) -> str:
     if name == "run_action":
         app = inp.get("app", "?")
         action = inp.get("action_id", "?")
-        return f"• Ejecutar `{action}` en *{app}*{_fmt_params(inp.get('params') or {})}"
+        human = _humanize_action(action, app)
+        return f"• *{app}*: {human}{_humanize_params(inp.get('params') or {})}"
     if name == "disconnect_integration":
         return f"• Desconectar *{inp.get('app', '?')}*"
+    if name == "delete_space":
+        return f"• Borrar el Space `{inp.get('space_id', '?')}`"
     if name == "simulate_destructive_action":
         return f"• (demo) acción destructiva sobre `{inp.get('target', '?')}`"
-    return f"• `{name}`{_fmt_params(inp)}"
+    # Fallback for any other risky tool not enumerated above: humanise the name.
+    pretty = name.replace("_", " ").capitalize()
+    return f"• {pretty}{_humanize_params(inp)}"
 
 
 async def _post_preamble_before_gate(client, ctx: dict, result: dict) -> None:
@@ -378,26 +444,30 @@ async def _post_preamble_before_gate(client, ctx: dict, result: dict) -> None:
 
 
 async def _post_approval(client, ctx: dict, payload: dict) -> None:
+    """The approval gate fires only for actions that can't be undone with
+    another tool call (delete, archive, charge, disconnect, etc.). Reversible
+    writes flow through without a gate, so when this message appears it's
+    because something irreversible is about to happen."""
     tools = payload.get("tools", [])
     lines = "\n".join(_render_tool_call(t) for t in tools)
     n = len(tools)
     header = (
-        "*Aprobación requerida.* Sebitas quiere ejecutar:"
+        "Antes de seguir, esta acción no se puede deshacer:"
         if n == 1
-        else f"*Aprobación requerida.* Sebitas quiere ejecutar {n} acciones:"
+        else f"Antes de seguir, estas {n} acciones no se pueden deshacer:"
     )
     value = json.dumps(ctx)
     await client.chat_postMessage(
         channel=ctx["channel"],
         thread_ts=ctx.get("reply_thread_ts"),
-        text="Aprobación requerida.",
+        text="Confirmá antes de seguir.",
         blocks=[
             {"type": "section", "text": {"type": "mrkdwn",
-                "text": f":warning: {header}\n{lines}"}},
+                "text": f"{header}\n{lines}"}},
             {"type": "actions", "elements": [
-                {"type": "button", "text": {"type": "plain_text", "text": "Aprobar"},
+                {"type": "button", "text": {"type": "plain_text", "text": "Sí, dale"},
                  "style": "primary", "action_id": "agent_approve", "value": value},
-                {"type": "button", "text": {"type": "plain_text", "text": "Rechazar"},
+                {"type": "button", "text": {"type": "plain_text", "text": "No"},
                  "style": "danger", "action_id": "agent_deny", "value": value},
             ]},
         ],
