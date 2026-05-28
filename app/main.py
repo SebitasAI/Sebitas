@@ -8,7 +8,11 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
 from app.agent.claude import flush_langfuse
+from app.agent.graph import build_graph, set_graph
+from app.config import get_settings
 from app.db.engine import engine
 from app.logging import configure_logging
 from app.slack.app import build_app, build_socket_handler
@@ -19,20 +23,28 @@ log = structlog.get_logger(__name__)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure_logging()
-    slack_app = build_app()
-    handler = build_socket_handler(slack_app)
-    await handler.connect_async()
-    log.info("slack_socket_mode_connected")
-    try:
-        yield
-    finally:
+    settings = get_settings()
+    # psycopg (the LangGraph checkpointer's driver) understands the raw libpq URL
+    # (sslmode etc.) directly, so pass DATABASE_URL as-is here.
+    async with AsyncPostgresSaver.from_conn_string(settings.database_url) as checkpointer:
+        await checkpointer.setup()
+        set_graph(build_graph(checkpointer))
+        log.info("agent_graph_ready")
+
+        slack_app = build_app()
+        handler = build_socket_handler(slack_app)
+        await handler.connect_async()
+        log.info("slack_socket_mode_connected")
         try:
-            await handler.close_async()
-        except Exception as exc:  # noqa: BLE001
-            log.warning("slack_disconnect_failed", error=str(exc))
-        await engine.dispose()
-        flush_langfuse()
-        log.info("shutdown_complete")
+            yield
+        finally:
+            try:
+                await handler.close_async()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("slack_disconnect_failed", error=str(exc))
+            await engine.dispose()
+            flush_langfuse()
+            log.info("shutdown_complete")
 
 
 app = FastAPI(title="Sebitas", lifespan=lifespan)
