@@ -186,15 +186,20 @@ def register_handlers(app: AsyncApp) -> None:
             and is_skill_upload_pending(team_id_pre, user_pre)
             and any(_looks_like_md(f) for f in files)
         ):
-            md = next(f for f in files if _looks_like_md(f))
-            _spawn(handle_skill_file_upload(
-                client=client,
-                team_id=team_id_pre,
-                slack_user_id=user_pre,
-                channel=event["channel"],
-                file_obj=md,
-                thread_ts=event.get("thread_ts"),
-            ))
+            # Spawn one task per .md file. Each gets its own preview ephemeral
+            # so the user can independently install / edit / cancel each. The
+            # precursor is consumed by the first task; subsequent tasks see
+            # it cleared but proceed because we already gated at intake.
+            md_files = [f for f in files if _looks_like_md(f)]
+            for md in md_files:
+                _spawn(handle_skill_file_upload(
+                    client=client,
+                    team_id=team_id_pre,
+                    slack_user_id=user_pre,
+                    channel=event["channel"],
+                    file_obj=md,
+                    thread_ts=event.get("thread_ts"),
+                ))
             return
 
         channel_type = event.get("channel_type")

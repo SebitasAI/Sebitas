@@ -138,6 +138,37 @@ def _looks_like_markdown(f: dict) -> bool:
     return bool(_MD_EXT_RE.search(name))
 
 
+async def _update_ephemeral(
+    response_url: str,
+    *,
+    text: str,
+    blocks: list[dict] | None = None,
+) -> None:
+    """Replace an ephemeral message via its `response_url` (provided in every
+    block_actions interaction payload). Slack accepts up to 5 updates per URL
+    in a 30-minute window; we use this to deactivate the action buttons after
+    Install / Edit / Cancel / Uninstall so the user can't double-click.
+
+    Best-effort: a failed update is logged but doesn't break the flow
+    (the action itself already succeeded)."""
+    if not response_url:
+        return
+    payload: dict = {"replace_original": True, "response_type": "ephemeral", "text": text}
+    if blocks is not None:
+        payload["blocks"] = blocks
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(response_url, json=payload) as resp:
+                if resp.status >= 400:
+                    body_text = await resp.text()
+                    log.warning(
+                        "ephemeral_update_failed",
+                        status=resp.status, body=body_text[:200],
+                    )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ephemeral_update_error", error=str(exc)[:200])
+
+
 async def _download_md(url: str, bot_token: str) -> bytes:
     """Download a Slack file, enforcing the skill size cap before buffering
     the full body. Reads in chunks so a 5 MB malicious upload doesn't get
@@ -256,6 +287,12 @@ def _list_blocks(installs) -> list[dict]:
             },
         })
     return blocks
+
+
+def _status_block(text: str) -> list[dict]:
+    """Single-section block used to replace an action ephemeral after the
+    user clicks a button. Carries no actions so it can't be re-triggered."""
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
 
 def _info_blocks(swi) -> list[dict]:
@@ -568,19 +605,28 @@ def register_skill_handlers(app: AsyncApp) -> None:
         await ack()
         action_id = body["actions"][0]["action_id"]
         preview_id = action_id.split(":", 1)[1]
+        response_url = body.get("response_url", "")
         _gc_state()
         p = _previews.get(preview_id)
         channel = body["channel"]["id"]
         slack_user_id = body["user"]["id"]
         if p is None:
-            await client.chat_postEphemeral(
-                channel=channel, user=slack_user_id,
-                text=":warning: La preview venció. Volvé a subir el archivo con `/sebitas skill upload`.",
+            # The preview is gone; instead of leaving the stale buttons live,
+            # neutralise them with a status line.
+            await _update_ephemeral(
+                response_url,
+                text="La preview venció. Volvé a subir el archivo con `/sebitas skill upload`.",
+                blocks=_status_block(
+                    ":warning: La preview venció. Volvé a subir el archivo con "
+                    "`/sebitas skill upload`."
+                ),
             )
             return
         try:
             skill_id = await _persist_install(p)
         except _registry.SkillNameTaken:
+            # Don't deactivate buttons on this branch: the user still has Edit
+            # available to fix the collision before retrying Install.
             await client.chat_postEphemeral(
                 channel=channel, user=slack_user_id,
                 text=(f":warning: Ya existe una skill con el nombre `{p.name}` en este "
@@ -595,10 +641,13 @@ def register_skill_handlers(app: AsyncApp) -> None:
             )
             return
         _previews.pop(preview_id, None)
-        await client.chat_postEphemeral(
-            channel=channel, user=slack_user_id,
-            text=(f":white_check_mark: Listo. Instalé `{p.name}` con activación "
-                  f"`{p.activation}`. id `{skill_id}`."),
+        await _update_ephemeral(
+            response_url,
+            text=f"Instalada `{p.name}` con activación `{p.activation}`.",
+            blocks=_status_block(
+                f":white_check_mark: *Instalada* `{p.name}` con activación "
+                f"`{p.activation}`.\n• id: `{skill_id}`"
+            ),
         )
 
     @app.action(re.compile(r"^skill_install_edit:(.+)$"))
@@ -606,14 +655,28 @@ def register_skill_handlers(app: AsyncApp) -> None:
         await ack()
         action_id = body["actions"][0]["action_id"]
         preview_id = action_id.split(":", 1)[1]
+        response_url = body.get("response_url", "")
         _gc_state()
         p = _previews.get(preview_id)
         if p is None:
-            await client.chat_postEphemeral(
-                channel=body["channel"]["id"], user=body["user"]["id"],
-                text=":warning: La preview venció. Volvé a subir el archivo con `/sebitas skill upload`.",
+            await _update_ephemeral(
+                response_url,
+                text="La preview venció. Volvé a subir el archivo con `/sebitas skill upload`.",
+                blocks=_status_block(
+                    ":warning: La preview venció. Volvé a subir el archivo con "
+                    "`/sebitas skill upload`."
+                ),
             )
             return
+        # Deactivate the original buttons while the modal is open. After the
+        # user submits, a fresh preview ephemeral is posted with new buttons.
+        await _update_ephemeral(
+            response_url,
+            text=f"Editando `{p.name}`.",
+            blocks=_status_block(
+                f":pencil2: Editando `{p.name}`, esperá la nueva preview..."
+            ),
+        )
         await client.views_open(
             trigger_id=body["trigger_id"],
             view=_edit_modal_view(preview_id, p),
@@ -624,10 +687,13 @@ def register_skill_handlers(app: AsyncApp) -> None:
         await ack()
         action_id = body["actions"][0]["action_id"]
         preview_id = action_id.split(":", 1)[1]
-        _previews.pop(preview_id, None)
-        await client.chat_postEphemeral(
-            channel=body["channel"]["id"], user=body["user"]["id"],
-            text="Cancelado. No instalé nada.",
+        response_url = body.get("response_url", "")
+        p = _previews.pop(preview_id, None)
+        skill_name = p.name if p else "(desconocida)"
+        await _update_ephemeral(
+            response_url,
+            text=f"Cancelado: {skill_name}.",
+            blocks=_status_block(f":x: *Cancelado.* No instalé `{skill_name}`."),
         )
 
     @app.view("skill_install_modal")
@@ -678,14 +744,33 @@ def register_skill_handlers(app: AsyncApp) -> None:
         skill_id_str = action_id.split(":", 1)[1]
         team_id = body.get("team", {}).get("id") or body.get("team_id")
         slack_user_id = body["user"]["id"]
-        channel = body["channel"]["id"]
+        response_url = body.get("response_url", "")
         try:
             skill_uuid = uuid.UUID(skill_id_str)
         except (ValueError, TypeError):
             return
         _, user_id = await _resolve_user_uuid(team_id, slack_user_id)
+        # Resolve the name before we uninstall so the status line can reference it.
+        installs_before = await _registry.list_for_user(user_id)
+        target_name = next(
+            (s.skill.name for s in installs_before if s.skill.id == skill_uuid),
+            None,
+        )
         await _registry.uninstall_for_user(user_id=user_id, skill_id=skill_uuid)
-        await client.chat_postEphemeral(
-            channel=channel, user=slack_user_id,
-            text=":wastebasket: Skill desinstalada.",
+
+        # Re-render the list view in place so the uninstalled skill disappears
+        # and the remaining buttons stay live for further actions.
+        installs_after = await _registry.list_for_user(user_id)
+        if target_name:
+            header_text = f":wastebasket: Desinstalé `{target_name}`."
+        else:
+            header_text = ":wastebasket: Skill desinstalada."
+        blocks = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": header_text}},
+            *_list_blocks(installs_after),
+        ]
+        await _update_ephemeral(
+            response_url,
+            text=f"{len(installs_after)} skill(s) instalada(s).",
+            blocks=blocks,
         )
