@@ -34,18 +34,23 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Drop legacy tables. The stub was never productive; if any rows exist in
-    # a dev DB they get tossed (intentional, confirmed by the user).
-    op.drop_table("skill_install")
-    op.drop_table("skill")
+    # Idempotency: a previous deploy crashed mid-migration after creating the
+    # new ENUM types (CREATE TYPE was not rolled back cleanly under asyncpg).
+    # We now DROP IF EXISTS everything we're about to create, then recreate
+    # fresh. Safe because the legacy stub had no productive rows (confirmed
+    # at slice start) and the new tables haven't shipped to users yet.
+    op.execute("DROP TABLE IF EXISTS skill_install CASCADE")
+    op.execute("DROP TABLE IF EXISTS skill CASCADE")
+    op.execute("DROP TYPE IF EXISTS skill_activation CASCADE")
+    op.execute("DROP TYPE IF EXISTS skill_source CASCADE")
 
     # Postgres enums for the two discriminators. Created as types so the
     # column types pin them; the migration sets `create_type=False` on the
-    # columns to avoid duplicate CREATE TYPE if rerun.
+    # columns to avoid duplicate CREATE TYPE inside op.create_table.
     skill_source = sa.Enum("upload", "catalog", name="skill_source")
     skill_activation = sa.Enum("always_active", "on_demand", name="skill_activation")
-    skill_source.create(op.get_bind(), checkfirst=True)
-    skill_activation.create(op.get_bind(), checkfirst=True)
+    skill_source.create(op.get_bind(), checkfirst=False)
+    skill_activation.create(op.get_bind(), checkfirst=False)
 
     op.create_table(
         "skill",
