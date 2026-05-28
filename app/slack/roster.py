@@ -33,6 +33,12 @@ log = structlog.get_logger(__name__)
 _USERS_STALE_AFTER = timedelta(hours=12)
 _CHANNEL_STALE_AFTER = timedelta(hours=1)  # channel membership shifts faster
 
+# In-process dedupe: one workspace sync at a time. Multiple callers (a
+# fresh-workspace first message, plus a follow-up find_user) share the same
+# Event so they don't kick off duplicate users.list paginations.
+_syncing: dict[uuid.UUID, asyncio.Event] = {}
+_syncing_lock = asyncio.Lock()
+
 
 async def _client_for_workspace(workspace_id: uuid.UUID) -> AsyncWebClient | None:
     """Per-workspace Slack client. Returns None if the workspace isn't
@@ -137,17 +143,50 @@ async def _upsert_user(*, workspace_id, slack_user_id, display_name, real_name, 
         await session.commit()
 
 
+async def _start_sync_in_background(workspace_id: uuid.UUID) -> asyncio.Event:
+    """Spawn (or join) a background users.list sync for this workspace.
+    Returns the Event that fires when the sync completes -- callers can
+    `await evt.wait()` with a timeout for bounded-wait, OR just throw away
+    the reference for fire-and-forget. Idempotent: a second call while a
+    sync is in flight returns the SAME Event (no duplicate paginated calls).
+    """
+    async with _syncing_lock:
+        existing = _syncing.get(workspace_id)
+        if existing is not None:
+            return existing
+        evt = asyncio.Event()
+        _syncing[workspace_id] = evt
+
+    async def _runner():
+        try:
+            await sync_workspace_users(workspace_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("workspace_sync_bg_failed", workspace_id=str(workspace_id), error=str(exc))
+        finally:
+            async with _syncing_lock:
+                _syncing.pop(workspace_id, None)
+            evt.set()
+
+    asyncio.create_task(_runner())
+    return evt
+
+
 async def ensure_workspace_synced(workspace_id: uuid.UUID, *, force: bool = False) -> None:
-    """If the workspace has never been synced (or it's stale), run a full
-    users.list sync. Idempotent + low-cost on warm caches."""
+    """Non-blocking. Kicks off a background sync if the workspace has never
+    been synced (or is stale), then returns immediately. The first message
+    in a fresh workspace does NOT wait for users.list to paginate -- which
+    could otherwise add 10-30s of latency on large orgs and time the run
+    out before the reply posts. Subsequent calls within the stale window
+    are no-ops."""
     if not force:
         last = await _users_last_sync(workspace_id)
         if last is not None:
-            # `last` is naive; treat as UTC.
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             if now - last < _USERS_STALE_AFTER:
                 return
-    await sync_workspace_users(workspace_id)
+    # Fire-and-forget: we discard the Event; the background task signals it
+    # but no one in this code path is waiting.
+    await _start_sync_in_background(workspace_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -276,13 +315,20 @@ async def _refresh_channel(workspace_id: uuid.UUID, slack_channel_id: str) -> No
 
 async def find_user(workspace_id: uuid.UUID, query: str) -> list[dict]:
     """Case-insensitive match against display_name, real_name, and email-prefix.
-    Returns 0/1/many. On miss, forces a workspace re-sync and retries once."""
+    Returns 0/1/many.
+
+    On miss: join (or kick off) the background sync with a 10s bounded wait,
+    then retry. The bound prevents a single find_user call from blocking the
+    chat_postMessage path indefinitely when a workspace's users.list is slow."""
     matches = await _find_user_query(workspace_id, query)
-    if not matches:
-        # On-miss refresh: maybe the user joined since the last sync.
-        await sync_workspace_users(workspace_id)
-        matches = await _find_user_query(workspace_id, query)
-    return matches
+    if matches:
+        return matches
+    evt = await _start_sync_in_background(workspace_id)
+    try:
+        await asyncio.wait_for(evt.wait(), timeout=10.0)
+    except asyncio.TimeoutError:
+        log.info("find_user_sync_timeout", workspace_id=str(workspace_id), query=query)
+    return await _find_user_query(workspace_id, query)
 
 
 async def _find_user_query(workspace_id: uuid.UUID, query: str) -> list[dict]:
