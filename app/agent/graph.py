@@ -47,7 +47,10 @@ async def _has_recent_pending_connect(workspace_id: uuid.UUID, app: str) -> bool
     from app.db.models import IntegrationConnection
     from app.db.session import get_session
 
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+    # Postgres `created_at` columns are TIMESTAMP WITHOUT TIME ZONE (naive UTC
+    # under the hood — see TimestampMixin). asyncpg rejects binding a tz-aware
+    # datetime against a naive column, so strip tzinfo to match.
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).replace(tzinfo=None)
     async with get_session() as session:
         row = (
             await session.execute(
