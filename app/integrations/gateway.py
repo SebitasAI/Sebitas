@@ -1,11 +1,13 @@
 """Integration gateway: resolves the workspace's connected account and runs
-actions through Pipedream with auth injected server-side. The model passes only
-app/action/params; the connected-account reference is added here and the
-provider credential never enters our process, the model, or the sandbox.
+actions through an IntegrationProvider with auth injected provider-side.
+
+The model passes only app/action/params; the connected-account reference is
+added by the provider and the underlying credential never enters our process,
+the model, or the sandbox. This module depends on the IntegrationProvider
+interface, not on any specific backend.
 
 Risk classification is fail-safe: read verbs are safe, write verbs gate, and
-anything ambiguous/unknown gates (never default to safe).
-"""
+anything ambiguous/unknown gates (never default to safe)."""
 
 from __future__ import annotations
 
@@ -19,7 +21,9 @@ from sqlalchemy import select
 from app.agent.context import workspace_id_var
 from app.db.models import IntegrationConnection
 from app.db.session import get_session
-from app.integrations import pipedream
+from app.integrations.errors import to_user_message
+from app.integrations.pipedream_provider import get_provider
+from app.integrations.provider import IntegrationError
 
 log = structlog.get_logger(__name__)
 _langfuse = get_client()
@@ -41,7 +45,7 @@ def _classify(action_id: str) -> bool:
 async def should_gate(action_id: str, metadata: dict | None = None) -> bool:
     """Gate decision for an integration action.
 
-    Hook: prefer Pipedream metadata when it exposes read/write or side-effects;
+    Hook: prefer provider metadata when it exposes read/write or side-effects;
     per-workspace policy (allow/deny lists, always-approve) would plug in here.
     Not built yet — the verb heuristic with fail-safe default is the workhorse.
     """
@@ -74,8 +78,11 @@ async def is_connected(workspace_id: uuid.UUID, app: str) -> bool:
 
 
 async def list_integrations() -> str:
-    """List the workspace's *connected* integrations with status + connected-since.
-    (`last used` is omitted: the Pipedream account shape does not expose it.)"""
+    """List the workspace's *connected* integrations with status, auth type
+    (oauth | custom, for UX only), and connected-since date.
+
+    Auth type comes from the provider in a single round-trip (one list_accounts
+    call) and is informational: it never branches invocation logic."""
     ws = _current_workspace()
     if not ws:
         return "Error: sin contexto de workspace."
@@ -90,18 +97,33 @@ async def list_integrations() -> str:
         ).scalars().all()
     if not rows:
         return "No hay integraciones conectadas en este workspace."
+
+    # Best-effort auth-type enrichment. If the provider call fails we still
+    # render the local rows -- listing is UX, not a blocker.
+    provider = get_provider()
+    accounts_by_id: dict[str, dict] = {}
+    try:
+        for a in await provider.list_accounts(str(ws)):
+            aid = a.get("id")
+            if aid:
+                accounts_by_id[aid] = a
+    except IntegrationError as e:
+        log.warning("list_integrations_provider_fetch_failed", kind=e.kind, status=e.status)
+
     lines = []
     for r in rows:
         when = r.created_at.strftime("%Y-%m-%d") if r.created_at else "?"
-        lines.append(f"• *{r.app}* — {r.status}, conectada desde {when}")
+        acc = accounts_by_id.get(r.pipedream_account_id or "")
+        auth = provider.auth_type_of(acc) if acc else None
+        suffix = f" · auth: {auth}" if auth else ""
+        lines.append(f"• *{r.app}* — {r.status}, conectada desde {when}{suffix}")
     return "Integraciones conectadas:\n" + "\n".join(lines)
 
 
 async def disconnect_integration(app: str) -> str:
-    """Delete the connected account at Pipedream + mark the row as disconnected.
-    Idempotent: if the app is not currently connected for this workspace, returns
-    a polite no-op; if Pipedream returns 404, treat as already-gone and just
-    update local state. Tenant-scoped (only THIS workspace's connection)."""
+    """Delete the connected account at the provider + mark the row as
+    disconnected. Idempotent: not-connected returns a polite no-op; a 404 from
+    the provider is treated as already-gone. Tenant-scoped."""
     ws = _current_workspace()
     if not ws:
         return "Error: sin contexto de workspace."
@@ -126,11 +148,12 @@ async def disconnect_integration(app: str) -> str:
             existed = False
             if account_id:
                 try:
-                    existed = await pipedream.delete_account(account_id)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("integration_disconnect_failed", app=app, error=str(exc))
-                    span.update(output=f"error: {exc}")
-                    return f"Error al desconectar {app}: {exc}"
+                    existed = await get_provider().disconnect(account_id)
+                except IntegrationError as e:
+                    user_msg = to_user_message(e, app)
+                    log.warning("integration_disconnect_failed", app=app, kind=e.kind, status=e.status)
+                    span.update(output=f"error: {e.kind}")
+                    return user_msg
             row.status = "disconnected"
             row.pending_run_id = None
             row.pending_ctx = None
@@ -138,7 +161,7 @@ async def disconnect_integration(app: str) -> str:
         msg = (
             f"Desconectada *{app}*."
             if existed
-            else f"Desconectada *{app}* (ya no existía en Pipedream)."
+            else f"Desconectada *{app}* (ya no existía en el proveedor)."
         )
         span.update(output=msg)
     log.info("integration_disconnected", app=app)
@@ -146,7 +169,11 @@ async def disconnect_integration(app: str) -> str:
 
 
 async def find_actions(app: str, query: str | None = None) -> str:
-    actions = await pipedream.search_actions(app, query)
+    try:
+        actions = await get_provider().list_actions(app, query)
+    except IntegrationError as e:
+        log.warning("find_actions_failed", app=app, kind=e.kind, status=e.status)
+        return to_user_message(e, app)
     if not actions:
         return f"No encontré actions para {app!r}."
     lines = [f"• {a.get('key')} — {a.get('name', '')}" for a in actions[:20]]
@@ -154,27 +181,57 @@ async def find_actions(app: str, query: str | None = None) -> str:
 
 
 async def run_action(app: str, action_id: str, params: dict | None = None) -> str:
+    """Pre-validate the connection (auth fields present, OAuth not expired),
+    then invoke through the provider. Any provider error is mapped to an
+    actionable user-facing message."""
     ws = _current_workspace()
     if not ws:
         return "Error: sin contexto de workspace."
     conn = await _connection(ws, app)
     if conn is None:
         return f"La integración {app!r} no está conectada en este workspace."
+    if not conn.pipedream_account_id:
+        # Connected status but no account id -> shouldn't happen; treat as broken.
+        return to_user_message(
+            IntegrationError("account_not_found"), app
+        )
 
-    configured = dict(params or {})
-    # Inject the connected-account reference; the provider credential stays at
-    # Pipedream and is never exposed to us or the model.
-    configured[app] = {"authProvisionId": conn.pipedream_account_id}
+    provider = get_provider()
+
+    # Pre-invocation validation. Cheap defense-in-depth on top of the provider's
+    # own error response; surfaces incomplete connections with the field names
+    # before we waste a round-trip on a doomed action.
+    try:
+        missing = await provider.validate_connection(str(ws), conn.pipedream_account_id)
+    except IntegrationError as e:
+        log.warning("validate_connection_errored", app=app, kind=e.kind, status=e.status)
+        missing = []
+    if missing:
+        if missing == ["__token_expired__"]:
+            return to_user_message(IntegrationError("auth_expired"), app)
+        if missing == ["__not_found__"]:
+            return to_user_message(IntegrationError("account_not_found"), app)
+        return to_user_message(
+            IntegrationError("auth_missing_fields", detail=missing), app
+        )
 
     with _langfuse.start_as_current_observation(
         as_type="span", name=f"integration:{app}.{action_id}", input={"app": app, "action": action_id}
     ) as span:
         try:
-            result = await pipedream.run_action(str(ws), action_id, configured)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("integration_action_failed", app=app, action=action_id, error=str(exc))
-            span.update(output=f"error: {exc}")
-            return f"Error ejecutando {action_id} en {app}: {exc}"
+            result = await provider.run_action(
+                external_user_id=str(ws),
+                account_id=conn.pipedream_account_id,
+                app=app,
+                action_id=action_id,
+                params=params or {},
+            )
+        except IntegrationError as e:
+            user_msg = to_user_message(e, app)
+            log.warning("integration_action_failed", app=app, action=action_id, kind=e.kind, status=e.status)
+            span.update(output=f"error: {e.kind}")
+            return user_msg
+
         out = result.get("ret", result) if isinstance(result, dict) else result
         text = str(out)[:3000]
         span.update(output=text[:500])
