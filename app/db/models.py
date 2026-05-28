@@ -157,6 +157,37 @@ class IntegrationConnection(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
 
 
+class SlackEventSeen(Base):
+    """Dedupe table for Slack event delivery. Slack guarantees at-least-once;
+    Bolt retries on non-2xx. We INSERT ON CONFLICT DO NOTHING and drop the
+    event if the row already exists. Rows are TTL'd by a background cleanup."""
+
+    __tablename__ = "slack_event_seen"
+
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(), nullable=False, index=True
+    )
+
+
+class ThreadInbox(Base):
+    """Queue of messages that arrived for a (team_id, conv_key) while another
+    run was active on that thread. The holder of the per-thread mutex drains
+    this and coalesces queued messages into a single follow-up turn."""
+
+    __tablename__ = "thread_inbox"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    team_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    conv_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(), nullable=False
+    )
+
+
 class MessageAttachment(Base):
     """A file attached to a user message. The bytes live in R2 (`r2_ref`); this
     row keeps the reference so multi-turn re-attachment works without

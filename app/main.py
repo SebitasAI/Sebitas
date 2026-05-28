@@ -3,6 +3,7 @@ connection started in the lifespan. Single process, 12-factor."""
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 import structlog
@@ -12,6 +13,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from app.agent.claude import flush_langfuse
 from app.agent.graph import build_graph, set_graph
+from app.concurrency import cleanup_old_events
 from app.config import get_settings
 from app.db.engine import engine
 from app.integrations.webhook import router as pipedream_webhook_router
@@ -36,9 +38,24 @@ async def lifespan(_: FastAPI):
         handler = build_socket_handler(slack_app)
         await handler.connect_async()
         log.info("slack_socket_mode_connected")
+
+        # Background cleanup: prune slack_event_seen rows older than 1h every
+        # 5 min, so the dedupe table doesn't grow unbounded.
+        async def _event_cleanup_loop():
+            while True:
+                try:
+                    n = await cleanup_old_events(older_than_hours=1)
+                    if n:
+                        log.info("slack_event_cleanup", removed=n)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("slack_event_cleanup_failed", error=str(exc))
+                await asyncio.sleep(300)
+        cleanup_task = asyncio.create_task(_event_cleanup_loop())
+
         try:
             yield
         finally:
+            cleanup_task.cancel()
             try:
                 await handler.close_async()
             except Exception as exc:  # noqa: BLE001

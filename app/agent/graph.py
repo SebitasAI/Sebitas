@@ -35,6 +35,33 @@ class AgentState(TypedDict):
     iterations: int
 
 
+async def _has_recent_pending_connect(workspace_id: uuid.UUID, app: str) -> bool:
+    """Has there been a connect request for (workspace, app) recently enough
+    that a button is likely still actionable? Avoids posting a duplicate link.
+
+    Local import to keep the module load light and avoid an import cycle."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from app.db.models import IntegrationConnection
+    from app.db.session import get_session
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                select(IntegrationConnection).where(
+                    IntegrationConnection.workspace_id == workspace_id,
+                    IntegrationConnection.app == app,
+                    IntegrationConnection.status == "pending",
+                    IntegrationConnection.created_at > cutoff,
+                )
+            )
+        ).scalar_one_or_none()
+    return row is not None
+
+
 def _tool_use_blocks(message: dict) -> list[dict]:
     content = message.get("content")
     if not isinstance(content, list):
@@ -77,6 +104,15 @@ async def _tools_node(state: AgentState) -> dict:
         ws_uuid = uuid.UUID(ws_str) if ws_str else None
         if ws_uuid and app and await gateway.is_connected(ws_uuid, app):
             content = f"La integración {app!r} ya está conectada en este workspace. Reintentá la action."
+        elif ws_uuid and app and await _has_recent_pending_connect(ws_uuid, app):
+            # Idempotency: a pending connect already has a button posted; don't
+            # duplicate it. The user should complete that one (or wait for it
+            # to time out). The runner won't post another link.
+            content = (
+                f"Ya hay una solicitud de conexión abierta para {app!r}. "
+                "El usuario tiene que completarla (o esperar a que expire) "
+                "antes de reintentar."
+            )
         else:
             interrupt({"type": "connect", "app": app})
             content = f"Integración {app!r} conectada. Reintentá la action."
