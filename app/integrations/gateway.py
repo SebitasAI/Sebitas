@@ -169,15 +169,44 @@ async def disconnect_integration(app: str) -> str:
 
 
 async def find_actions(app: str, query: str | None = None) -> str:
+    """List actions with their param schemas inline. The schema (top 10, fetched
+    in parallel) is what lets the model use the right param names directly --
+    without it, the model would guess (e.g. snake_case vs camelCase) and silent
+    misses cause 4xx on the action call."""
+    import asyncio
+
+    provider = get_provider()
     try:
-        actions = await get_provider().list_actions(app, query)
+        actions = await provider.list_actions(app, query)
     except IntegrationError as e:
         log.warning("find_actions_failed", app=app, kind=e.kind, status=e.status)
         return to_user_message(e, app)
     if not actions:
         return f"No encontré actions para {app!r}."
-    lines = [f"• {a.get('key')} — {a.get('name', '')}" for a in actions[:20]]
-    return f"Actions de {app}:\n" + "\n".join(lines)
+
+    top = actions[:10]
+    props_lists = await asyncio.gather(
+        *(provider.get_action_props(a.get("key", "")) for a in top),
+        return_exceptions=False,
+    )
+
+    def _fmt_prop(p: dict) -> str:
+        n, t = p.get("name") or "?", p.get("type") or "?"
+        opt = " opt" if p.get("optional") else ""
+        return f"`{n}`:{t}{opt}"
+
+    lines: list[str] = []
+    for a, props in zip(top, props_lists, strict=False):
+        key = a.get("key", "")
+        name = a.get("name", "")
+        if props:
+            params = ", ".join(_fmt_prop(p) for p in props)
+            lines.append(f"• `{key}` — {name} · params: {params}")
+        else:
+            lines.append(f"• `{key}` — {name}")
+    # If we truncated, give the model a hint.
+    suffix = f"\n\n(mostrando los primeros 10 de {len(actions)})" if len(actions) > 10 else ""
+    return f"Actions de {app}:\n" + "\n".join(lines) + suffix
 
 
 async def run_action(app: str, action_id: str, params: dict | None = None) -> str:

@@ -79,6 +79,13 @@ class IntegrationProvider(ABC):
         """Available actions for an app (optionally filtered by query)."""
 
     @abstractmethod
+    async def get_action_props(self, action_id: str) -> list[dict]:
+        """Per-action configurable props: list of {name, type, optional, label}.
+        The auth prop (type='app') is filtered out -- the gateway injects auth
+        and the model must not see/pass it. Returns [] if the action has none
+        or the lookup fails (gateway falls back to a generic message)."""
+
+    @abstractmethod
     async def run_action(
         self,
         external_user_id: str,

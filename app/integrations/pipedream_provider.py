@@ -114,6 +114,29 @@ class PipedreamProvider(IntegrationProvider):
     async def list_actions(self, app: str, query: str | None) -> list[dict]:
         return await self._call(pd.search_actions(app, query))
 
+    async def get_action_props(self, action_id: str) -> list[dict]:
+        try:
+            comp = await pd.get_component(action_id)
+        except Exception as e:  # noqa: BLE001
+            log.warning("get_action_props_failed", action=action_id, error=str(e))
+            return []
+        props_in = (comp.get("configurable_props") if isinstance(comp, dict) else None) or []
+        out: list[dict] = []
+        for p in props_in:
+            if not isinstance(p, dict):
+                continue
+            # Filter auth prop: it's injected by the gateway, never passed by
+            # the model. Keeping it would risk the model trying to pass it.
+            if p.get("type") == "app":
+                continue
+            out.append({
+                "name": p.get("name"),
+                "type": p.get("type"),
+                "optional": bool(p.get("optional")),
+                "label": p.get("label"),
+            })
+        return out
+
     async def _resolve_auth_prop_name(self, action_id: str, app: str) -> str:
         """Find the configurable prop on this action that holds the auth
         reference. Pipedream convention: the prop has `type == "app"` and
