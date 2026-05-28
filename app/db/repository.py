@@ -76,6 +76,8 @@ async def add_message(
     text: str,
     app_user_id: uuid.UUID | None = None,
     slack_ts: str | None = None,
+    tool_calls: list | None = None,
+    tool_call_id: str | None = None,
 ) -> Message:
     message = Message(
         thread_id=thread_id,
@@ -83,6 +85,8 @@ async def add_message(
         text=text,
         app_user_id=app_user_id,
         slack_ts=slack_ts,
+        tool_calls=tool_calls,
+        tool_call_id=tool_call_id,
     )
     session.add(message)
     await session.flush()

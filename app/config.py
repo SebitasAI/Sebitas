@@ -35,6 +35,30 @@ class Settings(BaseSettings):
     claude_max_tokens: int = 8000
     claude_effort: str = "medium"  # low | medium | high | xhigh | max
 
+    # Cheap model for delegated sub-tasks, routed via LiteLLM (provider/model form).
+    cheap_model: str = "anthropic/claude-haiku-4-5"
+    # Safety cap on agent loop turns.
+    agent_max_iterations: int = 8
+
+    # E2B sandbox (the SDK also reads E2B_API_KEY from the environment).
+    e2b_api_key: str | None = None
+    e2b_timeout_seconds: int = 300
+
+    # Cloudflare R2 (S3-compatible) for artifacts + skill packages.
+    r2_account_id: str | None = None
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
+    r2_bucket: str | None = None
+    artifact_url_expiry: int = 3600  # signed-URL lifetime (seconds)
+
+    # Pipedream Connect (credentialed integrations gateway). We never store the
+    # provider credentials, only the connected-account reference per workspace.
+    pipedream_client_id: str | None = None
+    pipedream_client_secret: str | None = None
+    pipedream_project_id: str | None = None
+    pipedream_environment: str = "development"
+    integration_action_timeout: int = 60
+
     log_level: str = "INFO"
 
 
