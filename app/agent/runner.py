@@ -9,6 +9,7 @@ post the reply in the thread. Designed to be moved behind a worker/queue
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import Any
@@ -20,6 +21,11 @@ from langgraph.types import Command
 from app.agent.context import set_run_context
 from app.agent.graph import get_graph
 from app.agent.sandbox import close_run_sandbox
+from app.concurrency import (
+    ThreadLockHandle,
+    drain_inbox,
+    try_acquire_thread_lock,
+)
 from app.config import get_settings
 from app.db import repository as repo
 from app.db.session import get_session
@@ -258,10 +264,20 @@ async def _post_approval(client, ctx: dict, payload: dict) -> None:
     )
 
 
-async def _drive(client, ctx: dict, result: dict) -> None:
-    """Handle a graph result: pause for approval/connect, or finish (persist + reply)."""
+async def _drive(client, ctx: dict, result: dict, *, lock_handle: ThreadLockHandle | None = None) -> None:
+    """Handle a graph result: pause for approval/connect, or finish (persist + reply).
+
+    Releases the thread mutex at the right moment: on interrupt we release as
+    soon as we know we're pausing (so the next inbound message can enter the
+    thread); on end_turn we release after persistence + reply, then schedule a
+    debounced drain to process any messages queued during the run."""
     interrupts = result.get("__interrupt__")
     if interrupts:
+        # Release the lock BEFORE posting the gate / connect link: pausing
+        # the run means another message (e.g. a follow-up after the user
+        # finishes a connect flow) should be allowed to enter the thread.
+        if lock_handle is not None:
+            await lock_handle.release()
         payload = interrupts[0].value
         if isinstance(payload, dict) and payload.get("type") == "connect":
             from app.integrations import connect  # lazy: avoid import cycle
@@ -290,6 +306,58 @@ async def _drive(client, ctx: dict, result: dict) -> None:
     await _remove_reaction(client, ctx["channel"], ctx["user_ts"])
     await close_run_sandbox(ctx["run_id"])  # run finished -> tear down its sandbox
 
+    # End of turn: release the mutex and kick off a debounced drain of any
+    # messages that arrived during this run. Doesn't block: the drain runs
+    # as a detached task so this run's response isn't held up.
+    if lock_handle is not None:
+        await lock_handle.release()
+    if ctx.get("team_id") and ctx.get("conversation_key"):
+        asyncio.create_task(
+            _debounce_drain(client, ctx["team_id"], ctx["channel"], ctx["conversation_key"])
+        )
+
+
+async def _debounce_drain(client, team_id: str, channel: str, conv_key: str) -> None:
+    """After a run ends, wait a short window then drain any queued messages
+    and run a follow-up turn with them coalesced. The wait absorbs bursts
+    ('si si si' typed rapidly) into a single follow-up run."""
+    await asyncio.sleep(0.7)
+    handle = await try_acquire_thread_lock(team_id, conv_key)
+    if handle is None:
+        return  # another holder is active; they'll drain when done
+    try:
+        queued = await drain_inbox(team_id, conv_key)
+        if not queued:
+            return
+        # Build a coalesced run from the queued payloads. Use the LATEST
+        # payload as the "current" so reply_thread_ts and reactions land on
+        # the most recent user message.
+        latest = queued[-1]
+        coalesced_text = "\n---\n".join(q.get("user_text") or "" for q in queued if q.get("user_text"))
+        files: list[dict] = []
+        for q in queued:
+            qf = q.get("files")
+            if qf:
+                files.extend(qf)
+        log.info("inbox_drain", team_id=team_id, conv_key=conv_key, count=len(queued))
+        await run_agent(
+            client=client,
+            team_id=team_id,
+            slack_user_id=latest.get("slack_user_id"),
+            channel=latest.get("channel") or channel,
+            user_text=coalesced_text,
+            user_ts=latest.get("user_ts"),
+            conversation_key=conv_key,
+            reply_thread_ts=latest.get("reply_thread_ts"),
+            require_existing_thread=bool(latest.get("require_existing_thread")),
+            files=files or None,
+            lock_handle=handle,
+        )
+        handle = None  # ownership transferred to run_agent
+    finally:
+        if handle is not None:
+            await handle.release()
+
 
 # --------------------------------------------------------------------------- #
 # Entry points
@@ -298,7 +366,29 @@ async def _drive(client, ctx: dict, result: dict) -> None:
 async def run_agent(*, client, team_id: str | None, slack_user_id: str | None, channel: str,
                     user_text: str, user_ts: str, conversation_key: str, reply_thread_ts: str | None,
                     require_existing_thread: bool = False,
-                    files: list[dict] | None = None) -> None:
+                    files: list[dict] | None = None,
+                    lock_handle: ThreadLockHandle | None = None) -> None:
+    # The lock_handle is the per-thread mutex acquired in the Slack handler.
+    # It MUST be released on every exit path: interrupt (so the next inbound
+    # message can enter and resume), end_turn (so queued items get drained),
+    # validation early-returns, and any exception. We pass it through ctx so
+    # _drive can release at the precise point (after posting the gate, etc.).
+    try:
+        await _run_agent_impl(
+            client=client, team_id=team_id, slack_user_id=slack_user_id,
+            channel=channel, user_text=user_text, user_ts=user_ts,
+            conversation_key=conversation_key, reply_thread_ts=reply_thread_ts,
+            require_existing_thread=require_existing_thread, files=files,
+            lock_handle=lock_handle,
+        )
+    finally:
+        if lock_handle is not None:
+            await lock_handle.release()
+
+
+async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text, user_ts,
+                          conversation_key, reply_thread_ts, require_existing_thread,
+                          files, lock_handle):
     text = user_text.strip()
     has_files = bool(files)
     if (not text and not has_files) or not team_id or not slack_user_id:
@@ -397,7 +487,7 @@ async def run_agent(*, client, team_id: str | None, slack_user_id: str | None, c
         user_id=slack_user_id, tags=["slack", "agent"], metadata={"tenant": team_id},
     ):
         result = await get_graph().ainvoke({"messages": seed, "iterations": 0}, config)
-        await _drive(client, ctx, result)
+        await _drive(client, ctx, result, lock_handle=lock_handle)
 
 
 async def resume_run(*, client, ctx: dict, decision: str) -> None:
