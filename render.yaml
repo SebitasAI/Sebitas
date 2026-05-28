@@ -1,0 +1,41 @@
+# Render Blueprint (https://render.com/docs/blueprint-spec)
+#
+# One web service for the Sebitas agent backend. Postgres stays on Neon
+# (DATABASE_URL is provisioned via Doppler-Render integration; not declared
+# here). Secrets sync from Doppler to Render, NOT pasted manually.
+#
+# To deploy: push to main, then in Render dashboard -> Blueprint -> Connect
+# this repo. Or use this file as reference and create the service manually
+# (Web Service -> Docker -> repo).
+
+services:
+  - type: web
+    name: sebitas
+    runtime: docker
+    plan: starter           # $7/mo, no idle restart (needed for 24/7 Slack)
+    region: oregon          # us-west; pick closer if your users are elsewhere
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true        # auto-deploy on push to main; flip to false if jumpy
+    envVars:
+      # Render injects PORT; we read it in the Dockerfile CMD.
+      - key: PORT
+        value: 8000
+      # ALL OTHER SECRETS COME FROM DOPPLER via the Render-Doppler integration:
+      # - DATABASE_URL (Neon)
+      # - ANTHROPIC_API_KEY
+      # - SLACK_APP_TOKEN (xapp-, app-level, multi-workspace)
+      # - SLACK_BOT_TOKEN (legacy fallback; optional after backfill)
+      # - SLACK_SIGNING_SECRET (for OAuth callback verification, slice C)
+      # - SLACK_CLIENT_ID + SLACK_CLIENT_SECRET (for OAuth install, slice C)
+      # - WORKSPACE_TOKEN_ENCRYPTION_KEY (Fernet)
+      # - LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL
+      # - R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_BUCKET
+      # - E2B_API_KEY
+      # - PIPEDREAM_CLIENT_ID / PIPEDREAM_CLIENT_SECRET / PIPEDREAM_PROJECT_ID
+      # - PIPEDREAM_WEBHOOK_SECRET (optional)
+      # - PUBLIC_BASE_URL (set this AFTER first deploy to the Render URL)
+      # - CONVEX_URL / CONVEX_DEPLOY_KEY / CONVEX_HOSTING_SITE_URL
+      # - INTERNAL_SPACES_TOKEN
+      # - CLERK_PUBLISHABLE_KEY / CLERK_SECRET_KEY / CLERK_JWT_ISSUER
+      # - CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID
