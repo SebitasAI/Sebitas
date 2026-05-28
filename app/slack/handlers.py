@@ -122,16 +122,19 @@ async def _route_message(
 
 async def _decide(client, body: dict, decision: str) -> None:
     """Replace the approval message (removing the buttons so it can't be clicked
-    again), then resume the paused run."""
+    again), then resume the paused run. The replacement message carries no
+    actions block, so a double-click on the original is a no-op."""
     ctx = json.loads(body["actions"][0]["value"])
-    label = "✅ Aprobado" if decision == "approve" else "❌ Rechazado"
+    if decision == "approve":
+        text = ":white_check_mark: *Aprobado.* Sigo con la tarea."
+    else:
+        text = ":x: *Rechazado.* No hice nada."
     try:
         await client.chat_update(
             channel=body["channel"]["id"],
             ts=body["message"]["ts"],
-            text=label,
-            blocks=[{"type": "section", "text": {"type": "mrkdwn",
-                "text": f"{label} — acción riesgosa."}}],
+            text="Aprobado." if decision == "approve" else "Rechazado.",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("approval_update_failed", error=str(exc))
