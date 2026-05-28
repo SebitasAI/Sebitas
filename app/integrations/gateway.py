@@ -63,13 +63,19 @@ async def _connection(workspace_id: uuid.UUID, app: str) -> IntegrationConnectio
                 select(IntegrationConnection).where(
                     IntegrationConnection.workspace_id == workspace_id,
                     IntegrationConnection.app == app,
-                    IntegrationConnection.status == "active",
+                    IntegrationConnection.status == "connected",
                 )
             )
         ).scalar_one_or_none()
 
 
+async def is_connected(workspace_id: uuid.UUID, app: str) -> bool:
+    return await _connection(workspace_id, app) is not None
+
+
 async def list_integrations() -> str:
+    """List the workspace's *connected* integrations with status + connected-since.
+    (`last used` is omitted: the Pipedream account shape does not expose it.)"""
     ws = _current_workspace()
     if not ws:
         return "Error: sin contexto de workspace."
@@ -78,13 +84,65 @@ async def list_integrations() -> str:
             await session.execute(
                 select(IntegrationConnection).where(
                     IntegrationConnection.workspace_id == ws,
-                    IntegrationConnection.status == "active",
+                    IntegrationConnection.status == "connected",
                 )
             )
         ).scalars().all()
     if not rows:
         return "No hay integraciones conectadas en este workspace."
-    return "Integraciones conectadas:\n" + "\n".join(f"• {r.app}" for r in rows)
+    lines = []
+    for r in rows:
+        when = r.created_at.strftime("%Y-%m-%d") if r.created_at else "?"
+        lines.append(f"• *{r.app}* — {r.status}, conectada desde {when}")
+    return "Integraciones conectadas:\n" + "\n".join(lines)
+
+
+async def disconnect_integration(app: str) -> str:
+    """Delete the connected account at Pipedream + mark the row as disconnected.
+    Idempotent: if the app is not currently connected for this workspace, returns
+    a polite no-op; if Pipedream returns 404, treat as already-gone and just
+    update local state. Tenant-scoped (only THIS workspace's connection)."""
+    ws = _current_workspace()
+    if not ws:
+        return "Error: sin contexto de workspace."
+    with _langfuse.start_as_current_observation(
+        as_type="span", name=f"integration:disconnect:{app}", input={"app": app}
+    ) as span:
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    select(IntegrationConnection).where(
+                        IntegrationConnection.workspace_id == ws,
+                        IntegrationConnection.app == app,
+                        IntegrationConnection.status == "connected",
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                msg = f"*{app}* no está conectada en este workspace."
+                span.update(output=msg)
+                return msg
+            account_id = row.pipedream_account_id
+            existed = False
+            if account_id:
+                try:
+                    existed = await pipedream.delete_account(account_id)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("integration_disconnect_failed", app=app, error=str(exc))
+                    span.update(output=f"error: {exc}")
+                    return f"Error al desconectar {app}: {exc}"
+            row.status = "disconnected"
+            row.pending_run_id = None
+            row.pending_ctx = None
+            await session.commit()
+        msg = (
+            f"Desconectada *{app}*."
+            if existed
+            else f"Desconectada *{app}* (ya no existía en Pipedream)."
+        )
+        span.update(output=msg)
+    log.info("integration_disconnected", app=app)
+    return msg
 
 
 async def find_actions(app: str, query: str | None = None) -> str:
