@@ -36,6 +36,22 @@ class Settings(BaseSettings):
     # `python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`.
     workspace_token_encryption_key: str | None = None
 
+    # OAuth install flow (slice C1). Fill these from your Slack app dashboard:
+    # Basic Information -> App Credentials.
+    slack_client_id: str | None = None
+    slack_client_secret: str | None = None
+    # Signing Secret is required to verify Slack OAuth callbacks (and HTTP
+    # events later when we move off Socket Mode).
+    slack_signing_secret: str | None = None
+    # Comma-separated bot scopes for the install link. Defaults to the set we
+    # use today; expand carefully (each new scope = Slack reinstall for every
+    # existing workspace).
+    slack_bot_scopes: str = (
+        "app_mentions:read,chat:write,im:history,im:read,mpim:history,mpim:read,"
+        "channels:history,channels:read,groups:history,groups:read,"
+        "reactions:read,reactions:write,files:read,users:read,users:read.email"
+    )
+
     # Model / runtime knobs
     claude_model: str = "claude-opus-4-7"
     claude_max_tokens: int = 8000
