@@ -10,6 +10,7 @@ __pycache__/
 # Secrets / env: NEVER commit. Doppler injects these at runtime via `doppler run`.
 .env
 .env.*
+!.env.example
 *.local
 
 # Claude Code local settings (machine-specific; can embed local command args). Not shared.
@@ -28,3 +29,12 @@ spaces-template/node_modules/
 spaces-template/dist/
 spaces-template/.wrangler/
 spaces-template/convex/_generated/
+
+# Next.js monorepo (website/, web/). pnpm lockfile (pnpm-lock.yaml) IS
+# committed; only the artifacts are ignored.
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.turbo/
+next-env.d.ts

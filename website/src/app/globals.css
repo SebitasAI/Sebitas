@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+/* Placeholder marketing styles. Theme tokens live in this file (Tailwind v4
+   CSS-first config) once the design system lands; for now we ship defaults. */
+
+:root {
+  --background: #ffffff;
+  --foreground: #111111;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+html,
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
