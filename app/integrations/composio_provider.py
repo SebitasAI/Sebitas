@@ -15,12 +15,19 @@ identical above this file.
 Error mapping mirrors PipedreamProvider: HTTP status -> IntegrationError
 kind so `errors.to_user_message` produces consistent Spanish messages
 regardless of which provider failed.
+
+HTTP-direct fallback (workaround, intentionally narrow): for a specific list
+of actions whose Composio wrapper is known broken upstream, run_action
+bypasses Composio and hits the app's REST API directly with credentials
+read from env (via settings). Remove an action from the bypass list as
+soon as Composio fixes the underlying schema. See METABASE_POST_API_CARD.
 """
 
 from __future__ import annotations
 
 import structlog
 
+from app.config import get_settings
 from app.integrations import composio as cz
 from app.integrations.provider import IntegrationError, IntegrationProvider
 
@@ -231,6 +238,93 @@ class ComposioProvider(IntegrationProvider):
             return "auth_failed"
         return "provider_error"
 
+    # Composio actions whose generated schema is broken in a way that makes
+    # the call always fail upstream. We bypass Composio for these tenant-by-
+    # tenant when fallback credentials are configured. Removing an entry from
+    # this set is safe once Composio's wrapper is fixed; the only cost of
+    # leaving an obsolete entry is one extra env-var read at action time.
+    #
+    # METABASE_POST_API_CARD: Composio omits `database_id` at the top level;
+    # Metabase's POST /api/card rejects with a NOT NULL constraint violation.
+    # Verified by direct curl: identical body succeeds when sent to Metabase
+    # ourselves.
+    _COMPOSIO_BROKEN_ACTIONS_WITH_DIRECT_FALLBACK = {
+        "METABASE_POST_API_CARD": ("POST", "/api/card", "metabase"),
+    }
+
+    def _get_metabase_fallback_creds(self, workspace_id: str) -> tuple[str, str] | None:
+        """Return (api_key, base_url) iff the workspace matches the configured
+        fallback tenant. None means 'no override, use Composio'."""
+        s = get_settings()
+        target_ws = (s.metabase_fallback_workspace_id or "").strip()
+        if not target_ws or target_ws != workspace_id:
+            return None
+        api_key = (s.metabase_fallback_api_key or "").strip()
+        base_url = (s.metabase_fallback_base_url or "").strip()
+        if not api_key or not base_url:
+            return None
+        return api_key, base_url
+
+    async def _http_direct_metabase(
+        self,
+        creds: tuple[str, str],
+        method: str,
+        path: str,
+        body: dict | None,
+    ) -> dict:
+        """Direct call against the Metabase REST API with the env-configured
+        API key. Used only for actions in the bypass list above; everything
+        else still goes through Composio."""
+        api_key, base_url = creds
+        # base_url often ends in /api; our `path` is /api/...; collapse to avoid /api/api.
+        base = base_url.rstrip("/")
+        if base.endswith("/api"):
+            base = base[:-4]
+        import aiohttp
+        url = f"{base}{path}"
+        headers = {
+            "x-api-key": api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.request(method, url, headers=headers, json=body) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    log.warning(
+                        "metabase_direct_http_error",
+                        method=method, path=path, status=resp.status, body=text[:300],
+                    )
+                    if resp.status in (401, 403):
+                        raise IntegrationError(
+                            "auth_failed", status=resp.status, detail=text[:300],
+                        )
+                    raise IntegrationError(
+                        "provider_error", status=resp.status, detail=text[:300],
+                    )
+                if not text:
+                    return {}
+                try:
+                    import json as _json
+                    return _json.loads(text)
+                except Exception:  # noqa: BLE001
+                    return {"raw": text}
+
+    def _normalise_metabase_card_body(self, params: dict) -> dict:
+        """Ensure POST /api/card's body has every required field at the top
+        level. Composio's schema doesn't expose `database_id`, so callers
+        sometimes only set it nested under `dataset_query.database`. Metabase
+        wants both."""
+        body = dict(params)
+        if not body.get("database_id"):
+            dq = body.get("dataset_query")
+            if isinstance(dq, dict) and dq.get("database") is not None:
+                body["database_id"] = dq["database"]
+        if body.get("visualization_settings") is None:
+            body["visualization_settings"] = {}
+        return body
+
     async def run_action(
         self,
         external_user_id: str,
@@ -239,6 +333,35 @@ class ComposioProvider(IntegrationProvider):
         action_id: str,
         params: dict,
     ) -> dict:
+        # HTTP-direct bypass: a handful of Composio actions are known broken
+        # upstream; if the workspace has fallback creds configured, route
+        # this specific action around Composio.
+        bypass = self._COMPOSIO_BROKEN_ACTIONS_WITH_DIRECT_FALLBACK.get(action_id)
+        if bypass is not None and bypass[2] == "metabase":
+            creds = self._get_metabase_fallback_creds(external_user_id)
+            if creds is not None:
+                method, path, _ = bypass
+                body = self._normalise_metabase_card_body(params) \
+                    if action_id == "METABASE_POST_API_CARD" else params
+                try:
+                    result = await self._http_direct_metabase(creds, method, path, body)
+                    log.info(
+                        "metabase_direct_action_ok",
+                        action_id=action_id,
+                        card_id=result.get("id") if isinstance(result, dict) else None,
+                    )
+                    return result
+                except IntegrationError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "metabase_direct_action_unexpected_failure",
+                        action_id=action_id, error=str(exc)[:200],
+                    )
+                    raise IntegrationError(
+                        "provider_error", status=None, detail=str(exc)[:300],
+                    )
+
         try:
             result = await cz.execute_tool(
                 tool_slug=action_id,
