@@ -180,36 +180,55 @@ class ComposioProvider(IntegrationProvider):
             ]
         return []
 
-    # Substrings in Composio's body-level error that signal the user's
-    # credentials at the upstream app are bad, even when Composio's HTTP
-    # itself returned 200. We surface these as `auth_failed` so the gateway
-    # produces a "reconectá X" message instead of a generic provider error.
-    # The agent's previous failure mode was to rationalise the error into
-    # something else ("no tengo write access", "tu equipo de RevOps...")
-    # because the generic provider_error didn't give it enough signal.
-    _AUTH_ERROR_HINTS = (
-        "unauthenticated",
-        "unauthorized",
-        "401",
-        "invalid api key",
-        "invalid api token",
-        "expired token",
-        "token expired",
-        "invalid credentials",
-        "authentication failed",
-        "forbidden",
+    # Phrases at the *start* of the error string that signal the user's
+    # credentials at the upstream app are bad. We deliberately match only
+    # against the leading portion of the message: when Metabase / Pipedream /
+    # similar surface a Clojure or Python stack trace for a totally unrelated
+    # bug (e.g. constraint violation), substrings like 'authentication' or
+    # '401' can appear deep in the trace and previously triggered a false
+    # auth_failed. The agent then told the user 'reconectá la cuenta' for
+    # what was really a missing-field bug. Bounded-prefix matching makes
+    # the classifier far stricter while still catching real auth errors,
+    # which providers consistently put at the top of their error string.
+    import re as _re
+    _AUTH_PREFIX = _re.compile(
+        r"^\s*("
+        r"unauthenticated"
+        r"|unauthorized"
+        r"|401\b"
+        r"|403\b"
+        r"|invalid\s+api[_\s-]*(key|token)"
+        r"|invalid\s+credentials?"
+        r"|authentication\s+failed"
+        r"|api\s+key.{0,40}(invalid|expired|missing|rotated)"
+        r"|token\s+expired"
+        r"|expired\s+token"
+        r"|forbidden\b"
+        r")",
+        _re.IGNORECASE,
     )
 
     def _classify_action_error(self, detail: str) -> str:
         """Pick the IntegrationError kind for a body-level Composio error.
-        Defaults to provider_error; promotes to auth_failed when the message
-        contains anything that points at the stored credential being bad."""
+        Defaults to provider_error; promotes to auth_failed only when the
+        error MESSAGE BEGINS with an auth-related phrase (not just contains
+        one buried in a stack trace).
+
+        Why prefix-only: real provider auth errors look like
+        'Unauthenticated', '401 Unauthorized', 'Invalid API key', usually as
+        the entire message or the first line. False positives (constraint
+        violations, validation errors, RPC traces) shove auth-shaped words
+        deep into the body and the previous substring match caught those
+        by accident. Restricting to the leading chunk eliminates that class
+        of misclassification while still catching every real auth case
+        observed across Composio + Pipedream in our integration tests.
+        """
         if not detail:
             return "provider_error"
-        d = detail.lower()
-        for hint in self._AUTH_ERROR_HINTS:
-            if hint in d:
-                return "auth_failed"
+        # Only look at the leading portion; auth errors appear at the start.
+        head = detail[:200].lstrip().lstrip('"').lstrip("'")
+        if self._AUTH_PREFIX.match(head):
+            return "auth_failed"
         return "provider_error"
 
     async def run_action(
