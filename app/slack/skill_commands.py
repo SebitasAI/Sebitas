@@ -271,6 +271,35 @@ def _status_block(text: str) -> list[dict]:
     return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
 
+def _name_collision_blocks(*, preview_id: str, skill_name: str) -> list[dict]:
+    """Buttons shown when Install hits a workspace-level name collision.
+    User picks: install the existing workspace skill, edit + rename to upload
+    their own version, or cancel."""
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text":
+            f":warning: *Ya existe* `{skill_name}` *en este workspace* "
+            "(la subió otro user, o quedó del catálogo). Elegí:"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text":
+            "• *Instalar la existente*: te la agregamos a tu lista, sin "
+            "tocar el contenido.\n"
+            "• *Editar*: cambiás el nombre y subís tu versión propia.\n"
+            "• *Cancelar*: descartamos este upload."}},
+        {"type": "actions", "elements": [
+            {"type": "button",
+             "text": {"type": "plain_text", "text": "Instalar la existente"},
+             "style": "primary",
+             "action_id": f"skill_install_existing:{preview_id}"},
+            {"type": "button",
+             "text": {"type": "plain_text", "text": "Editar"},
+             "action_id": f"skill_install_edit:{preview_id}"},
+            {"type": "button",
+             "text": {"type": "plain_text", "text": "Cancelar"},
+             "style": "danger",
+             "action_id": f"skill_install_cancel:{preview_id}"},
+        ]},
+    ]
+
+
 def _info_blocks(swi) -> list[dict]:
     skill = swi.skill
     links_line = (
@@ -660,20 +689,18 @@ def register_skill_handlers(app: AsyncApp) -> None:
         try:
             skill_id = await _persist_install(p)
         except _registry.SkillNameTaken:
-            # Don't deactivate buttons on this branch: user still has Edit
-            # available, OR can use /misterr skill install to attach the
-            # existing workspace skill to their account instead of creating
-            # a duplicate.
-            await client.chat_postEphemeral(
-                channel=channel, user=slack_user_id,
+            # Collision: the skill already exists in the workspace catalogue
+            # but the user doesn't have it installed. Swap the buttons in
+            # place so they can install the existing one with one click
+            # instead of typing a command.
+            await _update_ephemeral(
+                response_url,
                 text=(
-                    f":warning: Ya existe una skill con el nombre `{p.name}` "
-                    "en este workspace. Tres opciones:\n"
-                    f"• Para instalarte la que ya está: "
-                    f"`/misterr skill install {p.name}`.\n"
-                    "• Para subir la tuya con un nombre distinto: click "
-                    "`Editar` arriba.\n"
-                    "• Para descartar este upload: click `Cancelar`."
+                    f"Ya existe `{p.name}` en este workspace. Elegí qué hacer."
+                ),
+                blocks=_name_collision_blocks(
+                    preview_id=str(preview_id),
+                    skill_name=p.name,
                 ),
             )
             return
@@ -691,6 +718,57 @@ def register_skill_handlers(app: AsyncApp) -> None:
             blocks=_status_block(
                 f":white_check_mark: *Instalada* `{p.name}` con activación "
                 f"`{p.activation}`.\n• id: `{skill_id}`"
+            ),
+        )
+
+    @app.action(re.compile(r"^skill_install_existing:(.+)$"))
+    async def on_install_existing(ack, body, client):  # noqa: ANN001
+        """One-click installer for an existing workspace skill whose name
+        collided with an upload. Looks up the workspace skill, installs it
+        for the preview's owner, and drops the preview row."""
+        await ack()
+        action_id = body["actions"][0]["action_id"]
+        preview_id = _parse_preview_id(action_id.split(":", 1)[1])
+        response_url = body.get("response_url", "")
+        p = await _previews_store.get_preview(preview_id) if preview_id else None
+        if p is None:
+            await _update_ephemeral(
+                response_url,
+                text="La preview venció. Volvé a subir el archivo con `/misterr skill upload`.",
+                blocks=_status_block(
+                    ":warning: La preview venció. Volvé a subir el archivo con "
+                    "`/misterr skill upload`."
+                ),
+            )
+            return
+        skill = await _registry.get_skill_in_workspace(p.workspace_id, p.name)
+        if skill is None:
+            # Edge case: the workspace skill disappeared between collision
+            # and click (admin uninstalled? race?). Surface honestly.
+            await _update_ephemeral(
+                response_url,
+                text=f"La skill `{p.name}` ya no existe en este workspace.",
+                blocks=_status_block(
+                    f":warning: La skill `{p.name}` ya no existe en este "
+                    "workspace. Reintentá subiendo el archivo."
+                ),
+            )
+            return
+        # Idempotency: if somehow the user already has it (clicked twice,
+        # someone else installed it for them), treat as a friendly no-op.
+        existing = await _registry.get_skill_for_user(p.app_user_id, p.name)
+        if existing is None:
+            await _registry.install_for_user(
+                user_id=p.app_user_id, skill_id=skill.id,
+            )
+        await _previews_store.delete_preview(preview_id)
+        await _update_ephemeral(
+            response_url,
+            text=f"Instalada `{p.name}`.",
+            blocks=_status_block(
+                f":white_check_mark: *Instalada* `{p.name}` (versión "
+                "existente del workspace). Hacé `/misterr skill list` "
+                "para verla en tu lista."
             ),
         )
 
