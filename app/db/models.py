@@ -371,3 +371,54 @@ class MessageAttachment(Base):
     # re-attach doesn't re-transcribe (cost + latency).
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+
+
+class SkillPreview(Base):
+    """Skill upload waiting on the user's Install / Edit / Cancel click.
+
+    Persisted (not in-memory) so previews survive backend restarts and the
+    `/misterr skill upload` flow doesn't break every time Render redeploys.
+    Scoped to (workspace_id, app_user_id); the row's UUID is the
+    `preview_id` embedded in each block-kit `action_id`. A background task
+    in `app/main.py` lifespan deletes expired rows periodically.
+
+    No TimestampMixin: this is a short-lived row (30 min TTL) so the
+    autoupdated `updated_at` is overkill; `created_at` + `expires_at`
+    cover everything we need.
+    """
+
+    __tablename__ = "skill_preview"
+    __table_args__ = (
+        CheckConstraint(
+            "activation IN ('always_active', 'on_demand')",
+            name="ck_skill_preview_activation",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    app_user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Slack identifiers stored alongside the FKs so action handlers route
+    # without joining back to workspace / app_user just to post a message.
+    slack_user_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    channel_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    # Editable in the modal: name, description, activation. Initial values
+    # come from the frontmatter generator (LLM + filename fallback).
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    activation: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Raw markdown body, up to 256 KB (cap enforced at intake).
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    links: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    inferred_fields: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(nullable=False)

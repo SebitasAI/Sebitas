@@ -21,10 +21,16 @@ Block-kit actions registered here:
 View submission:
   skill_install_modal                 -> re-render preview after user edits
 
-State that doesn't fit in a block-kit `value` (raw body of up to 256 KB)
-lives in the in-memory preview cache, keyed by `preview_id`. On a Render
-restart the cache resets; the user just types `/misterr skill upload` again.
-That's acceptable for an interactive flow that lives for minutes, not hours.
+Preview state (filename / body up to 256 KB / parsed fields) lives in the
+`skill_preview` Postgres table, NOT in process memory. The previous
+in-memory dict implementation lost previews on every Render redeploy and
+produced 'La preview venció' errors. The DB-backed store is in
+`app/skills/preview_store.py`; a background sweep in `app/main.py`
+lifespan deletes expired rows.
+
+The `_pending_uploads` precursor flag stays in-memory: it's a 5-minute
+window per user before a `.md` upload arrives, and losing it on restart
+just means the user retypes `/misterr skill upload`.
 """
 
 from __future__ import annotations
@@ -33,20 +39,20 @@ import asyncio
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
 
 import aiohttp
 import structlog
 from slack_bolt.app.async_app import AsyncApp
 
+from app.db.models import SkillPreview
 from app.db.repository import upsert_app_user, upsert_workspace
 from app.db.session import get_session
+from app.skills import preview_store as _previews_store
 from app.skills import registry as _registry
 from app.skills import storage as _storage
 from app.skills.frontmatter import (
     DESCRIPTION_MAX_LEN,
     NAME_MAX_LEN,
-    Frontmatter,
     _slugify,  # noqa: PLC2701 (internal but the right tool for the modal too)
     resolve_frontmatter,
 )
@@ -55,59 +61,29 @@ log = structlog.get_logger(__name__)
 
 
 # --------------------------------------------------------------------------- #
-# State stores (in-process; restart = reset).
+# Precursor flag (in-process, 5 min). Preview state itself lives in Postgres.
 # --------------------------------------------------------------------------- #
 
 _UPLOAD_PENDING_TTL_S = 5 * 60
-_PREVIEW_TTL_S = 30 * 60
 
 # (team_id, slack_user_id) -> epoch expiry
 _pending_uploads: dict[tuple[str, str], float] = {}
 
 
-@dataclass
-class PreviewState:
-    """Cached parse result for an upload, waiting on user confirmation.
-
-    The body is kept here (not in the button value) because Slack caps
-    block-kit action values at 2 KB while our bodies can be 256 KB.
-
-    `channel_id` is the conversation where we posted the original ephemeral.
-    We stash it so the modal-submit handler can repost the updated preview to
-    the same place (modal `view_submission` bodies don't carry channel)."""
-
-    workspace_team_id: str
-    slack_user_id: str
-    channel_id: str
-    filename: str
-    name: str
-    description: str
-    activation: str
-    body: str
-    links: list[str]
-    inferred_fields: list[str]
-    expires_at: float = field(default_factory=lambda: time.time() + _PREVIEW_TTL_S)
-
-
-_previews: dict[str, PreviewState] = {}
-
-
-def _gc_state() -> None:
-    """Drop expired entries. Called opportunistically on each access; no
-    background timer needed since traffic is bursty."""
+def _gc_pending() -> None:
+    """Drop expired precursor flags. Called opportunistically on access; no
+    background timer needed since the dict stays small (one entry per
+    active user inside their 5-minute window)."""
     now = time.time()
     for key in list(_pending_uploads.keys()):
         if _pending_uploads[key] < now:
             del _pending_uploads[key]
-    for pid in list(_previews.keys()):
-        if _previews[pid].expires_at < now:
-            del _previews[pid]
 
 
 def is_skill_upload_pending(team_id: str, slack_user_id: str) -> bool:
     """Public helper used by the generic message handler to know whether a
     `.md` file_share should be intercepted as a skill upload."""
-    _gc_state()
+    _gc_pending()
     return _pending_uploads.get((team_id, slack_user_id), 0) > time.time()
 
 
@@ -203,7 +179,7 @@ async def _resolve_user_uuid(team_id: str, slack_user_id: str) -> tuple[uuid.UUI
 # Block-kit builders
 # --------------------------------------------------------------------------- #
 
-def _preview_blocks(preview_id: str, p: PreviewState) -> list[dict]:
+def _preview_blocks(preview_id: str, p: SkillPreview) -> list[dict]:
     inferred_note = (
         f"\n_Inferí los campos: {', '.join(p.inferred_fields)}._"
         if p.inferred_fields
@@ -232,7 +208,7 @@ def _preview_blocks(preview_id: str, p: PreviewState) -> list[dict]:
     ]
 
 
-def _edit_modal_view(preview_id: str, p: PreviewState) -> dict:
+def _edit_modal_view(preview_id: str, p: SkillPreview) -> dict:
     return {
         "type": "modal",
         "callback_id": "skill_install_modal",
@@ -390,9 +366,14 @@ async def handle_skill_file_upload(
     raw_markdown = data.decode("utf-8", errors="replace")
     fm = await resolve_frontmatter(raw_markdown, filename=name)
 
-    preview_id = uuid.uuid4().hex
-    _previews[preview_id] = PreviewState(
-        workspace_team_id=team_id,
+    # Resolve workspace + app_user UUIDs once now, store on the preview row.
+    # That way the Install / Edit / Cancel handlers don't need to round-trip
+    # back through Slack team_id -> workspace_id on every click.
+    workspace_id, app_user_id = await _resolve_user_uuid(team_id, slack_user_id)
+
+    preview_id = await _previews_store.create_preview(
+        workspace_id=workspace_id,
+        app_user_id=app_user_id,
         slack_user_id=slack_user_id,
         channel_id=channel,
         filename=name,
@@ -403,11 +384,19 @@ async def handle_skill_file_upload(
         links=fm.links,
         inferred_fields=fm.inferred_fields,
     )
+    preview = await _previews_store.get_preview(preview_id)
+    if preview is None:
+        # Shouldn't happen (we just inserted), but be defensive.
+        await client.chat_postEphemeral(
+            channel=channel, user=slack_user_id, thread_ts=thread_ts,
+            text=":warning: No pude persistir la preview. Reintentá.",
+        )
+        return
 
     await client.chat_postEphemeral(
         channel=channel, user=slack_user_id, thread_ts=thread_ts,
         text="Skill detectada, revisá los campos antes de instalar.",
-        blocks=_preview_blocks(preview_id, _previews[preview_id]),
+        blocks=_preview_blocks(str(preview_id), preview),
     )
 
 
@@ -498,36 +487,37 @@ async def _cmd_info(
 # Persistence on install
 # --------------------------------------------------------------------------- #
 
-async def _persist_install(p: PreviewState) -> str:
-    """Resolve user + create-or-reuse skill row + install for that user.
-    Returns the new/existing skill id as a string for logging."""
-    workspace_id, user_id = await _resolve_user_uuid(
-        p.workspace_team_id, p.slack_user_id
-    )
-    size_bytes = len(p.body.encode("utf-8"))
+def _parse_preview_id(raw: str) -> uuid.UUID | None:
+    """Action ids embed the preview UUID after a colon. Slack guarantees
+    well-formed action ids, but be defensive: an invalid UUID returns None
+    so the caller surfaces 'preview venció' instead of throwing."""
     try:
-        skill = await _registry.create_skill(
-            workspace_id=workspace_id,
-            name=p.name,
-            description=p.description,
-            activation_default=p.activation,  # type: ignore[arg-type]
-            body=p.body,
-            links=p.links,
-            size_bytes=size_bytes,
-            created_by_user_id=user_id,
-        )
-        skill_id = skill.id
-    except _registry.SkillNameTaken:
-        # User confirmed install but the name was taken between preview and
-        # confirm (race, or they happened to upload a duplicate). Surface
-        # cleanly via the caller.
-        raise
+        return uuid.UUID(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+async def _persist_install(p: SkillPreview) -> str:
+    """Create the skill row from a preview and install it for the preview's
+    owner. workspace_id + app_user_id are already on the row (resolved at
+    preview-creation time), so no extra Slack-id round-trip here."""
+    size_bytes = len(p.body.encode("utf-8"))
+    skill = await _registry.create_skill(
+        workspace_id=p.workspace_id,
+        name=p.name,
+        description=p.description,
+        activation_default=p.activation,  # type: ignore[arg-type]
+        body=p.body,
+        links=list(p.links or []),
+        size_bytes=size_bytes,
+        created_by_user_id=p.app_user_id,
+    )
     await _registry.install_for_user(
-        user_id=user_id,
-        skill_id=skill_id,
+        user_id=p.app_user_id,
+        skill_id=skill.id,
         activation_override=None,  # default = skill.activation_default
     )
-    return str(skill_id)
+    return str(skill.id)
 
 
 # --------------------------------------------------------------------------- #
@@ -604,15 +594,14 @@ def register_skill_handlers(app: AsyncApp) -> None:
     async def on_install_confirm(ack, body, client):  # noqa: ANN001
         await ack()
         action_id = body["actions"][0]["action_id"]
-        preview_id = action_id.split(":", 1)[1]
+        preview_id = _parse_preview_id(action_id.split(":", 1)[1])
         response_url = body.get("response_url", "")
-        _gc_state()
-        p = _previews.get(preview_id)
         channel = body["channel"]["id"]
         slack_user_id = body["user"]["id"]
+        p = await _previews_store.get_preview(preview_id) if preview_id else None
         if p is None:
-            # The preview is gone; instead of leaving the stale buttons live,
-            # neutralise them with a status line.
+            # The preview is gone (expired, deleted, or backend was rolled);
+            # neutralise the buttons with a status line.
             await _update_ephemeral(
                 response_url,
                 text="La preview venció. Volvé a subir el archivo con `/misterr skill upload`.",
@@ -640,7 +629,7 @@ def register_skill_handlers(app: AsyncApp) -> None:
                 text=f":warning: No pude guardar la skill: {exc}",
             )
             return
-        _previews.pop(preview_id, None)
+        await _previews_store.delete_preview(preview_id)
         await _update_ephemeral(
             response_url,
             text=f"Instalada `{p.name}` con activación `{p.activation}`.",
@@ -654,10 +643,10 @@ def register_skill_handlers(app: AsyncApp) -> None:
     async def on_install_edit(ack, body, client):  # noqa: ANN001
         await ack()
         action_id = body["actions"][0]["action_id"]
-        preview_id = action_id.split(":", 1)[1]
+        preview_id_raw = action_id.split(":", 1)[1]
+        preview_id = _parse_preview_id(preview_id_raw)
         response_url = body.get("response_url", "")
-        _gc_state()
-        p = _previews.get(preview_id)
+        p = await _previews_store.get_preview(preview_id) if preview_id else None
         if p is None:
             await _update_ephemeral(
                 response_url,
@@ -679,17 +668,19 @@ def register_skill_handlers(app: AsyncApp) -> None:
         )
         await client.views_open(
             trigger_id=body["trigger_id"],
-            view=_edit_modal_view(preview_id, p),
+            view=_edit_modal_view(preview_id_raw, p),
         )
 
     @app.action(re.compile(r"^skill_install_cancel:(.+)$"))
     async def on_install_cancel(ack, body, client):  # noqa: ANN001
         await ack()
         action_id = body["actions"][0]["action_id"]
-        preview_id = action_id.split(":", 1)[1]
+        preview_id = _parse_preview_id(action_id.split(":", 1)[1])
         response_url = body.get("response_url", "")
-        p = _previews.pop(preview_id, None)
+        p = await _previews_store.get_preview(preview_id) if preview_id else None
         skill_name = p.name if p else "(desconocida)"
+        if preview_id is not None:
+            await _previews_store.delete_preview(preview_id)
         await _update_ephemeral(
             response_url,
             text=f"Cancelado: {skill_name}.",
@@ -698,8 +689,9 @@ def register_skill_handlers(app: AsyncApp) -> None:
 
     @app.view("skill_install_modal")
     async def on_install_modal_submit(ack, body, client, view):  # noqa: ANN001
-        preview_id = view.get("private_metadata") or ""
-        p = _previews.get(preview_id)
+        preview_id_raw = view.get("private_metadata") or ""
+        preview_id = _parse_preview_id(preview_id_raw)
+        p = await _previews_store.get_preview(preview_id) if preview_id else None
         if p is None:
             await ack(response_action="errors", errors={
                 "name": "La preview venció. Subí el archivo de nuevo."
@@ -716,25 +708,31 @@ def register_skill_handlers(app: AsyncApp) -> None:
         if not new_desc:
             await ack(response_action="errors", errors={"description": "Descripción requerida."})
             return
-        # Update the cached preview; the user still has to press Instalar on
-        # the original ephemeral (which still has the same preview_id).
-        p.name = new_name
-        p.description = new_desc
-        p.activation = new_activation
-        # An edit overrides whatever we inferred; clear the inferred-fields
-        # note so the preview reflects user intent.
-        p.inferred_fields = []
+        # Persist the edits + clear inferred-fields (an edit means user
+        # intent, regardless of what the LLM guessed initially).
+        updated = await _previews_store.update_preview(
+            preview_id,
+            name=new_name,
+            description=new_desc,
+            activation=new_activation,
+            inferred_fields=[],
+        )
         await ack()
+        if updated is None:
+            # Race: preview expired between get and update. Tell the user.
+            await client.chat_postEphemeral(
+                channel=p.channel_id, user=p.slack_user_id,
+                text=":warning: La preview venció entre el edit y el save. Reintentá.",
+            )
+            return
         # Re-post the preview with updated fields. view_submission bodies
-        # don't include channel.id, so we use the channel we stashed at
-        # preview-creation time. chat_postEphemeral requires the user be
-        # present in the channel, which holds for the original DM/channel
-        # where the file was uploaded.
+        # don't include channel.id, so we use the channel stashed on the
+        # preview row at upload time.
         await client.chat_postEphemeral(
-            channel=p.channel_id,
-            user=p.slack_user_id,
+            channel=updated.channel_id,
+            user=updated.slack_user_id,
             text="Preview actualizada.",
-            blocks=_preview_blocks(preview_id, p),
+            blocks=_preview_blocks(preview_id_raw, updated),
         )
 
     @app.action(re.compile(r"^skill_uninstall:(.+)$"))
