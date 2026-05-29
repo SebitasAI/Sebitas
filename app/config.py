@@ -59,8 +59,13 @@ class Settings(BaseSettings):
 
     # Cheap model for delegated sub-tasks, routed via LiteLLM (provider/model form).
     cheap_model: str = "anthropic/claude-haiku-4-5"
-    # Safety cap on agent loop turns.
-    agent_max_iterations: int = 8
+    # Safety cap on agent loop turns. 8 was too low for multi-step write
+    # workflows (e.g. create N Metabase cards + assemble a dashboard, which
+    # needs SQL validation + per-card POST + dashboard POST). The loop
+    # terminated mid-write, leaving 'voy a crear las cards...' as final text
+    # with no cards created. 25 leaves headroom for the longest realistic
+    # workflow without giving the LLM unbounded rope.
+    agent_max_iterations: int = 25
 
     # E2B sandbox (the SDK also reads E2B_API_KEY from the environment).
     e2b_api_key: str | None = None
