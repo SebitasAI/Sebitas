@@ -180,6 +180,38 @@ class ComposioProvider(IntegrationProvider):
             ]
         return []
 
+    # Substrings in Composio's body-level error that signal the user's
+    # credentials at the upstream app are bad, even when Composio's HTTP
+    # itself returned 200. We surface these as `auth_failed` so the gateway
+    # produces a "reconectá X" message instead of a generic provider error.
+    # The agent's previous failure mode was to rationalise the error into
+    # something else ("no tengo write access", "tu equipo de RevOps...")
+    # because the generic provider_error didn't give it enough signal.
+    _AUTH_ERROR_HINTS = (
+        "unauthenticated",
+        "unauthorized",
+        "401",
+        "invalid api key",
+        "invalid api token",
+        "expired token",
+        "token expired",
+        "invalid credentials",
+        "authentication failed",
+        "forbidden",
+    )
+
+    def _classify_action_error(self, detail: str) -> str:
+        """Pick the IntegrationError kind for a body-level Composio error.
+        Defaults to provider_error; promotes to auth_failed when the message
+        contains anything that points at the stored credential being bad."""
+        if not detail:
+            return "provider_error"
+        d = detail.lower()
+        for hint in self._AUTH_ERROR_HINTS:
+            if hint in d:
+                return "auth_failed"
+        return "provider_error"
+
     async def run_action(
         self,
         external_user_id: str,
@@ -201,10 +233,14 @@ class ComposioProvider(IntegrationProvider):
         # Surface error semantics explicitly so the gateway can translate.
         if isinstance(result, dict):
             if result.get("successful") is False or result.get("error"):
-                detail = result.get("error") or "tool execution failed"
-                raise IntegrationError(
-                    "provider_error", status=None, detail=str(detail)[:300],
-                )
+                detail = str(result.get("error") or "tool execution failed")
+                kind = self._classify_action_error(detail)
+                if kind == "auth_failed":
+                    log.warning(
+                        "composio_action_auth_failed",
+                        action_id=action_id, detail=detail[:200],
+                    )
+                raise IntegrationError(kind, status=None, detail=detail[:300])
             return result.get("data") if "data" in result else result
         return {"ret": result}
 
