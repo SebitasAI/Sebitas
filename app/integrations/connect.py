@@ -36,8 +36,12 @@ def _pipedream_webhook_uri() -> str | None:
 
 
 def _composio_callback_uri() -> str | None:
-    base = get_settings().public_base_url
-    return f"{base.rstrip('/')}/integrations/composio/webhook" if base else None
+    """Where Composio sends the user's browser after OAuth. Returning None
+    makes Composio show its default 'success' page, which is fine for now;
+    a branded landing page lives in a future slice. Pointing this at our
+    webhook URL was the bug that caused 405 Method Not Allowed (the webhook
+    is POST-only and Composio redirects with GET)."""
+    return None
 
 
 def _extract_composio_redirect_url(resp: dict) -> str | None:
@@ -113,6 +117,53 @@ async def _mint_connect_link(provider_name: str, workspace_id: str, app: str) ->
     return url
 
 
+async def _try_reconcile_existing(
+    workspace_id: uuid.UUID, app: str, provider_name: str
+) -> bool:
+    """If `provider_name` already has an ACTIVE connection for (workspace, app),
+    complete the pending flow without minting a new connect link.
+
+    Covers the race where a previous attempt's OAuth succeeded on the provider
+    side but our row never flipped to 'connected' (in-memory poll task died
+    on a Render restart, or the webhook signature didn't match). Reading from
+    the provider's source of truth on retry breaks the reconnect-loop.
+    Returns True if we reconciled (caller should NOT mint a new link).
+    """
+    provider = (
+        get_composio_provider() if provider_name == "composio"
+        else _get_pipedream_provider()
+    )
+    try:
+        accounts = await provider.list_accounts(str(workspace_id))
+    except IntegrationError as e:
+        log.warning(
+            "reconcile_list_accounts_failed",
+            app=app, provider=provider_name, kind=e.kind,
+        )
+        return False
+    acc = provider.match_account_for_app(accounts, app)
+    if not acc:
+        return False
+    acc_id = acc.get("id") or acc.get("account_id")
+    if not acc_id:
+        return False
+    # Make sure it's actually usable (Composio statuses include INITIALIZING /
+    # EXPIRED — we don't want to flip a row to 'connected' for those).
+    try:
+        problems = await provider.validate_connection(str(workspace_id), acc_id)
+    except IntegrationError:
+        return False
+    if problems:
+        return False
+    log.info(
+        "connect_reconciled_existing",
+        app=app, provider=provider_name, account_id=acc_id,
+        workspace_id=str(workspace_id),
+    )
+    await complete(str(workspace_id), app, acc_id)
+    return True
+
+
 async def start_connect(client, ctx: dict, app: str) -> None:
     """Decide provider, mint link, post Slack button, start polling fallback.
     The run is already paused (interrupt) at this point."""
@@ -120,14 +171,32 @@ async def start_connect(client, ctx: dict, app: str) -> None:
     if await gateway.is_connected(workspace_id, app):
         return  # already connected (the node also checks) -- nothing to do
 
-    # Choose provider once per new connection. Persisted on the row below;
-    # action invocations later route through the same provider without
-    # re-deciding.
-    provider_name = await decide_provider_for_new_connection(app)
+    # If a row exists in 'pending' from a previous attempt, prefer its provider
+    # so reconciliation looks at the same backend the user already authorized
+    # against. Falls back to fresh routing for brand-new rows.
+    async with get_session() as session:
+        prior = (
+            await session.execute(
+                select(IntegrationConnection).where(
+                    IntegrationConnection.workspace_id == workspace_id,
+                    IntegrationConnection.app == app,
+                )
+            )
+        ).scalar_one_or_none()
+    provider_name = (prior.provider if prior and prior.provider else None) \
+        or await decide_provider_for_new_connection(app)
     log.info(
         "connect_provider_selected", app=app, provider=provider_name,
         workspace_id=str(workspace_id),
     )
+
+    # Reconciliation: if the provider already has an ACTIVE connection (e.g. a
+    # previous OAuth completed but our DB row got stuck on 'pending'), short-
+    # circuit here. This breaks the reconnect-loop without changing the agent's
+    # prompts or tool logic — once the row is 'connected', list_integrations
+    # reflects it and the LLM stops suggesting reinstall.
+    if await _try_reconcile_existing(workspace_id, app, provider_name):
+        return
 
     url = await _mint_connect_link(provider_name, ctx["workspace_id"], app)
     if url is None:
@@ -219,6 +288,55 @@ async def _poll(external_user_id: str, app: str, provider_name: str) -> None:
             await complete(external_user_id, app, acc.get("id"))
             return
     log.info("connect_poll_timeout", app=app, provider=provider_name)
+
+
+async def resume_pending_polls() -> int:
+    """On process startup, find every IntegrationConnection still in 'pending'
+    with a `pending_run_id` (i.e. a paused agent run waiting for the connect to
+    finish) and restart its poll task. Without this, a Render redeploy in the
+    middle of a user's OAuth dance leaves the row stuck forever: the user
+    completes OAuth on the provider's side, our row never flips, and the next
+    user message triggers a reinstall loop.
+
+    Idempotent: calling complete() on an already-completed row no-ops via the
+    `pending_run_id is None` early return. Safe to run alongside any other
+    in-flight poll tasks from the current process.
+
+    Returns the count of polls restarted (used by callers / tests)."""
+    async with get_session() as session:
+        rows = (
+            await session.execute(
+                select(IntegrationConnection).where(
+                    IntegrationConnection.status == "pending",
+                    IntegrationConnection.pending_run_id.is_not(None),
+                )
+            )
+        ).scalars().all()
+    count = 0
+    for row in rows:
+        provider_name = row.provider or "pipedream"
+        external_user_id = str(row.workspace_id)
+        task = asyncio.create_task(_poll(external_user_id, row.app, provider_name))
+        _poll_tasks.add(task)
+        task.add_done_callback(_poll_tasks.discard)
+        count += 1
+    if count:
+        log.info("connect_polls_resumed", count=count)
+    return count
+
+
+async def periodic_resume_loop(interval_seconds: int = 300) -> None:
+    """Background sweep: every `interval_seconds`, find pending rows whose poll
+    task isn't tracked in this process and restart it. Catches rows that were
+    born on a now-dead process (multi-instance deploys, transient crashes
+    between restarts). The first poll task to find the account wins; the rest
+    no-op via complete()'s idempotency. Cheap query: indexed on status."""
+    while True:
+        try:
+            await resume_pending_polls()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("periodic_resume_failed", error=str(exc))
+        await asyncio.sleep(interval_seconds)
 
 
 async def complete(external_user_id: str, app: str, account_id: str | None) -> None:
