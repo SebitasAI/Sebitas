@@ -27,8 +27,8 @@ from app.agent.context import workspace_id_var
 from app.db.models import IntegrationConnection
 from app.db.session import get_session
 from app.integrations.errors import to_user_message
-from app.integrations.pipedream_provider import get_provider
-from app.integrations.provider import IntegrationError
+from app.integrations.provider import IntegrationError, IntegrationProvider
+from app.integrations.routing import provider_for_app
 
 log = structlog.get_logger(__name__)
 _langfuse = get_client()
@@ -107,23 +107,45 @@ async def list_integrations() -> str:
     if not rows:
         return "No hay integraciones conectadas en este workspace."
 
-    # Best-effort auth-type enrichment. If the provider call fails we still
-    # render the local rows -- listing is UX, not a blocker.
-    provider = get_provider()
+    # Best-effort auth-type enrichment. Each row carries its provider; we
+    # group by provider so the listing makes ONE list_accounts call per
+    # backend (vs N round-trips). A provider failure just skips its
+    # enrichment — listing is UX, not a blocker.
+    by_provider: dict[str, list[IntegrationConnection]] = {}
+    for r in rows:
+        by_provider.setdefault(r.provider or "pipedream", []).append(r)
     accounts_by_id: dict[str, dict] = {}
-    try:
-        for a in await provider.list_accounts(str(ws)):
-            aid = a.get("id")
-            if aid:
-                accounts_by_id[aid] = a
-    except IntegrationError as e:
-        log.warning("list_integrations_provider_fetch_failed", kind=e.kind, status=e.status)
+    providers_by_name: dict[str, IntegrationProvider] = {}
+    for provider_name, rows_for_provider in by_provider.items():
+        # Any row from this group can resolve the provider; the app is
+        # irrelevant since we're listing accounts at provider scope.
+        sample_app = rows_for_provider[0].app
+        try:
+            provider, _ = await provider_for_app(ws, sample_app)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "list_integrations_provider_resolve_failed",
+                provider=provider_name, error=str(exc)[:200],
+            )
+            continue
+        providers_by_name[provider_name] = provider
+        try:
+            for a in await provider.list_accounts(str(ws)):
+                aid = a.get("id")
+                if aid:
+                    accounts_by_id[aid] = a
+        except IntegrationError as e:
+            log.warning(
+                "list_integrations_provider_fetch_failed",
+                provider=provider_name, kind=e.kind, status=e.status,
+            )
 
     lines = []
     for r in rows:
         when = r.created_at.strftime("%Y-%m-%d") if r.created_at else "?"
+        provider = providers_by_name.get(r.provider or "pipedream")
         acc = accounts_by_id.get(r.pipedream_account_id or "")
-        auth = provider.auth_type_of(acc) if acc else None
+        auth = provider.auth_type_of(acc) if (provider and acc) else None
         suffix = f" · auth: {auth}" if auth else ""
         lines.append(f"• *{r.app}* — {r.status}, conectada desde {when}{suffix}")
     return "Integraciones conectadas:\n" + "\n".join(lines)
@@ -156,8 +178,9 @@ async def disconnect_integration(app: str) -> str:
             account_id = row.pipedream_account_id
             existed = False
             if account_id:
+                provider, _ = await provider_for_app(ws, app)
                 try:
-                    existed = await get_provider().disconnect(account_id)
+                    existed = await provider.disconnect(account_id)
                 except IntegrationError as e:
                     user_msg = to_user_message(e, app)
                     log.warning("integration_disconnect_failed", app=app, kind=e.kind, status=e.status)
@@ -184,7 +207,10 @@ async def find_actions(app: str, query: str | None = None) -> str:
     misses cause 4xx on the action call."""
     import asyncio
 
-    provider = get_provider()
+    ws = _current_workspace()
+    if not ws:
+        return "Error: sin contexto de workspace."
+    provider, _ = await provider_for_app(ws, app)
     try:
         actions = await provider.list_actions(app, query)
     except IntegrationError as e:
@@ -232,7 +258,7 @@ async def run_action_raw(app: str, action_id: str, params: dict | None = None) -
     if not conn.pipedream_account_id:
         raise IntegrationError("account_not_found")
 
-    provider = get_provider()
+    provider, _ = await provider_for_app(ws, app)
     try:
         missing = await provider.validate_connection(str(ws), conn.pipedream_account_id)
     except IntegrationError:
@@ -269,7 +295,7 @@ async def run_action(app: str, action_id: str, params: dict | None = None) -> st
             IntegrationError("account_not_found"), app
         )
 
-    provider = get_provider()
+    provider, _ = await provider_for_app(ws, app)
 
     # Pre-invocation validation. Cheap defense-in-depth on top of the provider's
     # own error response; surfaces incomplete connections with the field names

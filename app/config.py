@@ -112,6 +112,15 @@ class Settings(BaseSettings):
     connect_poll_interval: int = 5
     connect_poll_timeout: int = 180
 
+    # Composio (second integration provider). Used by ComposioProvider for apps
+    # where Composio has deeper coverage than Pipedream's connector (Metabase,
+    # for now). When the API key is unset, the gateway falls back to Pipedream
+    # for every app — no crash, just narrower coverage.
+    composio_api_key: str | None = None
+    # Composio's API base; override only if you're on their preview / EU stack.
+    composio_base_url: str = "https://backend.composio.dev/api/v3"
+    composio_webhook_secret: str | None = None
+
     # Spaces (slice 4B). The shared-deployment Convex backend uses these three;
     # if any is missing the platform falls back to MockSpaceBackend at startup.
     convex_url: str | None = None              # e.g. https://<slug>.convex.cloud
