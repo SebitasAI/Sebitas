@@ -1,10 +1,11 @@
 """In-conversation integration connect flow + auto-resume.
 
 When the agent needs an app the workspace hasn't connected, request_integration
-pauses the run (interrupt/checkpoint, slice-2 mechanism). This module posts the
-Pipedream connect link in Slack and resumes the paused run when the connection
-completes — via the incoming webhook OR a polling fallback. Idempotent and
-tenant-scoped (external_user_id = workspace_id).
+pauses the run (interrupt/checkpoint, slice-2 mechanism). This module decides
+which provider serves the app (Composio preferred where available, Pipedream
+fallback), posts the connect link in Slack, and resumes the paused run when
+the connection completes -- via the incoming webhook OR a polling fallback.
+Idempotent and tenant-scoped (external_user_id = workspace_id).
 """
 
 from __future__ import annotations
@@ -18,40 +19,94 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.db.models import IntegrationConnection
 from app.db.session import get_session
+from app.integrations import composio as cz
 from app.integrations import gateway
-from app.integrations.pipedream_provider import get_provider
+from app.integrations.composio_provider import get_composio_provider
+from app.integrations.pipedream_provider import get_provider as _get_pipedream_provider
 from app.integrations.provider import IntegrationError
+from app.integrations.routing import decide_provider_for_new_connection
 
 log = structlog.get_logger(__name__)
 _poll_tasks: set[asyncio.Task] = set()
 
 
-def _webhook_uri() -> str | None:
+def _pipedream_webhook_uri() -> str | None:
     base = get_settings().public_base_url
     return f"{base.rstrip('/')}/integrations/pipedream/webhook" if base else None
 
 
-async def start_connect(client, ctx: dict, app: str) -> None:
-    """Create a pending connection + connect link, post a Slack button, and start
-    the polling fallback. The run is already paused (interrupt) at this point."""
-    workspace_id = uuid.UUID(ctx["workspace_id"])
-    if await gateway.is_connected(workspace_id, app):
-        return  # already connected (the node also checks) — nothing to do
+def _composio_callback_uri() -> str | None:
+    base = get_settings().public_base_url
+    return f"{base.rstrip('/')}/integrations/composio/webhook" if base else None
 
+
+async def _mint_connect_link(provider_name: str, workspace_id: str, app: str) -> str | None:
+    """Branch on provider to mint the right kind of connect link.
+
+    Pipedream: a generic Connect link, the app slug is appended as a query param
+    so their UI lands on the right connector. Composio: a per-toolkit OAuth
+    redirect that already targets the right app server-side.
+    """
+    if provider_name == "composio":
+        try:
+            resp = await cz.initiate_connection(
+                user_id=workspace_id,
+                toolkit_slug=app,
+                callback_url=_composio_callback_uri(),
+            )
+        except cz.ComposioHTTPError as e:
+            log.warning(
+                "composio_initiate_connection_failed",
+                app=app, status=e.status, body=e.body[:200],
+            )
+            return None
+        # Composio returns the URL under a few possible keys depending on
+        # API version; try them in order.
+        return (
+            resp.get("redirect_url")
+            or resp.get("redirectUrl")
+            or resp.get("connect_link_url")
+        )
+    # Pipedream (default).
     try:
-        token = await get_provider().create_connect_link(
-            ctx["workspace_id"], webhook_uri=_webhook_uri()
+        token = await _get_pipedream_provider().create_connect_link(
+            workspace_id, webhook_uri=_pipedream_webhook_uri(),
         )
     except IntegrationError as e:
-        log.warning("create_connect_link_failed", app=app, kind=e.kind, status=e.status)
+        log.warning(
+            "pipedream_create_connect_link_failed",
+            app=app, kind=e.kind, status=e.status,
+        )
+        return None
+    url = token.get("connect_link_url")
+    if url:
+        url += ("&" if "?" in url else "?") + f"app={app}"
+    return url
+
+
+async def start_connect(client, ctx: dict, app: str) -> None:
+    """Decide provider, mint link, post Slack button, start polling fallback.
+    The run is already paused (interrupt) at this point."""
+    workspace_id = uuid.UUID(ctx["workspace_id"])
+    if await gateway.is_connected(workspace_id, app):
+        return  # already connected (the node also checks) -- nothing to do
+
+    # Choose provider once per new connection. Persisted on the row below;
+    # action invocations later route through the same provider without
+    # re-deciding.
+    provider_name = await decide_provider_for_new_connection(app)
+    log.info(
+        "connect_provider_selected", app=app, provider=provider_name,
+        workspace_id=str(workspace_id),
+    )
+
+    url = await _mint_connect_link(provider_name, ctx["workspace_id"], app)
+    if url is None:
         await client.chat_postMessage(
             channel=ctx["channel"], thread_ts=ctx.get("reply_thread_ts"),
             text=f"No pude generar el link para conectar *{app}*. Reintentá en un momento.",
         )
         return
-    url = token.get("connect_link_url")
-    if url:
-        url += ("&" if "?" in url else "?") + f"app={app}"
 
     # Carry forward any "Connect" buttons we've already posted for this app
     # (multiple requests inside the pending window each add their own button;
@@ -69,18 +124,13 @@ async def start_connect(client, ctx: dict, app: str) -> None:
 
     blocks = [{"type": "section", "text": {"type": "mrkdwn",
         "text": f":electric_plug: Para continuar necesito acceso a *{app}*. Conectalo acá y sigo solo:"}}]
-    if url:
-        # Explicit action_id so Bolt has a known handler for the click event
-        # (URL buttons fire a block_actions to Slack on click even though
-        # the navigation is client-side; without a handler Bolt logs
-        # "Unhandled request" for every connect button click).
-        blocks.append({"type": "actions", "elements": [
-            {"type": "button",
-             "text": {"type": "plain_text", "text": f"Conectar {app}"},
-             "style": "primary",
-             "url": url,
-             "action_id": "connect_url_button"}
-        ]})
+    blocks.append({"type": "actions", "elements": [
+        {"type": "button",
+         "text": {"type": "plain_text", "text": f"Conectar {app}"},
+         "style": "primary",
+         "url": url,
+         "action_id": "connect_url_button"}
+    ]})
     resp = await client.chat_postMessage(
         channel=ctx["channel"], thread_ts=ctx.get("reply_thread_ts"),
         text=f"Para esto necesito acceso a {app}.", blocks=blocks,
@@ -88,8 +138,8 @@ async def start_connect(client, ctx: dict, app: str) -> None:
     post_ts = resp.get("ts") if isinstance(resp, dict) else (resp["ts"] if "ts" in resp else None)
     post_channel = (resp.get("channel") if isinstance(resp, dict) else resp["channel"]) or ctx["channel"]
 
-    # Persist after we know the message ts, so `complete` can deactivate the
-    # exact button(s) on success. Done in one tx with the rest of the upsert.
+    # Persist after we know the message ts, with the chosen provider so the
+    # poller + action calls all route through the same backend.
     async with get_session() as session:
         row = (
             await session.execute(
@@ -107,20 +157,26 @@ async def start_connect(client, ctx: dict, app: str) -> None:
             buttons.append({"channel": post_channel, "ts": post_ts})
         new_ctx = dict(ctx)
         new_ctx["_buttons"] = buttons
+        row.provider = provider_name
         row.status = "pending"
         row.pending_run_id = ctx["run_id"]
         row.pending_ctx = new_ctx
         await session.commit()
 
-    task = asyncio.create_task(_poll(ctx["workspace_id"], app))
+    task = asyncio.create_task(_poll(ctx["workspace_id"], app, provider_name))
     _poll_tasks.add(task)
     task.add_done_callback(_poll_tasks.discard)
 
 
-async def _poll(external_user_id: str, app: str) -> None:
-    """Fallback: poll the provider until the account appears, then resume."""
+async def _poll(external_user_id: str, app: str, provider_name: str) -> None:
+    """Fallback: poll the chosen provider until the account appears, then
+    resume. Each provider's account-listing shape is different but
+    `match_account_for_app` normalises that."""
     s = get_settings()
-    provider = get_provider()
+    provider = (
+        get_composio_provider() if provider_name == "composio"
+        else _get_pipedream_provider()
+    )
     waited = 0
     while waited < s.connect_poll_timeout:
         await asyncio.sleep(s.connect_poll_interval)
@@ -133,13 +189,14 @@ async def _poll(external_user_id: str, app: str) -> None:
         if acc:
             await complete(external_user_id, app, acc.get("id"))
             return
-    log.info("connect_poll_timeout", app=app)
+    log.info("connect_poll_timeout", app=app, provider=provider_name)
 
 
 async def complete(external_user_id: str, app: str, account_id: str | None) -> None:
     """Mark connected + deactivate the Connect button(s) we posted + resume the
     paused run. Idempotent: the first of webhook/poll clears the pending run_id;
-    the other becomes a no-op."""
+    the other becomes a no-op. Works for both providers because the row already
+    carries which provider authorised; we don't need to re-decide here."""
     workspace_id = uuid.UUID(external_user_id)
     ctx = None
     buttons: list[dict] = []
@@ -162,7 +219,10 @@ async def complete(external_user_id: str, app: str, account_id: str | None) -> N
         row.pending_run_id = None
         row.pending_ctx = None
         await session.commit()
-    log.info("integration_connected", app=app, workspace_id=external_user_id)
+    log.info(
+        "integration_connected", app=app, workspace_id=external_user_id,
+        provider=(row.provider if row else None),
+    )
 
     # Deactivate every Connect-X button we posted for this app. Each was a
     # separate chat_postMessage (one per request_integration). On success we

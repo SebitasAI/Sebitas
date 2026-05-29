@@ -1,0 +1,263 @@
+"""ComposioProvider: second concrete implementation of IntegrationProvider.
+
+Pair of `PipedreamProvider`. Same abstract contract, different backend. The
+gateway decides at connect-time which provider to use for a given app
+(prefer Composio if their catalogue has the toolkit, else Pipedream).
+Once decided, the choice is persisted on the IntegrationConnection row
+under `provider` so action invocations don't re-route.
+
+Auth shape: Composio manages OAuth on its hosted auth UI. We never see
+credentials; we mint a connect link, the user authorizes, Composio stores
+the token, and we invoke tools by referencing the connected_account_id.
+That matches what we already do with Pipedream — caller layers are
+identical above this file.
+
+Error mapping mirrors PipedreamProvider: HTTP status -> IntegrationError
+kind so `errors.to_user_message` produces consistent Spanish messages
+regardless of which provider failed.
+"""
+
+from __future__ import annotations
+
+import structlog
+
+from app.integrations import composio as cz
+from app.integrations.provider import IntegrationError, IntegrationProvider
+
+log = structlog.get_logger(__name__)
+
+
+class ComposioProvider(IntegrationProvider):
+    name = "composio"
+
+    # ----------------- transport-level wrapping ---------------------------- #
+
+    def _wrap(self, e: cz.ComposioHTTPError) -> IntegrationError:
+        """Mirror PipedreamProvider's mapping. Composio uses standard HTTP
+        codes; the only Composio-specific quirk is that auth misconfigured at
+        their layer (no API key set) comes through as `status=0`."""
+        s, body = e.status, e.body
+        if s == 0:
+            # Local config error: COMPOSIO_API_KEY missing. Treat as a
+            # provider-side network issue so the gateway returns a friendly
+            # message rather than crashing the agent loop.
+            return IntegrationError("network", status=s, detail=body)
+        if s == 401:
+            return IntegrationError("auth_failed", status=s, detail=body)
+        if s == 403:
+            return IntegrationError("permission_denied", status=s, detail=body)
+        if s == 404:
+            return IntegrationError("not_found", status=s, detail=body)
+        if s == 422:
+            return IntegrationError("validation", status=s, detail=body)
+        if s == 429:
+            return IntegrationError("rate_limited", status=s, detail=body)
+        if 500 <= s < 600:
+            return IntegrationError("provider_error", status=s, detail=body)
+        return IntegrationError("provider_error", status=s, detail=body)
+
+    # ----------------- catalog discovery ----------------------------------- #
+
+    async def has_toolkit(self, app: str) -> bool:
+        """Used by the gateway routing layer at connect-time: 'does Composio
+        cover this app?'. Routing prefers Composio when this returns True.
+        Defensive: if Composio is down or the API key is bad, return False
+        so we fall back to Pipedream rather than hard-failing the user."""
+        try:
+            return await cz.toolkit_exists(app)
+        except cz.ComposioHTTPError as e:
+            log.warning("composio_has_toolkit_failed", app=app, status=e.status)
+            return False
+
+    # ----------------- IntegrationProvider impl ---------------------------- #
+
+    async def list_accounts(self, external_user_id: str) -> list[dict]:
+        try:
+            return await cz.list_connections(user_id=external_user_id)
+        except cz.ComposioHTTPError as e:
+            raise self._wrap(e) from e
+
+    async def get_account(
+        self, external_user_id: str, account_id: str
+    ) -> dict | None:
+        try:
+            row = await cz.get_connection(account_id)
+        except cz.ComposioHTTPError as e:
+            raise self._wrap(e) from e
+        if row is None:
+            return None
+        # Tenant check: Composio scopes by user_id at API level but we double
+        # check here so a malformed row can't leak across workspaces.
+        owner = row.get("user_id") or row.get("entity_id")
+        if owner and owner != external_user_id:
+            log.warning(
+                "composio_account_tenant_mismatch",
+                expected=external_user_id, actual=owner, account_id=account_id,
+            )
+            return None
+        return row
+
+    async def validate_connection(
+        self, external_user_id: str, account_id: str
+    ) -> list[str]:
+        """Composio's connections are either 'ACTIVE' (good), 'EXPIRED'
+        (OAuth needs refresh — they handle the refresh themselves but stale
+        rows surface this), 'INACTIVE' (user revoked), or missing."""
+        row = await self.get_account(external_user_id, account_id)
+        if row is None:
+            return ["__not_found__"]
+        status = (row.get("status") or "").upper()
+        if status == "EXPIRED":
+            return ["__token_expired__"]
+        if status == "ACTIVE":
+            return []
+        if status in ("INACTIVE", "REVOKED", "DELETED"):
+            return ["__not_found__"]
+        # Unknown status: treat as OK and let the action call surface a
+        # specific error if there is one.
+        return []
+
+    async def list_actions(self, app: str, query: str | None) -> list[dict]:
+        try:
+            tools = await cz.list_tools(app, query)
+        except cz.ComposioHTTPError as e:
+            raise self._wrap(e) from e
+        # Normalise to the shape the gateway / find_actions tool expects
+        # (matching pipedream's output): {key, name, description, ...}.
+        normalised: list[dict] = []
+        for t in tools:
+            normalised.append({
+                "key": t.get("slug") or t.get("name") or "",
+                "name": t.get("display_name") or t.get("name") or t.get("slug") or "",
+                "description": t.get("description") or "",
+            })
+        return normalised
+
+    async def get_action_props(self, action_id: str) -> list[dict]:
+        """Composio returns the full tool schema; we pluck the parameters
+        (filtering out any auth-shaped fields) so the agent sees only what
+        it should pass."""
+        try:
+            tool = await cz.get_tool(action_id)
+        except cz.ComposioHTTPError as e:
+            log.warning("composio_get_tool_failed", action_id=action_id, status=e.status)
+            return []
+        # input_parameters shape varies: sometimes a JSON Schema, sometimes a
+        # flat list. Normalise to [{name, type, optional, label}].
+        params = tool.get("input_parameters") or tool.get("parameters") or {}
+        if isinstance(params, dict) and "properties" in params:
+            required = set(params.get("required") or [])
+            props: list[dict] = []
+            for name, spec in (params.get("properties") or {}).items():
+                if not isinstance(spec, dict):
+                    continue
+                props.append({
+                    "name": name,
+                    "type": spec.get("type") or "string",
+                    "optional": name not in required,
+                    "label": spec.get("description") or "",
+                })
+            return props
+        if isinstance(params, list):
+            return [
+                {
+                    "name": p.get("name") or "",
+                    "type": p.get("type") or "string",
+                    "optional": bool(p.get("optional")),
+                    "label": p.get("description") or "",
+                }
+                for p in params if isinstance(p, dict)
+            ]
+        return []
+
+    async def run_action(
+        self,
+        external_user_id: str,
+        account_id: str,
+        app: str,  # noqa: ARG002 (kept for interface symmetry; Composio infers from tool slug)
+        action_id: str,
+        params: dict,
+    ) -> dict:
+        try:
+            result = await cz.execute_tool(
+                tool_slug=action_id,
+                user_id=external_user_id,
+                arguments=params,
+                connected_account_id=account_id or None,
+            )
+        except cz.ComposioHTTPError as e:
+            raise self._wrap(e) from e
+        # Composio wraps results as {data, error, successful} typically.
+        # Surface error semantics explicitly so the gateway can translate.
+        if isinstance(result, dict):
+            if result.get("successful") is False or result.get("error"):
+                detail = result.get("error") or "tool execution failed"
+                raise IntegrationError(
+                    "provider_error", status=None, detail=str(detail)[:300],
+                )
+            return result.get("data") if "data" in result else result
+        return {"ret": result}
+
+    async def disconnect(self, account_id: str) -> bool:
+        try:
+            return await cz.delete_connection(account_id)
+        except cz.ComposioHTTPError as e:
+            raise self._wrap(e) from e
+
+    async def create_connect_link(
+        self, external_user_id: str, webhook_uri: str | None = None
+    ) -> dict:
+        """Pipedream's create_connect_link takes only external_user_id (it
+        produces a generic link the user binds to one app interactively). The
+        Composio API requires the toolkit_slug at link creation time; the
+        gateway already knows the app, but our abstract signature doesn't pass
+        it here. We document the limitation: callers must use the wider
+        Composio-specific connect helper in `connect.py` for production flows.
+        This generic implementation returns the user_id only so anything
+        depending on the abstract interface still works in tests/lists."""
+        return {
+            "user_id": external_user_id,
+            "_note": (
+                "Composio requires toolkit_slug at link creation. Use "
+                "composio.initiate_connection(user_id, toolkit_slug) directly."
+            ),
+            "webhook_uri": webhook_uri,
+        }
+
+    # ----------------- pure-data helpers ----------------------------------- #
+
+    def match_account_for_app(
+        self, accounts: list[dict], app: str
+    ) -> dict | None:
+        """Composio returns connections with `toolkit_slug` (or `app_unique_key`
+        in older payloads); match by either."""
+        slug = app.lower()
+        for acc in accounts:
+            for key in ("toolkit_slug", "app_unique_key", "app_slug", "app_name"):
+                v = acc.get(key)
+                if isinstance(v, str) and v.lower() == slug:
+                    return acc
+        return None
+
+    def auth_type_of(self, account: dict) -> str | None:
+        """Composio reports auth_scheme: OAUTH2 / API_KEY / BEARER_TOKEN /
+        BASIC. We map to the same buckets PipedreamProvider does."""
+        scheme = (account.get("auth_scheme") or "").upper()
+        if "OAUTH" in scheme:
+            return "oauth"
+        if scheme:
+            return "custom"
+        return None
+
+
+# Singleton convenience accessor (same pattern as get_pipedream_provider).
+_PROVIDER_SINGLETON: ComposioProvider | None = None
+
+
+def get_composio_provider() -> ComposioProvider:
+    """Process-scoped singleton. The provider is stateless apart from its
+    transport, so one instance is enough."""
+    global _PROVIDER_SINGLETON
+    if _PROVIDER_SINGLETON is None:
+        _PROVIDER_SINGLETON = ComposioProvider()
+    return _PROVIDER_SINGLETON

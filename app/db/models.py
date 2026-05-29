@@ -207,11 +207,25 @@ class SkillInstall(Base):
 
 
 class IntegrationConnection(Base):
-    """A Pipedream-connected app for a workspace. Stores ONLY the connected-account
-    reference (pipedream_account_id); credentials live in Pipedream, never here."""
+    """A connected app for a workspace, served by one of N providers (Pipedream
+    today, Composio added in slice 0015, MCP-direct possibly later). Stores ONLY
+    the provider-side connected-account reference; credentials live in the
+    provider, never here.
+
+    `provider` is decided at connect-time (preference: Composio if the app is
+    in their catalogue, else Pipedream) and persisted so the gateway doesn't
+    re-route on every action call. The `pipedream_account_id` column name is
+    legacy; for Composio rows the field stores Composio's connection id under
+    the same column to avoid a per-provider account id column."""
 
     __tablename__ = "integration_connection"
-    __table_args__ = (UniqueConstraint("workspace_id", "app"),)
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "app"),
+        CheckConstraint(
+            "provider IN ('pipedream', 'composio')",
+            name="ck_integration_connection_provider",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -220,7 +234,14 @@ class IntegrationConnection(Base):
         ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
     )
     app: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Which integration provider backs this connection. Decided at connect-time.
+    provider: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="pipedream", server_default="pipedream"
+    )
     # Empty until connected; "pending" while awaiting an in-conversation connect.
+    # The column name is historical (was Pipedream-only); for Composio rows the
+    # field stores Composio's connected_account_id under the same name. The
+    # provider field above is the source of truth for which shape this is.
     pipedream_account_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="connected")
     # In-conversation connect flow: the paused run to auto-resume once connected.
