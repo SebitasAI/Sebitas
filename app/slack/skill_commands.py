@@ -44,7 +44,7 @@ import aiohttp
 import structlog
 from slack_bolt.app.async_app import AsyncApp
 
-from app.db.models import SkillPreview
+from app.db.models import Skill, SkillPreview
 from app.db.repository import upsert_app_user, upsert_workspace
 from app.db.session import get_session
 from app.skills import preview_store as _previews_store
@@ -271,6 +271,37 @@ def _status_block(text: str) -> list[dict]:
     return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
 
+def _installable_browse_blocks(skills: list[Skill]) -> list[dict]:
+    """Browse view used by `/misterr skill install` (no args). Each row has
+    its own [Instalar] button, plus a top [Instalar todas] for bulk."""
+    blocks: list[dict] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text":
+            f":books: *Skills del workspace que no tenés* ({len(skills)})"}},
+        {"type": "actions", "elements": [
+            {"type": "button",
+             "text": {"type": "plain_text", "text": f"Instalar todas ({len(skills)})"},
+             "style": "primary",
+             "action_id": "skill_install_all"},
+        ]},
+        {"type": "divider"},
+    ]
+    for skill in skills:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                "text": (
+                    f"• *{skill.name}* [`{skill.activation_default}`]\n"
+                    f"{skill.description}"
+                )},
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Instalar"},
+                "action_id": f"skill_install_from_browse:{skill.id}",
+            },
+        })
+    return blocks
+
+
 def _name_collision_blocks(*, preview_id: str, skill_name: str) -> list[dict]:
     """Buttons shown when Install hits a workspace-level name collision.
     User picks: install the existing workspace skill, edit + rename to upload
@@ -437,8 +468,9 @@ _SUBCOMMAND_HELP = (
     "Uso: `/misterr skill <subcomando>`\n"
     "• `upload` — sube un archivo `.md` después de este comando.\n"
     "• `list` — lista tus skills instaladas.\n"
-    "• `install <name>` — instala una skill que ya existe en el workspace "
-    "(la subió otro user, o quedó del catálogo).\n"
+    "• `install` — lista las skills del workspace que NO tenés todavía, con "
+    "botón para instalar cada una o todas de una.\n"
+    "• `install <name>` — instala una skill específica del workspace.\n"
     "• `info <name>` — detalles de una skill.\n"
     "• `remove <name>` — desinstalá una skill.\n"
 )
@@ -465,13 +497,31 @@ async def _cmd_list(*, client, team_id: str, slack_user_id: str, channel: str) -
 
 
 async def _cmd_install(
-    *, client, team_id: str, slack_user_id: str, channel: str, name: str
+    *, client, team_id: str, slack_user_id: str, channel: str, name: str = ""
 ) -> None:
-    """Install an EXISTING workspace skill for the caller. Used when a skill
-    already lives in the workspace catalog (uploaded by another user, or left
-    from a previous failed upload cycle) but the current user doesn't have it
-    in their installs."""
+    """`/misterr skill install [name]`:
+    - No name: browse mode. List the workspace skills the caller can install,
+      each with a one-click button, plus 'Install all' for bulk.
+    - With name: install that specific workspace skill for the caller.
+    """
     workspace_id, user_id = await _resolve_user_uuid(team_id, slack_user_id)
+
+    if not name:
+        installable = await _registry.list_installable_for_user(user_id)
+        if not installable:
+            await client.chat_postEphemeral(
+                channel=channel, user=slack_user_id,
+                text=(":sparkles: No hay skills nuevas para instalar en este "
+                      "workspace. Subí una con `/misterr skill upload`."),
+            )
+            return
+        await client.chat_postEphemeral(
+            channel=channel, user=slack_user_id,
+            text=f"{len(installable)} skill(s) disponibles para instalar.",
+            blocks=_installable_browse_blocks(installable),
+        )
+        return
+
     skill = await _registry.get_skill_in_workspace(workspace_id, name)
     if skill is None:
         await client.chat_postEphemeral(
@@ -633,12 +683,7 @@ def register_skill_handlers(app: AsyncApp) -> None:
                                       slack_user_id=slack_user_id,
                                       channel=channel, name=arg)
                 elif sub == "install":
-                    if not arg:
-                        await client.chat_postEphemeral(
-                            channel=channel, user=slack_user_id,
-                            text="Faltó el nombre: `/misterr skill install <name>`.",
-                        )
-                        return
+                    # Empty `arg` -> browse mode (list installable skills).
                     await _cmd_install(client=client, team_id=team_id,
                                        slack_user_id=slack_user_id,
                                        channel=channel, name=arg)
@@ -769,6 +814,116 @@ def register_skill_handlers(app: AsyncApp) -> None:
                 f":white_check_mark: *Instalada* `{p.name}` (versión "
                 "existente del workspace). Hacé `/misterr skill list` "
                 "para verla en tu lista."
+            ),
+        )
+
+    @app.action(re.compile(r"^skill_install_from_browse:(.+)$"))
+    async def on_install_from_browse(ack, body, client):  # noqa: ANN001
+        """One row clicked in the browse list. Resolves the skill id, installs
+        for the caller, re-renders the list with the row removed (or a 'done'
+        status if the list is empty)."""
+        await ack()
+        action_id = body["actions"][0]["action_id"]
+        skill_id_str = action_id.split(":", 1)[1]
+        team_id = body.get("team", {}).get("id") or body.get("team_id")
+        slack_user_id = body["user"]["id"]
+        response_url = body.get("response_url", "")
+        try:
+            skill_uuid = uuid.UUID(skill_id_str)
+        except (ValueError, TypeError):
+            return
+        workspace_id, user_id = await _resolve_user_uuid(team_id, slack_user_id)
+        # Re-verify the skill is in the caller's workspace (defence in depth:
+        # the action id is client-supplied).
+        async with get_session() as session:
+            skill_row = await session.get(Skill, skill_uuid)
+        if skill_row is None or skill_row.workspace_id != workspace_id:
+            await _update_ephemeral(
+                response_url,
+                text="Esa skill ya no existe en este workspace.",
+                blocks=_status_block(
+                    ":warning: Esa skill ya no existe en este workspace."
+                ),
+            )
+            return
+        existing = await _registry.get_skill_for_user(user_id, skill_row.name)
+        if existing is None:
+            await _registry.install_for_user(
+                user_id=user_id, skill_id=skill_row.id,
+            )
+
+        # Re-render the browse list with this row gone.
+        installable = await _registry.list_installable_for_user(user_id)
+        if not installable:
+            await _update_ephemeral(
+                response_url,
+                text=f"Instalada `{skill_row.name}`. Ya tenés todo el workspace.",
+                blocks=_status_block(
+                    f":white_check_mark: Instalada `{skill_row.name}`. "
+                    "Ya tenés todas las skills del workspace."
+                ),
+            )
+            return
+        await _update_ephemeral(
+            response_url,
+            text=f"Instalada `{skill_row.name}`. {len(installable)} restantes.",
+            blocks=[
+                {"type": "section", "text": {"type": "mrkdwn",
+                    "text": f":white_check_mark: Instalada `{skill_row.name}`."}},
+                *_installable_browse_blocks(installable),
+            ],
+        )
+
+    @app.action("skill_install_all")
+    async def on_install_all(ack, body, client):  # noqa: ANN001
+        """Bulk install every workspace skill the caller doesn't have yet.
+        Idempotent: re-clicking after a partial failure resumes the rest."""
+        await ack()
+        team_id = body.get("team", {}).get("id") or body.get("team_id")
+        slack_user_id = body["user"]["id"]
+        response_url = body.get("response_url", "")
+        _, user_id = await _resolve_user_uuid(team_id, slack_user_id)
+        installable = await _registry.list_installable_for_user(user_id)
+        if not installable:
+            await _update_ephemeral(
+                response_url,
+                text="Ya tenés todas las skills del workspace.",
+                blocks=_status_block(
+                    ":white_check_mark: Ya tenés todas las skills del workspace."
+                ),
+            )
+            return
+        installed_names: list[str] = []
+        failed: list[tuple[str, str]] = []
+        for skill in installable:
+            try:
+                await _registry.install_for_user(
+                    user_id=user_id, skill_id=skill.id,
+                )
+                installed_names.append(skill.name)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "skill_install_all_partial_fail",
+                    skill_id=str(skill.id), error=str(exc)[:200],
+                )
+                failed.append((skill.name, str(exc)[:120]))
+        if failed:
+            failed_lines = "\n".join(f"• `{n}`: {e}" for n, e in failed)
+            await _update_ephemeral(
+                response_url,
+                text=f"Instalé {len(installed_names)} skill(s). {len(failed)} fallaron.",
+                blocks=_status_block(
+                    f":white_check_mark: Instalé {len(installed_names)} skill(s).\n"
+                    f":warning: {len(failed)} fallaron:\n{failed_lines}"
+                ),
+            )
+            return
+        await _update_ephemeral(
+            response_url,
+            text=f"Instalé {len(installed_names)} skill(s).",
+            blocks=_status_block(
+                f":white_check_mark: *Instalé {len(installed_names)} skill(s) "
+                f"del workspace*. Hacé `/misterr skill list` para verlas todas."
             ),
         )
 
