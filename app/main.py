@@ -16,6 +16,10 @@ from app.agent.graph import build_graph, set_graph
 from app.concurrency import cleanup_old_events
 from app.config import get_settings
 from app.db.engine import engine
+from app.integrations.connect import (
+    periodic_resume_loop as integration_resume_loop,
+    resume_pending_polls,
+)
 from app.integrations.webhook import router as pipedream_webhook_router
 from app.logging import configure_logging
 from app.skills.preview_store import cleanup_expired as cleanup_expired_previews
@@ -90,12 +94,27 @@ async def lifespan(_: FastAPI):
                 await asyncio.sleep(300)
         preview_cleanup_task = asyncio.create_task(_preview_cleanup_loop())
 
+        # Restart any in-memory poll tasks that died on a previous process exit.
+        # Pending integration connect flows (row.status='pending' with a
+        # pending_run_id) need a live `_poll` to flip them to 'connected' once
+        # the user finishes OAuth on the provider's side. Without this, a
+        # Render redeploy mid-OAuth strands the row forever and the next user
+        # message triggers a reinstall loop.
+        try:
+            resumed = await resume_pending_polls()
+            if resumed:
+                log.info("connect_polls_resumed_on_startup", count=resumed)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("resume_pending_polls_failed", error=str(exc))
+        integration_resume_task = asyncio.create_task(integration_resume_loop())
+
         try:
             yield
         finally:
             cleanup_task.cancel()
             roster_task.cancel()
             preview_cleanup_task.cancel()
+            integration_resume_task.cancel()
             try:
                 await handler.close_async()
             except Exception as exc:  # noqa: BLE001
