@@ -1,25 +1,25 @@
-// Cloudflare Workers Builds config for the marketing website (misterr.ai).
+// Cloudflare Worker (with Static Assets) for the marketing site `misterr.ai`.
 //
-// The unified Workers Builds runner expects a wrangler config at the repo
-// root. Without one it runs `npx wrangler deploy` against the workspace
-// root and fails ("application detection logic has been run in the root of
-// a workspace"). This file tells Cloudflare:
-//   - This is a Pages-style static deploy (pages_build_output_dir).
-//   - The build output lives at website/out (where Next.js writes it under
-//     `output: 'export'`).
+// Cloudflare unified Workers + Pages: a "static site" now deploys as a
+// Worker with an `assets.directory` binding. The custom domain `misterr.ai`
+// is attached to this Worker in the dashboard; this config tells wrangler
+// what to upload when `wrangler deploy` runs.
 //
-// The actual build still needs to run before wrangler can pick up the
-// output. We do that via the Deploy command in the Cloudflare project
-// settings:
+// The actual build happens in the Cloudflare project's Deploy command:
 //
-//     pnpm --filter @misterr/website build && npx wrangler pages deploy website/out
+//     pnpm --filter @misterr/website build && npx wrangler deploy
 //
-// The Spaces frontend keeps its own `spaces-template/wrangler.jsonc` for its
-// independent Pages project; the two don't collide because each Cloudflare
-// project has its own `name`.
+// Next runs `output: 'export'` and writes static HTML/CSS/JS to
+// `website/out`, which wrangler then ships to the Worker's asset namespace.
+// No fallback Worker script: requests with no matching asset get a 404.
+//
+// The Spaces frontend (`spaces-template/`) keeps its own wrangler.jsonc;
+// the two don't collide because each project has its own `name`.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "misterr",
   "compatibility_date": "2026-05-28",
-  "pages_build_output_dir": "./website/out"
+  "assets": {
+    "directory": "./website/out"
+  }
 }
