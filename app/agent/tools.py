@@ -182,7 +182,7 @@ async def _load_skill(name: str) -> str:
     except _sk_registry.SkillNotFound:
         return (
             f"Skill {name!r} no instalada para este usuario. Pedile al humano "
-            "que la instale con `/sebitas skill upload` (o que te diga si la "
+            "que la instale con `/misterr skill upload` (o que te diga si la "
             "instaló bajo otro nombre)."
         )
     except _sk_registry.SkillError as exc:

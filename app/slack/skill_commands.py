@@ -1,15 +1,15 @@
-"""Slack surface for the Skills feature: one slash command (`/sebitas`) with
+"""Slack surface for the Skills feature: one slash command (`/misterr`) with
 subcommands, plus the `file_shared` flow gated by a precursor state.
 
 UI contract:
-  /sebitas skill upload  -> primes a 5-minute pending state for the user; the
+  /misterr skill upload  -> primes a 5-minute pending state for the user; the
                             next `.md` they upload in their DM is processed as
                             a skill (not as agent content).
-  /sebitas skill list    -> ephemeral list of installed skills with uninstall
+  /misterr skill list    -> ephemeral list of installed skills with uninstall
                             buttons.
-  /sebitas skill remove <name>
+  /misterr skill remove <name>
                          -> uninstalls one skill for the user.
-  /sebitas skill info <name>
+  /misterr skill info <name>
                          -> ephemeral block-kit with metadata + first 500
                             chars of the body.
 
@@ -23,7 +23,7 @@ View submission:
 
 State that doesn't fit in a block-kit `value` (raw body of up to 256 KB)
 lives in the in-memory preview cache, keyed by `preview_id`. On a Render
-restart the cache resets; the user just types `/sebitas skill upload` again.
+restart the cache resets; the user just types `/misterr skill upload` again.
 That's acceptable for an interactive flow that lives for minutes, not hours.
 """
 
@@ -189,9 +189,9 @@ async def _download_md(url: str, bot_token: str) -> bytes:
 
 async def _resolve_user_uuid(team_id: str, slack_user_id: str) -> tuple[uuid.UUID, uuid.UUID]:
     """Ensure (workspace, app_user) rows exist for this Slack identity. Used
-    by every command so a brand-new user calling `/sebitas` doesn't fail
+    by every command so a brand-new user calling `/misterr` doesn't fail
     because their AppUser row hasn't been created yet (the generic message
-    handler creates it on first message, but a user may run /sebitas first)."""
+    handler creates it on first message, but a user may run /misterr first)."""
     async with get_session() as session:
         workspace = await upsert_workspace(session, team_id)
         user = await upsert_app_user(session, workspace.id, slack_user_id)
@@ -270,7 +270,7 @@ def _list_blocks(installs) -> list[dict]:
     if not installs:
         return [{"type": "section", "text": {"type": "mrkdwn",
             "text": ":sparkles: No tenés skills instaladas. "
-                    "Subí una con `/sebitas skill upload`."}}]
+                    "Subí una con `/misterr skill upload`."}}]
     blocks: list[dict] = [{"type": "section", "text": {"type": "mrkdwn",
         "text": f":books: *Tus skills* ({len(installs)})"}}]
     for swi in installs:
@@ -333,10 +333,10 @@ async def handle_skill_file_upload(
     thread_ts: str | None,
 ) -> None:
     """Called from the generic message handler when a .md file_share arrives
-    AND the precursor `/sebitas skill upload` is pending. Downloads the file,
+    AND the precursor `/misterr skill upload` is pending. Downloads the file,
     runs frontmatter resolution, posts the preview block-kit."""
     # Consume the precursor now so a flood of files doesn't all enter this
-    # path; a retry requires a fresh `/sebitas skill upload`.
+    # path; a retry requires a fresh `/misterr skill upload`.
     _clear_pending(team_id, slack_user_id)
 
     size = file_obj.get("size") or 0
@@ -416,7 +416,7 @@ async def handle_skill_file_upload(
 # --------------------------------------------------------------------------- #
 
 _SUBCOMMAND_HELP = (
-    "Uso: `/sebitas skill <subcomando>`\n"
+    "Uso: `/misterr skill <subcomando>`\n"
     "• `upload` — sube un archivo `.md` después de este comando.\n"
     "• `list` — lista tus skills instaladas.\n"
     "• `info <name>` — detalles de una skill.\n"
@@ -535,8 +535,8 @@ async def _persist_install(p: PreviewState) -> str:
 # --------------------------------------------------------------------------- #
 
 def register_skill_handlers(app: AsyncApp) -> None:
-    @app.command("/sebitas")
-    async def on_sebitas(ack, body, client):  # noqa: ANN001
+    @app.command("/misterr")
+    async def on_misterr(ack, body, client):  # noqa: ANN001
         # Slack requires ACK < 3s; the actual work runs in a task.
         await ack()
         text = (body.get("text") or "").strip()
@@ -547,7 +547,7 @@ def register_skill_handlers(app: AsyncApp) -> None:
             return
 
         parts = text.split(maxsplit=2)
-        # Tolerate both `/sebitas skill upload` and `/sebitas upload`. The
+        # Tolerate both `/misterr skill upload` and `/misterr upload`. The
         # `skill` namespace is reserved for future subcommand groups.
         if parts and parts[0] == "skill":
             parts = parts[1:]
@@ -571,7 +571,7 @@ def register_skill_handlers(app: AsyncApp) -> None:
                     if not arg:
                         await client.chat_postEphemeral(
                             channel=channel, user=slack_user_id,
-                            text="Faltó el nombre: `/sebitas skill remove <name>`.",
+                            text="Faltó el nombre: `/misterr skill remove <name>`.",
                         )
                         return
                     await _cmd_remove(client=client, team_id=team_id,
@@ -581,7 +581,7 @@ def register_skill_handlers(app: AsyncApp) -> None:
                     if not arg:
                         await client.chat_postEphemeral(
                             channel=channel, user=slack_user_id,
-                            text="Faltó el nombre: `/sebitas skill info <name>`.",
+                            text="Faltó el nombre: `/misterr skill info <name>`.",
                         )
                         return
                     await _cmd_info(client=client, team_id=team_id,
@@ -615,10 +615,10 @@ def register_skill_handlers(app: AsyncApp) -> None:
             # neutralise them with a status line.
             await _update_ephemeral(
                 response_url,
-                text="La preview venció. Volvé a subir el archivo con `/sebitas skill upload`.",
+                text="La preview venció. Volvé a subir el archivo con `/misterr skill upload`.",
                 blocks=_status_block(
                     ":warning: La preview venció. Volvé a subir el archivo con "
-                    "`/sebitas skill upload`."
+                    "`/misterr skill upload`."
                 ),
             )
             return
@@ -661,10 +661,10 @@ def register_skill_handlers(app: AsyncApp) -> None:
         if p is None:
             await _update_ephemeral(
                 response_url,
-                text="La preview venció. Volvé a subir el archivo con `/sebitas skill upload`.",
+                text="La preview venció. Volvé a subir el archivo con `/misterr skill upload`.",
                 blocks=_status_block(
                     ":warning: La preview venció. Volvé a subir el archivo con "
-                    "`/sebitas skill upload`."
+                    "`/misterr skill upload`."
                 ),
             )
             return

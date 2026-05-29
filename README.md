@@ -1,4 +1,4 @@
-# Sebitas
+# Misterr
 
 Plataforma de agente de IA **agnóstica al caso de uso** que vive en Slack (estilo
 "AI coworker"), multi-tenant B2B. Este repo es el **primer slice**: esqueleto del
@@ -115,7 +115,7 @@ y queda escuchando.
    asyncio.run((lambda: None)())"  # o conéctate con psql y haz: SELECT * FROM message;
    ```
    Más simple: con `psql "$DATABASE_URL"` ejecuta `SELECT role, text FROM message ORDER BY created_at DESC LIMIT 5;`
-4. El run aparece en tu dashboard de Langfuse (observación `sebitas-reply`).
+4. El run aparece en tu dashboard de Langfuse (observación `misterr-reply`).
 
 ## Configuración de la Slack App
 

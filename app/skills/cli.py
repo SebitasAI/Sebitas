@@ -1,6 +1,6 @@
 """Dev CLI for the Skills feature. Mirrors the Slack slash-command surface so
 maintainers can seed / inspect skills without booting Slack. Production users
-should always go through `/sebitas skill ...`.
+should always go through `/misterr skill ...`.
 
 Usage (under Doppler so R2 + DB credentials are present):
 

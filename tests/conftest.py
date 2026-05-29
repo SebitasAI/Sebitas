@@ -138,7 +138,7 @@ TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
 
 _db_skip_reason = (
     "TEST_DATABASE_URL not set; set it to a Postgres URL "
-    "(e.g. postgresql+asyncpg://localhost/sebitas_test) to run integration tests"
+    "(e.g. postgresql+asyncpg://localhost/misterr_test) to run integration tests"
 )
 
 

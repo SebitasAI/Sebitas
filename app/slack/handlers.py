@@ -241,7 +241,7 @@ def register_handlers(app: AsyncApp) -> None:
         if bot_user_id and f"<@{bot_user_id}>" in text:
             return  # handled by app_mention
 
-        # Skill upload precursor interception: if the user ran `/sebitas skill
+        # Skill upload precursor interception: if the user ran `/misterr skill
         # upload` within the last 5 min AND this message brings a `.md` file,
         # we process it as a skill (not as agent content) and stop here. The
         # skill_commands module decides whether the file looks like markdown.
@@ -300,7 +300,7 @@ def register_handlers(app: AsyncApp) -> None:
                 )
             return
 
-        # Channels: only continue a thread Sebitas already started.
+        # Channels: only continue a thread Misterr already started.
         if channel_type in ("channel", "group"):
             if not thread_ts:
                 return
@@ -330,7 +330,7 @@ def register_handlers(app: AsyncApp) -> None:
     async def on_connect_url_click(ack):  # noqa: ANN001
         await ack()
 
-    # /sebitas slash command + skill install/uninstall actions + edit modal.
+    # /misterr slash command + skill install/uninstall actions + edit modal.
     # Kept in its own module since it owns its own in-memory state (preview
     # cache + precursor pending) and doesn't share routing with anything else.
     register_skill_handlers(app)
