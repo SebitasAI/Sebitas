@@ -205,13 +205,55 @@ async def initiate_connection(
 async def list_connections(*, user_id: str, toolkit_slug: str | None = None) -> list[dict]:
     """Connections this user has authorized, optionally filtered to one
     toolkit. Used by the connect-complete polling fallback and the
-    `list_integrations` tool."""
-    params: dict = {"user_id": user_id}
+    `list_integrations` tool.
+
+    Composio's v3 list endpoint uses PLURAL filter names (`user_ids`,
+    `toolkit_slugs`, `statuses`) per their REST API doc. We previously sent
+    `user_id` (singular) which the server silently ignored, returning a page
+    that happened to be empty or non-matching for this caller. Lesson: passing
+    an unknown query param doesn't 4xx, it just gets dropped, so polls timed
+    out instead of failing loudly.
+
+    Limit is set high so a single round-trip covers the realistic upper bound
+    of connections per workspace. If a tenant ever exceeds this we'll see it
+    as `composio_list_truncated` in the logs and can add cursor pagination."""
+    params: dict = {
+        # Composio accepts the plural form; the singular variant is sent too
+        # in case a future API version reverts (defensive, costs nothing).
+        "user_ids": user_id,
+        "user_id": user_id,
+        "limit": 100,
+    }
     if toolkit_slug:
+        params["toolkit_slugs"] = toolkit_slug.lower()
         params["toolkit_slug"] = toolkit_slug.lower()
     data = await _request("GET", "/connected_accounts", params=params)
     if isinstance(data, dict):
-        return list(data.get("items") or data.get("connections") or [])
+        # Top-level key for the array varies across API surfaces; check all
+        # plausible names. If none match, log the keys for debugging.
+        items = (
+            data.get("items")
+            or data.get("connections")
+            or data.get("connected_accounts")
+            or data.get("data")
+            or []
+        )
+        if not items and data:
+            log.warning(
+                "composio_list_connections_empty_or_unknown_shape",
+                response_keys=list(data.keys())[:10],
+                response_sample=str(data)[:300],
+            )
+        # Pagination signal: if `next_cursor` or `has_more` is present and
+        # truthy, we're not returning everything. Loud log so we notice.
+        if isinstance(data, dict) and (
+            data.get("next_cursor") or data.get("has_more")
+        ):
+            log.warning(
+                "composio_list_truncated",
+                user_id=user_id, returned=len(items),
+            )
+        return list(items)
     return list(data) if isinstance(data, list) else []
 
 
