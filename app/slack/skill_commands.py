@@ -408,6 +408,8 @@ _SUBCOMMAND_HELP = (
     "Uso: `/misterr skill <subcomando>`\n"
     "• `upload` — sube un archivo `.md` después de este comando.\n"
     "• `list` — lista tus skills instaladas.\n"
+    "• `install <name>` — instala una skill que ya existe en el workspace "
+    "(la subió otro user, o quedó del catálogo).\n"
     "• `info <name>` — detalles de una skill.\n"
     "• `remove <name>` — desinstalá una skill.\n"
 )
@@ -430,6 +432,40 @@ async def _cmd_list(*, client, team_id: str, slack_user_id: str, channel: str) -
         channel=channel, user=slack_user_id,
         text=f"{len(installs)} skill(s) instalada(s).",
         blocks=_list_blocks(installs),
+    )
+
+
+async def _cmd_install(
+    *, client, team_id: str, slack_user_id: str, channel: str, name: str
+) -> None:
+    """Install an EXISTING workspace skill for the caller. Used when a skill
+    already lives in the workspace catalog (uploaded by another user, or left
+    from a previous failed upload cycle) but the current user doesn't have it
+    in their installs."""
+    workspace_id, user_id = await _resolve_user_uuid(team_id, slack_user_id)
+    skill = await _registry.get_skill_in_workspace(workspace_id, name)
+    if skill is None:
+        await client.chat_postEphemeral(
+            channel=channel, user=slack_user_id,
+            text=(f":warning: No hay ninguna skill llamada `{name}` en este "
+                  f"workspace. Subí el `.md` con `/misterr skill upload`."),
+        )
+        return
+    # Already-installed: friendly idempotent message instead of a silent reinstall.
+    existing = await _registry.get_skill_for_user(user_id, name)
+    if existing is not None:
+        await client.chat_postEphemeral(
+            channel=channel, user=slack_user_id,
+            text=(f":information_source: `{name}` ya está instalada para vos "
+                  f"(activación `{existing.effective_activation}`)."),
+        )
+        return
+    await _registry.install_for_user(user_id=user_id, skill_id=skill.id)
+    await client.chat_postEphemeral(
+        channel=channel, user=slack_user_id,
+        text=(f":white_check_mark: Instalada `{name}` para vos con activación "
+              f"`{skill.activation_default}`. Hacé `/misterr skill list` para "
+              "verla en tu lista."),
     )
 
 
@@ -567,6 +603,16 @@ def register_skill_handlers(app: AsyncApp) -> None:
                     await _cmd_remove(client=client, team_id=team_id,
                                       slack_user_id=slack_user_id,
                                       channel=channel, name=arg)
+                elif sub == "install":
+                    if not arg:
+                        await client.chat_postEphemeral(
+                            channel=channel, user=slack_user_id,
+                            text="Faltó el nombre: `/misterr skill install <name>`.",
+                        )
+                        return
+                    await _cmd_install(client=client, team_id=team_id,
+                                       slack_user_id=slack_user_id,
+                                       channel=channel, name=arg)
                 elif sub == "info":
                     if not arg:
                         await client.chat_postEphemeral(
@@ -614,12 +660,21 @@ def register_skill_handlers(app: AsyncApp) -> None:
         try:
             skill_id = await _persist_install(p)
         except _registry.SkillNameTaken:
-            # Don't deactivate buttons on this branch: the user still has Edit
-            # available to fix the collision before retrying Install.
+            # Don't deactivate buttons on this branch: user still has Edit
+            # available, OR can use /misterr skill install to attach the
+            # existing workspace skill to their account instead of creating
+            # a duplicate.
             await client.chat_postEphemeral(
                 channel=channel, user=slack_user_id,
-                text=(f":warning: Ya existe una skill con el nombre `{p.name}` en este "
-                      "workspace. Hacé `Editar` para cambiarle el nombre."),
+                text=(
+                    f":warning: Ya existe una skill con el nombre `{p.name}` "
+                    "en este workspace. Tres opciones:\n"
+                    f"• Para instalarte la que ya está: "
+                    f"`/misterr skill install {p.name}`.\n"
+                    "• Para subir la tuya con un nombre distinto: click "
+                    "`Editar` arriba.\n"
+                    "• Para descartar este upload: click `Cancelar`."
+                ),
             )
             return
         except Exception as exc:  # noqa: BLE001
