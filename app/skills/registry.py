@@ -325,6 +325,32 @@ async def list_for_workspace(workspace_id: uuid.UUID) -> list[Skill]:
         )
 
 
+async def list_installable_for_user(user_id: uuid.UUID) -> list[Skill]:
+    """Workspace skills the user could install but hasn't yet. Drives the
+    'browse mode' of `/misterr skill install` (no args). One query: SELECT
+    workspace skills WHERE id NOT IN (this user's installs)."""
+    async with get_session() as session:
+        user = await session.get(AppUser, user_id)
+        if user is None:
+            return []
+        already_installed = (
+            select(SkillInstall.skill_id)
+            .where(SkillInstall.user_id == user_id)
+            .scalar_subquery()
+        )
+        rows = (
+            await session.execute(
+                select(Skill)
+                .where(
+                    Skill.workspace_id == user.workspace_id,
+                    Skill.id.notin_(already_installed),
+                )
+                .order_by(Skill.created_at.desc())
+            )
+        ).scalars().all()
+    return list(rows)
+
+
 async def get_skill_for_user(
     user_id: uuid.UUID, name: str
 ) -> SkillWithInstall | None:
