@@ -1,0 +1,25 @@
+// Cloudflare Workers Builds config for the marketing website (misterr.ai).
+//
+// The unified Workers Builds runner expects a wrangler config at the repo
+// root. Without one it runs `npx wrangler deploy` against the workspace
+// root and fails ("application detection logic has been run in the root of
+// a workspace"). This file tells Cloudflare:
+//   - This is a Pages-style static deploy (pages_build_output_dir).
+//   - The build output lives at website/out (where Next.js writes it under
+//     `output: 'export'`).
+//
+// The actual build still needs to run before wrangler can pick up the
+// output. We do that via the Deploy command in the Cloudflare project
+// settings:
+//
+//     pnpm --filter @misterr/website build && npx wrangler pages deploy website/out
+//
+// The Spaces frontend keeps its own `spaces-template/wrangler.jsonc` for its
+// independent Pages project; the two don't collide because each Cloudflare
+// project has its own `name`.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "misterr-website",
+  "compatibility_date": "2026-05-28",
+  "pages_build_output_dir": "./website/out"
+}
