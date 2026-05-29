@@ -248,8 +248,15 @@ class ComposioProvider(IntegrationProvider):
     # Metabase's POST /api/card rejects with a NOT NULL constraint violation.
     # Verified by direct curl: identical body succeeds when sent to Metabase
     # ourselves.
+    # METABASE_CREATE_DASHBOARD_SAVE_COLLECTION: Composio strips `card_id` from
+    # every entry of the `dashcards` array, so dashboards get created with the
+    # right grid layout but no actual cards linked (every slot empty).
+    # Verified: same payload via direct HTTP creates the dashboard AND links
+    # cards correctly. Requires a 2-step flow (POST empty, PUT with dashcards)
+    # because Metabase's POST /api/dashboard doesn't accept inline dashcards.
     _COMPOSIO_BROKEN_ACTIONS_WITH_DIRECT_FALLBACK = {
         "METABASE_POST_API_CARD": ("POST", "/api/card", "metabase"),
+        "METABASE_CREATE_DASHBOARD_SAVE_COLLECTION": ("CUSTOM_DASHBOARD", "", "metabase"),
     }
 
     def _get_metabase_fallback_creds(self, workspace_id: str) -> tuple[str, str] | None:
@@ -311,6 +318,67 @@ class ComposioProvider(IntegrationProvider):
                 except Exception:  # noqa: BLE001
                     return {"raw": text}
 
+    async def _create_dashboard_two_step(
+        self, creds: tuple[str, str], params: dict,
+    ) -> dict:
+        """Composio's SAVE_COLLECTION action passes dashcards but strips
+        card_id from each entry; Metabase's POST /api/dashboard also doesn't
+        accept inline dashcards in one shot. Two-step:
+
+          1) POST /api/dashboard with {name, collection_id, ...meta} → empty dashboard
+          2) PUT /api/dashboard/:id with {dashcards: [...]} → links cards
+
+        The agent passes `parent_collection_id` (Composio's name); we translate
+        to Metabase's `collection_id`. dashcards may arrive with `card_id`
+        in each entry (the agent followed our skill instructions); we pass them
+        through to step 2 verbatim, only synthesising a temporary `id: -N` per
+        entry if missing (Metabase needs an id field on each dashcard for the
+        PUT; negative IDs tell it 'new').
+        """
+        params = dict(params)
+        dashcards = params.pop("dashcards", None) or []
+        # POST: create empty dashboard.
+        create_body = {
+            "name": params.get("name"),
+            "collection_id": params.get("parent_collection_id") or params.get("collection_id"),
+        }
+        for k in ("description", "parameters", "tabs", "width", "cache_ttl",
+                  "auto_apply_filters", "embedding_params", "enable_embedding"):
+            if params.get(k) is not None:
+                create_body[k] = params[k]
+        if not create_body.get("name"):
+            raise IntegrationError(
+                "validation", status=None,
+                detail="dashboard create: 'name' is required",
+            )
+        created = await self._http_direct_metabase(creds, "POST", "/api/dashboard", create_body)
+        if not isinstance(created, dict) or not created.get("id"):
+            raise IntegrationError(
+                "provider_error", status=None,
+                detail=f"dashboard create returned unexpected shape: {str(created)[:200]}",
+            )
+        dashboard_id = created["id"]
+        if not dashcards:
+            return created
+        # PUT: attach dashcards. Each entry needs a `card_id` (the linkage)
+        # and a placeholder `id` (negative for new ones); the rest passes
+        # through (row/col/size_x/size_y/visualization_settings).
+        prepared: list[dict] = []
+        for i, dc in enumerate(dashcards, start=1):
+            if not isinstance(dc, dict):
+                continue
+            entry = dict(dc)
+            if "id" not in entry:
+                entry["id"] = -i
+            if entry.get("visualization_settings") is None:
+                entry["visualization_settings"] = {}
+            prepared.append(entry)
+        put_body = {"dashcards": prepared}
+        updated = await self._http_direct_metabase(
+            creds, "PUT", f"/api/dashboard/{dashboard_id}", put_body,
+        )
+        return updated if isinstance(updated, dict) else created
+
     def _normalise_metabase_card_body(self, params: dict) -> dict:
         """Ensure POST /api/card's body has every required field at the top
         level. Composio's schema doesn't expose `database_id`, so callers
@@ -341,14 +409,17 @@ class ComposioProvider(IntegrationProvider):
             creds = self._get_metabase_fallback_creds(external_user_id)
             if creds is not None:
                 method, path, _ = bypass
-                body = self._normalise_metabase_card_body(params) \
-                    if action_id == "METABASE_POST_API_CARD" else params
                 try:
-                    result = await self._http_direct_metabase(creds, method, path, body)
+                    if method == "CUSTOM_DASHBOARD":
+                        result = await self._create_dashboard_two_step(creds, params)
+                    else:
+                        body = self._normalise_metabase_card_body(params) \
+                            if action_id == "METABASE_POST_API_CARD" else params
+                        result = await self._http_direct_metabase(creds, method, path, body)
                     log.info(
                         "metabase_direct_action_ok",
                         action_id=action_id,
-                        card_id=result.get("id") if isinstance(result, dict) else None,
+                        result_id=result.get("id") if isinstance(result, dict) else None,
                     )
                     return result
                 except IntegrationError:
