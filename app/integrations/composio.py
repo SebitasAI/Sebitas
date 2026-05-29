@@ -141,20 +141,65 @@ async def execute_tool(
     return await _request("POST", f"/tools/execute/{tool_slug}", json=body)
 
 
+async def list_auth_configs(toolkit_slug: str | None = None) -> list[dict]:
+    """List auth configs created in our Composio project (via dashboard or
+    API). Each toolkit needs at least one auth config to be linkable; we
+    pick the first match for `toolkit_slug` if a filter is given.
+
+    Composio's response shape varies by API version — normalise into a flat
+    list of dicts so the caller can iterate without branching."""
+    params: dict = {}
+    if toolkit_slug:
+        params["toolkit_slug"] = toolkit_slug.lower()
+    data = await _request("GET", "/auth_configs", params=params)
+    if isinstance(data, dict):
+        return list(data.get("items") or data.get("auth_configs") or data.get("data") or [])
+    return list(data) if isinstance(data, list) else []
+
+
 async def initiate_connection(
     *,
     user_id: str,
     toolkit_slug: str,
     callback_url: str | None = None,
 ) -> dict:
-    """Start a new OAuth/API-key connect flow for a user against a toolkit.
-    Returns `{redirect_url, connection_id, ...}`. The user clicks the
-    redirect_url, completes auth on Composio's hosted UI, and Composio fires
-    a webhook (or we poll connection_id) to know it succeeded."""
-    body: dict = {"user_id": user_id, "toolkit_slug": toolkit_slug.lower()}
+    """Start a connect flow for a user against a toolkit. Composio's v3
+    endpoint is `POST /connected_accounts/link` (the older `/initiate` path
+    is being retired and returns 404 on new accounts). Requires an
+    `auth_config_id` — we resolve it from the project's auth configs
+    filtered by toolkit_slug. If no auth config exists for the toolkit, the
+    project owner has to create one in the Composio dashboard first.
+
+    Returns the link payload, expected to contain a redirect URL the user
+    clicks to authorize."""
+    configs = await list_auth_configs(toolkit_slug)
+    auth_config_id = None
+    for c in configs:
+        # Multiple possible id field names across Composio API versions.
+        auth_config_id = c.get("id") or c.get("nano_id") or c.get("auth_config_id")
+        if auth_config_id:
+            break
+    if not auth_config_id:
+        raise ComposioHTTPError(
+            status=412,  # treat as user-actionable: precondition failed.
+            body=(
+                f"No auth_config found for toolkit '{toolkit_slug}'. "
+                "Create one at https://app.composio.dev (Integrations) for "
+                "this toolkit + your project, then retry."
+            ),
+        )
+
+    body: dict = {
+        "user_id": user_id,
+        # Composio expects the auth_config as a nested object in the body
+        # of POST /connected_accounts/link. Older variants accept a top-level
+        # `auth_config_id`; we pass both shapes for compatibility.
+        "auth_config": {"id": auth_config_id},
+        "auth_config_id": auth_config_id,
+    }
     if callback_url:
         body["callback_url"] = callback_url
-    return await _request("POST", "/connected_accounts/initiate", json=body)
+    return await _request("POST", "/connected_accounts/link", json=body)
 
 
 async def list_connections(*, user_id: str, toolkit_slug: str | None = None) -> list[dict]:

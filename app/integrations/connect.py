@@ -40,6 +40,31 @@ def _composio_callback_uri() -> str | None:
     return f"{base.rstrip('/')}/integrations/composio/webhook" if base else None
 
 
+def _extract_composio_redirect_url(resp: dict) -> str | None:
+    """Composio's /connected_accounts/link response shape varies across API
+    versions. Try the documented keys at top level, then a few nested
+    common patterns. Returns None if nothing matches (caller logs)."""
+    if not isinstance(resp, dict):
+        return None
+    # Top-level candidates.
+    for key in (
+        "redirect_url", "redirectUrl", "connect_link_url",
+        "url", "link", "auth_url", "authUrl",
+    ):
+        v = resp.get(key)
+        if isinstance(v, str) and v.startswith(("http://", "https://")):
+            return v
+    # Nested candidates Composio sometimes uses.
+    for outer in ("data", "connection", "link", "auth"):
+        nested = resp.get(outer)
+        if isinstance(nested, dict):
+            for key in ("redirect_url", "redirectUrl", "url", "link"):
+                v = nested.get(key)
+                if isinstance(v, str) and v.startswith(("http://", "https://")):
+                    return v
+    return None
+
+
 async def _mint_connect_link(provider_name: str, workspace_id: str, app: str) -> str | None:
     """Branch on provider to mint the right kind of connect link.
 
@@ -57,16 +82,20 @@ async def _mint_connect_link(provider_name: str, workspace_id: str, app: str) ->
         except cz.ComposioHTTPError as e:
             log.warning(
                 "composio_initiate_connection_failed",
-                app=app, status=e.status, body=e.body[:200],
+                app=app, status=e.status, body=e.body[:300],
             )
             return None
-        # Composio returns the URL under a few possible keys depending on
-        # API version; try them in order.
-        return (
-            resp.get("redirect_url")
-            or resp.get("redirectUrl")
-            or resp.get("connect_link_url")
-        )
+        url = _extract_composio_redirect_url(resp)
+        if url is None:
+            # The call succeeded but we couldn't find the redirect URL in the
+            # response. Log the response keys so we can update the extractor.
+            log.warning(
+                "composio_initiate_no_redirect_url",
+                app=app,
+                response_keys=list(resp.keys()) if isinstance(resp, dict) else None,
+                response_sample=str(resp)[:300],
+            )
+        return url
     # Pipedream (default).
     try:
         token = await _get_pipedream_provider().create_connect_link(
