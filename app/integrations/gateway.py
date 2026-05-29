@@ -90,6 +90,15 @@ async def list_integrations() -> str:
     """List the workspace's *connected* integrations with status, auth type
     (oauth | custom, for UX only), and connected-since date.
 
+    Behaviour: also includes rows in `status='pending'` and attempts inline
+    reconciliation against the provider for each. If the provider reports an
+    ACTIVE connection that our row never caught (poll task died on a deploy,
+    webhook signature mismatched, etc.), the row is flipped to 'connected'
+    here and surfaced as such. This makes 'list integrations' double as a
+    self-healing verify step: a user saying 'verificá / ya lo hice' lets the
+    LLM call this single tool to break the pending-status reconnect loop
+    instead of suggesting reinstall.
+
     Auth type comes from the provider in a single round-trip (one list_accounts
     call) and is informational: it never branches invocation logic."""
     ws = _current_workspace()
@@ -100,25 +109,21 @@ async def list_integrations() -> str:
             await session.execute(
                 select(IntegrationConnection).where(
                     IntegrationConnection.workspace_id == ws,
-                    IntegrationConnection.status == "connected",
+                    IntegrationConnection.status.in_(("connected", "pending")),
                 )
             )
         ).scalars().all()
-    if not rows:
-        return "No hay integraciones conectadas en este workspace."
 
-    # Best-effort auth-type enrichment. Each row carries its provider; we
-    # group by provider so the listing makes ONE list_accounts call per
-    # backend (vs N round-trips). A provider failure just skips its
-    # enrichment — listing is UX, not a blocker.
+    # Group by provider once for the single list_accounts call per backend.
+    # We need this for both reconciliation (pending rows) and auth-type
+    # enrichment (connected rows), so a single provider hit serves both.
     by_provider: dict[str, list[IntegrationConnection]] = {}
     for r in rows:
         by_provider.setdefault(r.provider or "pipedream", []).append(r)
     accounts_by_id: dict[str, dict] = {}
     providers_by_name: dict[str, IntegrationProvider] = {}
+    accounts_by_provider: dict[str, list[dict]] = {}
     for provider_name, rows_for_provider in by_provider.items():
-        # Any row from this group can resolve the provider; the app is
-        # irrelevant since we're listing accounts at provider scope.
         sample_app = rows_for_provider[0].app
         try:
             provider, _ = await provider_for_app(ws, sample_app)
@@ -130,18 +135,63 @@ async def list_integrations() -> str:
             continue
         providers_by_name[provider_name] = provider
         try:
-            for a in await provider.list_accounts(str(ws)):
-                aid = a.get("id")
-                if aid:
-                    accounts_by_id[aid] = a
+            accounts = await provider.list_accounts(str(ws))
         except IntegrationError as e:
             log.warning(
                 "list_integrations_provider_fetch_failed",
                 provider=provider_name, kind=e.kind, status=e.status,
             )
+            accounts = []
+        accounts_by_provider[provider_name] = accounts
+        for a in accounts:
+            aid = a.get("id")
+            if aid:
+                accounts_by_id[aid] = a
+
+    # Reconcile pending rows in-place. Imports inside the function to avoid a
+    # module-level cycle: connect.py imports gateway for is_connected.
+    from app.integrations import connect as _connect
+
+    pending_rows = [r for r in rows if r.status == "pending"]
+    for r in pending_rows:
+        provider_name = r.provider or "pipedream"
+        provider = providers_by_name.get(provider_name)
+        if provider is None:
+            continue
+        accounts = accounts_by_provider.get(provider_name, [])
+        acc = provider.match_account_for_app(accounts, r.app)
+        if not acc:
+            continue
+        acc_id = acc.get("id") or acc.get("account_id")
+        if not acc_id:
+            continue
+        try:
+            problems = await provider.validate_connection(str(ws), acc_id)
+        except IntegrationError:
+            continue
+        if problems:
+            continue
+        # complete() is idempotent: flips status, resumes any paused run.
+        try:
+            await _connect.complete(str(ws), r.app, acc_id)
+            r.status = "connected"  # local mirror for this listing
+            r.pipedream_account_id = acc_id
+            log.info(
+                "list_integrations_reconciled",
+                app=r.app, provider=provider_name, account_id=acc_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "list_integrations_reconcile_failed",
+                app=r.app, error=str(exc)[:200],
+            )
+
+    connected_rows = [r for r in rows if r.status == "connected"]
+    if not connected_rows:
+        return "No hay integraciones conectadas en este workspace."
 
     lines = []
-    for r in rows:
+    for r in connected_rows:
         when = r.created_at.strftime("%Y-%m-%d") if r.created_at else "?"
         provider = providers_by_name.get(r.provider or "pipedream")
         acc = accounts_by_id.get(r.pipedream_account_id or "")
