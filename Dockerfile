@@ -1,4 +1,4 @@
-# Sebitas runtime image.
+# Misterr runtime image.
 #
 # Deploys to Render (Web Service, docker runtime). Render injects PORT;
 # we honor it. Secrets come from Render env vars (synced from Doppler via
@@ -40,7 +40,7 @@ COPY app/ ./app/
 COPY alembic/ ./alembic/
 COPY alembic.ini ./
 
-# Render hits this to know we're live; same path Sebitas exposes locally.
+# Render hits this to know we're live; same path Misterr exposes locally.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD curl -fsS "http://localhost:${PORT:-8000}/health" || exit 1
 

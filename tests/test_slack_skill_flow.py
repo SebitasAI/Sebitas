@@ -48,7 +48,7 @@ async def test_slack_file_upload_flow_end_to_end(
     client = AsyncMock()
     client.token = "xoxb-fake"
 
-    # Precursor "user typed /sebitas skill upload"
+    # Precursor "user typed /misterr skill upload"
     skill_commands._set_pending(workspace.slack_team_id, user_a.slack_user_id)
     assert skill_commands.is_skill_upload_pending(
         workspace.slack_team_id, user_a.slack_user_id

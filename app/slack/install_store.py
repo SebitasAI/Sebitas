@@ -32,7 +32,7 @@ from app.slack.tokens import invalidate_token_cache
 log = structlog.get_logger(__name__)
 
 
-class SebitasInstallationStore(AsyncInstallationStore):
+class MisterrInstallationStore(AsyncInstallationStore):
     """Maps Bolt's Installation model to our `workspace` row.
 
     On `async_save`: upsert the row by team_id with Fernet-encrypted bot_token,

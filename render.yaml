@@ -1,6 +1,6 @@
 # Render Blueprint (https://render.com/docs/blueprint-spec)
 #
-# One web service for the Sebitas agent backend. Postgres stays on Neon
+# One web service for the Misterr agent backend. Postgres stays on Neon
 # (DATABASE_URL is provisioned via Doppler-Render integration; not declared
 # here). Secrets sync from Doppler to Render, NOT pasted manually.
 #
@@ -10,6 +10,10 @@
 
 services:
   - type: web
+    # Render service name is the legacy slug (`sebitas`) because the public URL
+    # `sebitas.onrender.com` is tied to this name at service creation. Renaming
+    # here would either spin up a new service or de-sync the blueprint.
+    # To migrate: rename the service in Render dashboard first, then change here.
     name: sebitas
     runtime: docker
     plan: starter           # $7/mo, no idle restart (needed for 24/7 Slack)

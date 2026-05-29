@@ -1,1 +1,1 @@
-"""Sebitas application package (agnostic core)."""
+"""Misterr application package (agnostic core)."""

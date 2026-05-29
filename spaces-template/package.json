@@ -1,9 +1,9 @@
 {
-  "name": "sebitas-spaces-template",
+  "name": "misterr-spaces-template",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Fixed template for Sebitas Spaces (live read-only dashboards). Parametrized by config (data_binding + access_list) per-space-id. Single shared Convex deployment, multi-tenant by space_id.",
+  "description": "Fixed template for Misterr Spaces (live read-only dashboards). Parametrized by config (data_binding + access_list) per-space-id. Single shared Convex deployment, multi-tenant by space_id.",
   "scripts": {
     "dev": "npm-run-all --parallel dev:frontend dev:backend",
     "dev:backend": "convex dev",

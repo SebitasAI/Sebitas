@@ -24,13 +24,13 @@ from slack_sdk.oauth.installation_store.models.bot import Bot
 
 from app.config import get_settings
 from app.slack.handlers import register_handlers
-from app.slack.install_store import SebitasInstallationStore
+from app.slack.install_store import MisterrInstallationStore
 from app.slack.tokens import get_bot_token_by_team
 
 log = structlog.get_logger(__name__)
 
 
-_install_store = SebitasInstallationStore()
+_install_store = MisterrInstallationStore()
 
 
 async def _authorize(enterprise_id, team_id, **_kwargs):
@@ -85,7 +85,7 @@ def build_app() -> AsyncApp:
         # tokens for incoming events via the installation_store automatically
         # (it calls `async_find_bot(team_id=...)`). Passing a separate
         # `authorize` here is a conflict and raises BoltError at init -- our
-        # SebitasInstallationStore already implements the lookup we'd put in
+        # MisterrInstallationStore already implements the lookup we'd put in
         # `_authorize`, so removing it is correct.
         app = AsyncApp(
             signing_secret=signing_secret,

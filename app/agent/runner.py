@@ -625,7 +625,7 @@ async def get_active_run_status(team_id: str, conv_key: str) -> str:
 async def _post_user_facing_error(client, ctx: dict, exc: BaseException) -> None:
     """Post a short, friendly message when the agent loop crashes. The full
     error is in structlog (`agent_invoke_failed`); the user just needs to know
-    Sebitas died so they don't sit waiting forever."""
+    Misterr died so they don't sit waiting forever."""
     try:
         await client.chat_postMessage(
             channel=ctx["channel"],
@@ -834,7 +834,7 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
     if (not text and not has_files) or not team_id or not slack_user_id:
         return
 
-    # Channel follow-ups: only continue a thread Sebitas already started.
+    # Channel follow-ups: only continue a thread Misterr already started.
     if require_existing_thread:
         async with get_session() as session:
             workspace = await repo.get_workspace(session, team_id)

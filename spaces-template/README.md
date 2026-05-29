@@ -1,4 +1,4 @@
-# Sebitas Spaces — Fixed Template
+# Misterr Spaces — Fixed Template
 
 Single deploy serves every Space in the platform. Multi-tenant by `space_id` (logical isolation; physical isolation = future slice when Convex Components / Management API land).
 
@@ -27,7 +27,7 @@ Convex Hosting serves `dist/` automatically when you run `npm run deploy`.
 
 The refresh action reads these from `process.env`:
 
-- `PUBLIC_BASE_URL` — public URL of the Sebitas Python backend (e.g. cloudflared tunnel).
+- `PUBLIC_BASE_URL` — public URL of the Misterr Python backend (e.g. cloudflared tunnel).
 - `INTERNAL_SPACES_TOKEN` — shared secret to authenticate the action's call to `/internal/spaces/refresh`. MUST match the one in Doppler on the Python side.
 
 (Vite reads `VITE_CONVEX_URL` from `.env`/build env to know which Convex to talk to.)

@@ -89,7 +89,7 @@ async def lifespan(_: FastAPI):
             log.info("shutdown_complete")
 
 
-app = FastAPI(title="Sebitas", lifespan=lifespan)
+app = FastAPI(title="Misterr", lifespan=lifespan)
 app.include_router(pipedream_webhook_router)
 app.include_router(spaces_internal_router)
 
