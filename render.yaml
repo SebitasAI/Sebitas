@@ -1,12 +1,17 @@
 # Render Blueprint (https://render.com/docs/blueprint-spec)
 #
-# One web service for the Misterr agent backend. Postgres stays on Neon
-# (DATABASE_URL is provisioned via Doppler-Render integration; not declared
-# here). Secrets sync from Doppler to Render, NOT pasted manually.
+# Two services:
+# - `sebitas`  : Python FastAPI backend (Docker). Existing.
+# - `misterr-web` : Next.js dashboard (Node native). New.
 #
-# To deploy: push to main, then in Render dashboard -> Blueprint -> Connect
-# this repo. Or use this file as reference and create the service manually
-# (Web Service -> Docker -> repo).
+# Postgres stays on Neon (DATABASE_URL provisioned via Doppler-Render
+# integration; not declared here). Secrets sync from Doppler to Render,
+# NOT pasted manually.
+#
+# To deploy a NEW service from this blueprint:
+#   Render dashboard -> Blueprints -> select this repo -> Apply.
+# Render only auto-creates services on the FIRST blueprint sync; new
+# services added later need a re-sync (same button).
 
 services:
   - type: web
@@ -43,3 +48,33 @@ services:
       # - INTERNAL_SPACES_TOKEN
       # - CLERK_PUBLISHABLE_KEY / CLERK_SECRET_KEY / CLERK_JWT_ISSUER
       # - CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID
+
+  - type: web
+    # Next.js dashboard (`app.misterr.ai`). Native Node runtime + pnpm
+    # workspaces from repo root. Render reads `.nvmrc` for the Node version
+    # and detects pnpm via `pnpm-lock.yaml`. We build only the `@misterr/web`
+    # package via the workspace filter; the static `website/` package isn't
+    # built here (it has its own deploy target on Cloudflare Pages).
+    name: misterr-web
+    runtime: node
+    plan: starter
+    region: oregon
+    autoDeploy: true
+    healthCheckPath: /sign-in     # `/` redirects; `/sign-in` is the cheapest stable 200
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @misterr/web build
+    startCommand: pnpm --filter @misterr/web start
+    envVars:
+      # Render injects PORT; `next start` reads it automatically.
+      - key: NODE_ENV
+        value: production
+      # All Clerk + other web/ secrets come from Doppler (prd config):
+      #   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY  (build-time, inlined into JS)
+      #   CLERK_SECRET_KEY                   (server-side runtime)
+      #   NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
+      #   NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
+      #   NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL=/dashboard
+      #   NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL=/dashboard
+      #   NEXT_PUBLIC_API_URL=https://sebitas.onrender.com  (backend host)
+      #   NEXT_PUBLIC_APP_URL=https://app.misterr.ai
+      # NEXT_PUBLIC_* vars must be present at BUILD time (Render envVars from
+      # Doppler-sync are; that's why this works).
