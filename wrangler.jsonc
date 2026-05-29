@@ -19,7 +19,7 @@
 // project has its own `name`.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "misterr-website",
+  "name": "misterr",
   "compatibility_date": "2026-05-28",
   "pages_build_output_dir": "./website/out"
 }
