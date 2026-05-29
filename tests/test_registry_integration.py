@@ -174,6 +174,81 @@ async def test_system_prompt_includes_always_active_bodies(
 
 
 @pytest.mark.asyncio
+async def test_skill_preview_roundtrip(fake_r2, db_session, workspace, user_a):
+    """Preview persistence: create returns id, get returns the row, update
+    mutates fields, delete removes it. Ensures the DB-backed store replaces
+    the old in-memory dict cleanly."""
+    from app.skills import preview_store
+
+    preview_id = await preview_store.create_preview(
+        workspace_id=workspace.id,
+        app_user_id=user_a.id,
+        slack_user_id=user_a.slack_user_id,
+        channel_id="D_TEST",
+        filename="onboarding.md",
+        name="onboarding",
+        description="Inicial",
+        activation="on_demand",
+        body="# Onboarding\n\nbody",
+        links=["other-skill"],
+        inferred_fields=["name", "description"],
+    )
+    row = await preview_store.get_preview(preview_id)
+    assert row is not None
+    assert row.name == "onboarding"
+    assert row.activation == "on_demand"
+    assert row.body.startswith("# Onboarding")
+    assert row.links == ["other-skill"]
+
+    # Update: change name + clear inferred_fields (modal-submit pattern).
+    updated = await preview_store.update_preview(
+        preview_id, name="team-onboarding", inferred_fields=[]
+    )
+    assert updated is not None
+    assert updated.name == "team-onboarding"
+    assert updated.inferred_fields == []
+
+    # Delete: idempotent (second call doesn't error).
+    await preview_store.delete_preview(preview_id)
+    await preview_store.delete_preview(preview_id)
+    assert await preview_store.get_preview(preview_id) is None
+
+
+@pytest.mark.asyncio
+async def test_skill_preview_expired_returns_none(
+    fake_r2, db_session, workspace, user_a, monkeypatch
+):
+    """A preview past its `expires_at` is invisible to get_preview, even if
+    the row is still in the table (the background sweep deletes it later)."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.db.models import SkillPreview
+    from app.skills import preview_store
+
+    # Insert a preview that's already expired (1 minute in the past).
+    expired_id = (await preview_store.create_preview(
+        workspace_id=workspace.id,
+        app_user_id=user_a.id,
+        slack_user_id=user_a.slack_user_id,
+        channel_id="D_TEST",
+        filename="x.md",
+        name="x", description="x", activation="on_demand",
+        body="x", links=[], inferred_fields=[],
+    ))
+    # Backdate the row directly.
+    row = await db_session.get(SkillPreview, expired_id)
+    row.expires_at = (
+        datetime.now(timezone.utc) - timedelta(minutes=1)
+    ).replace(tzinfo=None)
+    await db_session.commit()
+
+    assert await preview_store.get_preview(expired_id) is None
+    # Sweep removes it physically.
+    n = await preview_store.cleanup_expired()
+    assert n >= 1
+
+
+@pytest.mark.asyncio
 async def test_skill_discovery_overflow_caps_to_token_budget(
     fake_r2, db_session, workspace, user_a, monkeypatch
 ):

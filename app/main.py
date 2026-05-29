@@ -18,6 +18,7 @@ from app.config import get_settings
 from app.db.engine import engine
 from app.integrations.webhook import router as pipedream_webhook_router
 from app.logging import configure_logging
+from app.skills.preview_store import cleanup_expired as cleanup_expired_previews
 from app.slack.app import build_socket_handler, init_slack_app
 from app.slack.roster import periodic_refresh_loop as roster_periodic
 from app.spaces.api import router as spaces_internal_router
@@ -75,11 +76,26 @@ async def lifespan(_: FastAPI):
         # workspace. Lazy sync also happens per-run via ensure_workspace_synced.
         roster_task = asyncio.create_task(roster_periodic())
 
+        # Skill preview sweep: delete expired skill_preview rows every 5 min.
+        # Previews have a 30-min TTL; a few minutes of staleness is fine, so
+        # the loop is cheap (single DELETE WHERE expires_at < now()).
+        async def _preview_cleanup_loop():
+            while True:
+                try:
+                    n = await cleanup_expired_previews()
+                    if n:
+                        log.info("skill_preview_cleanup", removed=n)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("skill_preview_cleanup_failed", error=str(exc))
+                await asyncio.sleep(300)
+        preview_cleanup_task = asyncio.create_task(_preview_cleanup_loop())
+
         try:
             yield
         finally:
             cleanup_task.cancel()
             roster_task.cancel()
+            preview_cleanup_task.cancel()
             try:
                 await handler.close_async()
             except Exception as exc:  # noqa: BLE001
