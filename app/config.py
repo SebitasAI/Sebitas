@@ -126,6 +126,17 @@ class Settings(BaseSettings):
     composio_base_url: str = "https://backend.composio.dev/api/v3"
     composio_webhook_secret: str | None = None
 
+    # Metabase HTTP-direct fallback (2026-05-29). Composio's wrapper for
+    # METABASE_POST_API_CARD strips `database_id` from the body, which Metabase
+    # then rejects with a NOT NULL constraint violation. Workaround: when the
+    # request comes from this workspace, our gateway bypasses Composio for
+    # that one action and calls Metabase directly with the api_key below.
+    # Single-tenant for now; if more tenants need this, promote to a JSON map.
+    # Remove these once Composio fixes their schema.
+    metabase_fallback_workspace_id: str | None = None
+    metabase_fallback_api_key: str | None = None
+    metabase_fallback_base_url: str | None = None
+
     # Spaces (slice 4B). The shared-deployment Convex backend uses these three;
     # if any is missing the platform falls back to MockSpaceBackend at startup.
     convex_url: str | None = None              # e.g. https://<slug>.convex.cloud
