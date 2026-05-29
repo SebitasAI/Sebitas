@@ -190,13 +190,36 @@ async def start_connect(client, ctx: dict, app: str) -> None:
         workspace_id=str(workspace_id),
     )
 
-    # Reconciliation: if the provider already has an ACTIVE connection (e.g. a
-    # previous OAuth completed but our DB row got stuck on 'pending'), short-
-    # circuit here. This breaks the reconnect-loop without changing the agent's
-    # prompts or tool logic — once the row is 'connected', list_integrations
-    # reflects it and the LLM stops suggesting reinstall.
-    if await _try_reconcile_existing(workspace_id, app, provider_name):
-        return
+    # Reconciliation: if a previous attempt left a row in 'pending' while the
+    # provider already has an ACTIVE connection (poll task died on a deploy,
+    # webhook signature mismatched), short-circuit here and mark the row
+    # connected instead of minting a new link.
+    #
+    # Critical: only do this when status is 'pending'. If status is
+    # 'disconnected' (i.e. disconnect_integration just ran a beat ago because
+    # the user is going through a reinstall flow), reconciliation would
+    # silently revive a stale ACTIVE connection from Composio's pile-up and
+    # the agent would have no link to post. From the user's side it looks
+    # like a no-op loop: "I asked to reconnect and nothing happened." For
+    # disconnected rows or no row at all, always mint fresh.
+    if prior is not None and prior.status == "pending":
+        if await _try_reconcile_existing(workspace_id, app, provider_name):
+            # Tell the user something happened so they're not staring at
+            # silence wondering if the bot died.
+            try:
+                await client.chat_postMessage(
+                    channel=ctx["channel"],
+                    thread_ts=ctx.get("reply_thread_ts"),
+                    text=(
+                        f":white_check_mark: *{app}* ya estaba conectado del lado "
+                        f"del proveedor. Reconcilié el estado y sigo solo."
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "reconcile_message_post_failed", app=app, error=str(exc)[:200],
+                )
+            return
 
     url = await _mint_connect_link(provider_name, ctx["workspace_id"], app)
     if url is None:
