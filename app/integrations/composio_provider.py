@@ -100,22 +100,32 @@ class ComposioProvider(IntegrationProvider):
     async def validate_connection(
         self, external_user_id: str, account_id: str
     ) -> list[str]:
-        """Composio's connections are either 'ACTIVE' (good), 'EXPIRED'
-        (OAuth needs refresh — they handle the refresh themselves but stale
-        rows surface this), 'INACTIVE' (user revoked), or missing."""
+        """Composio statuses observed in the wild: ACTIVE, INITIATED (user
+        started the auth flow but never finished it), EXPIRED (e.g. didn't
+        complete within 10 min), INACTIVE/REVOKED/DELETED, DROPPED (UI name
+        for soft-deleted). Only ACTIVE is usable for invocation."""
         row = await self.get_account(external_user_id, account_id)
         if row is None:
             return ["__not_found__"]
         status = (row.get("status") or "").upper()
-        if status == "EXPIRED":
-            return ["__token_expired__"]
         if status == "ACTIVE":
             return []
-        if status in ("INACTIVE", "REVOKED", "DELETED"):
+        if status == "EXPIRED":
+            return ["__token_expired__"]
+        if status == "INITIATED":
+            # OAuth handed off to the user's browser but never came back.
+            # Surface as not-found so the caller offers a fresh link.
             return ["__not_found__"]
-        # Unknown status: treat as OK and let the action call surface a
-        # specific error if there is one.
-        return []
+        if status in ("INACTIVE", "REVOKED", "DELETED", "DROPPED"):
+            return ["__not_found__"]
+        # Unknown status: be defensive and treat as not-found rather than
+        # silently passing it through. Better to ask the user to reconnect
+        # than to invoke against a half-broken connection.
+        log.warning(
+            "composio_unknown_connection_status",
+            account_id=account_id, status=status,
+        )
+        return ["__not_found__"]
 
     async def list_actions(self, app: str, query: str | None) -> list[dict]:
         try:
@@ -229,15 +239,54 @@ class ComposioProvider(IntegrationProvider):
     def match_account_for_app(
         self, accounts: list[dict], app: str
     ) -> dict | None:
-        """Composio returns connections with `toolkit_slug` (or `app_unique_key`
-        in older payloads); match by either."""
+        """Find the most recent ACTIVE connection for this app slug.
+
+        Composio v3 returns the toolkit as a nested object: `acc['toolkit']
+        ['slug']`. Older payloads (and our previous code) assumed a flat
+        `acc['toolkit_slug']`. We check both. The flat-key check shouldn't ever
+        match against the current API but stays in case Composio reverts or a
+        downstream caller hands us a normalised payload.
+
+        When multiple connections exist for the same app (laura's reconnect
+        loops piled up ACTIVE rows), pick the most recently updated. Filter
+        out non-ACTIVE statuses up-front so we never reconcile against
+        EXPIRED/INITIATED/DELETED rows that would fail validate_connection
+        downstream anyway.
+        """
         slug = app.lower()
-        for acc in accounts:
+
+        def _slug_of(acc: dict) -> str | None:
+            # v3 nested shape: {"toolkit": {"slug": "..."}}
+            toolkit = acc.get("toolkit")
+            if isinstance(toolkit, dict):
+                v = toolkit.get("slug")
+                if isinstance(v, str):
+                    return v.lower()
+            # Legacy flat shapes (kept for resilience).
             for key in ("toolkit_slug", "app_unique_key", "app_slug", "app_name"):
                 v = acc.get(key)
-                if isinstance(v, str) and v.lower() == slug:
-                    return acc
-        return None
+                if isinstance(v, str):
+                    return v.lower()
+            return None
+
+        def _is_active(acc: dict) -> bool:
+            s = (acc.get("status") or "").upper()
+            # `data.status` is sometimes more current than top-level status,
+            # check both.
+            data = acc.get("data")
+            ds = (data.get("status") if isinstance(data, dict) else "") or ""
+            return s == "ACTIVE" or ds.upper() == "ACTIVE"
+
+        candidates = [a for a in accounts if _slug_of(a) == slug and _is_active(a)]
+        if not candidates:
+            return None
+        # Pick the most recently updated to avoid reviving a stale row when
+        # multiple ACTIVE rows exist (Composio doesn't dedupe on re-auth).
+        candidates.sort(
+            key=lambda a: a.get("updated_at") or a.get("created_at") or "",
+            reverse=True,
+        )
+        return candidates[0]
 
     def auth_type_of(self, account: dict) -> str | None:
         """Composio reports auth_scheme: OAUTH2 / API_KEY / BEARER_TOKEN /
