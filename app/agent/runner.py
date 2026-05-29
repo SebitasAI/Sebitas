@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import uuid
 from typing import Any
 
@@ -476,6 +477,151 @@ async def _heartbeat(client, *, channel: str, thread_ts: str | None) -> None:
         raise
 
 
+# --------------------------------------------------------------------------- #
+# Active-run tracking (for status queries: "como vas?")
+# --------------------------------------------------------------------------- #
+
+# Maps (team_id, conversation_key) -> {run_id, started_at}. Lets a mid-task
+# status query peek the langgraph state without touching the active run. The
+# run continues unaffected; we just read the checkpoint to summarize progress.
+_active_runs_by_thread: dict[tuple[str, str], dict] = {}
+
+
+def _register_active_run(team_id: str, conv_key: str, run_id: str) -> None:
+    _active_runs_by_thread[(team_id, conv_key)] = {
+        "run_id": run_id,
+        "started_at": time.time(),
+    }
+
+
+def _unregister_active_run(team_id: str, conv_key: str) -> None:
+    _active_runs_by_thread.pop((team_id, conv_key), None)
+
+
+_VERB_TO_SPANISH_GERUND = {
+    "create": "creando", "make": "creando", "new": "creando",
+    "build": "armando", "generate": "generando",
+    "update": "actualizando", "edit": "editando", "modify": "modificando",
+    "set": "configurando", "patch": "actualizando",
+    "delete": "borrando", "remove": "quitando", "drop": "borrando",
+    "archive": "archivando", "trash": "mandando a la papelera",
+    "send": "enviando", "post": "publicando", "share": "compartiendo",
+    "get": "consultando", "list": "listando", "search": "buscando",
+    "find": "buscando", "read": "leyendo", "fetch": "consultando",
+    "lookup": "buscando", "describe": "consultando", "count": "contando",
+    "view": "consultando", "show": "consultando", "query": "consultando",
+    "run": "ejecutando", "execute": "ejecutando", "trigger": "lanzando",
+    "add": "agregando", "insert": "agregando", "upsert": "agregando",
+    "move": "moviendo", "rename": "renombrando", "replace": "reemplazando",
+    "invite": "invitando",
+}
+
+
+def _humanize_progress(name: str, inp: dict) -> str:
+    """Render 'what I'm doing right now' in natural Spanish, conversational.
+    No iteration numbers, no slugs leaking — just verb + object + app, the
+    way another human would describe it on the fly."""
+    inp = inp if isinstance(inp, dict) else {}
+    if name == "run_action":
+        app = inp.get("app") or "una integración"
+        action = (inp.get("action_id") or "").lower()
+        # Strip the app prefix when it duplicates.
+        for sep in ("-", "_", "."):
+            prefix = f"{app.lower()}{sep}"
+            if action.startswith(prefix):
+                action = action[len(prefix):]
+                break
+        tokens = [t for t in re.split(r"[-_.]+", action) if t]
+        verb_token = next((t for t in tokens if t in _VERB_TO_SPANISH_GERUND), None)
+        verb = _VERB_TO_SPANISH_GERUND.get(verb_token or "", "trabajando con")
+        object_tokens = [t for t in tokens if t != verb_token]
+        obj = " ".join(object_tokens) if object_tokens else ""
+        if obj:
+            return f"estoy {verb} {obj} en *{app}*"
+        return f"estoy {verb} en *{app}*"
+    if name == "run_code":
+        return "estoy ejecutando código en el sandbox"
+    if name == "find_actions":
+        app = inp.get("app") or "una integración"
+        return f"estoy explorando las acciones disponibles de *{app}*"
+    if name == "list_integrations":
+        return "estoy revisando las integraciones conectadas"
+    if name == "datadog_query":
+        return "estoy consultando Datadog"
+    if name == "web_search":
+        return "estoy buscando en la web"
+    if name == "web_fetch":
+        return "estoy leyendo una página"
+    if name == "deploy_space":
+        return "estoy desplegando un Space"
+    if name == "delete_space":
+        return "estoy borrando un Space"
+    if name == "load_skill":
+        skill = inp.get("name") or "una skill"
+        return f"estoy cargando la skill `{skill}`"
+    if name == "find_slack_user":
+        return "estoy buscando un usuario en Slack"
+    # Fallback: humanize the tool name (snake_case → "snake case").
+    pretty = name.replace("_", " ")
+    return f"estoy {pretty}"
+
+
+def _find_last_tool_use(messages: list[dict]) -> dict | None:
+    """Walk back through the assistant messages to find the most recent tool_use
+    block. The graph appends in order, so the latest tool_use is the one
+    that's running (or just finished) when a status query lands."""
+    for m in reversed(messages or []):
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+        for b in reversed(content):
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                return b
+    return None
+
+
+async def get_active_run_status(team_id: str, conv_key: str) -> str:
+    """Render a conversational status message for the currently-active run on
+    this thread. Returns a 'nothing in flight' line if there is no active run.
+    Does NOT touch the run; reads langgraph state via the checkpointer."""
+    active = _active_runs_by_thread.get((team_id, conv_key))
+    if not active:
+        return (
+            "Por ahora no estoy trabajando en nada en este thread. "
+            "Decime qué hacemos y arranco."
+        )
+    elapsed_s = int(time.time() - active["started_at"])
+    if elapsed_s < 30:
+        elapsed_phrase = "recién arranqué"
+    elif elapsed_s < 60:
+        elapsed_phrase = f"llevo {elapsed_s}s"
+    else:
+        elapsed_phrase = f"llevo {elapsed_s // 60} min"
+
+    run_id = active["run_id"]
+    config = {"configurable": {"thread_id": run_id}}
+    try:
+        snapshot = await get_graph().aget_state(config)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("status_query_state_failed", error=str(exc)[:200])
+        return f"¡Ya casi! Sigo en eso ({elapsed_phrase})."
+
+    values = snapshot.values or {}
+    last_tool = _find_last_tool_use(values.get("messages") or [])
+    if last_tool is None:
+        return f"¡Ya casi! Sigo en eso ({elapsed_phrase})."
+
+    activity = _humanize_progress(
+        last_tool.get("name") or "",
+        last_tool.get("input") or {},
+    )
+    if elapsed_s < 30:
+        return f"¡Ya casi! Ahora mismo {activity}."
+    return f"¡Sigo en eso! Ahora {activity} ({elapsed_phrase})."
+
+
 async def _post_user_facing_error(client, ctx: dict, exc: BaseException) -> None:
     """Post a short, friendly message when the agent loop crashes. The full
     error is in structlog (`agent_invoke_failed`); the user just needs to know
@@ -832,6 +978,7 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
         hb_task = asyncio.create_task(_heartbeat(
             client, channel=channel, thread_ts=reply_thread_ts or user_ts,
         ))
+        _register_active_run(team_id, conversation_key, run_id)
         try:
             result = await get_graph().ainvoke(
                 {"messages": seed, "iterations": 0}, config,
@@ -845,6 +992,7 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
                 await hb_task
             except asyncio.CancelledError:
                 pass
+            _unregister_active_run(team_id, conversation_key)
         await _drive(client, ctx, result, lock_handle=lock_handle)
 
 
@@ -892,6 +1040,9 @@ async def resume_run(*, client, ctx: dict, decision: str) -> None:
         hb_task = asyncio.create_task(_heartbeat(
             client, channel=ctx["channel"], thread_ts=ctx.get("reply_thread_ts"),
         ))
+        _register_active_run(
+            ctx["team_id"], ctx["conversation_key"], ctx["run_id"],
+        )
         try:
             result = await get_graph().ainvoke(Command(resume=decision), config)
         except Exception as exc:
@@ -903,6 +1054,7 @@ async def resume_run(*, client, ctx: dict, decision: str) -> None:
                 await hb_task
             except asyncio.CancelledError:
                 pass
+            _unregister_active_run(ctx["team_id"], ctx["conversation_key"])
         await _drive(client, ctx, result)
 
 

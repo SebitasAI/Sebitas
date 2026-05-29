@@ -49,9 +49,33 @@ _MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
 _MD_EXT_RE = re.compile(r"\.md$", re.IGNORECASE)
 _MD_MIMES = {"text/markdown", "text/x-markdown", "text/plain"}
 
+# Short phrases that ask "are you still working / how's it going" mid-task.
+# Matched ONLY when the thread already has an active run; otherwise the text
+# goes through the normal agent path so a one-off "como vas?" doesn't get a
+# canned response when there's nothing in flight.
+_STATUS_QUERY_RE = re.compile(
+    r"^\s*"
+    r"(c[oó]mo vas|c[oó]mo va|c[oó]mo estamos|c[oó]mo va eso|"
+    r"qu[eé] est[aá]s haciendo|qu[eé] hac[eé]s|qu[eé] tal va|"
+    r"qu[eé] progreso|progreso\??|update\??|"
+    r"actualiz[aá]me|sigues ah[ií]|segu[ií]s ah[ií]|"
+    r"sigues vivo|segu[ií]s vivo|on it\??|"
+    r"ya casi|c[oó]mo va el avance)"
+    r"\s*[.?!]*\s*$",
+    re.IGNORECASE,
+)
+
 
 def _clean(text: str) -> str:
     return _MENTION_RE.sub("", text or "").strip()
+
+
+def _is_pure_status_query(text: str) -> bool:
+    """True when the message is *just* asking for a status check. Anything
+    with extra content (a follow-up task, additional context) falls through
+    to the normal queueing path so the agent processes it after the active
+    run finishes."""
+    return bool(_STATUS_QUERY_RE.match(text or ""))
 
 
 def _looks_like_md(f: dict) -> bool:
@@ -84,6 +108,34 @@ def _coalesce(queued: list[dict], current: dict) -> dict:
     return out
 
 
+async def _respond_with_status(
+    *,
+    client,
+    team_id: str,
+    conv_key: str,
+    channel: str | None,
+    thread_ts: str | None,
+) -> None:
+    """Status-query path: read the langgraph state for the active run on this
+    thread and post a conversational summary. Does NOT touch the run or the
+    thread mutex; safe to call concurrently with the active run."""
+    if not channel:
+        return
+    # Lazy import to avoid a runner -> handlers cycle at module load.
+    from app.agent.runner import get_active_run_status
+    try:
+        status = await get_active_run_status(team_id, conv_key)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("status_query_render_failed", error=str(exc)[:200])
+        status = "¡Ya casi! Sigo en eso, en un toque te respondo."
+    try:
+        await client.chat_postMessage(
+            channel=channel, thread_ts=thread_ts, text=status,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("status_query_post_failed", error=str(exc)[:200])
+
+
 async def _route_message(
     *,
     client,
@@ -103,6 +155,20 @@ async def _route_message(
 
     handle = await try_acquire_thread_lock(team_id, conv_key)
     if handle is None:
+        # Active run on this thread. If the user is just asking "como vas?"
+        # we peek the langgraph state and reply now WITHOUT queueing; the
+        # active run keeps going. Anything richer than a status query gets
+        # queued and processed after the active run finishes (so the user's
+        # follow-up plan + the running task land in the right order).
+        if _is_pure_status_query(payload.get("user_text", "")):
+            _spawn(_respond_with_status(
+                client=client,
+                team_id=team_id,
+                conv_key=conv_key,
+                channel=payload.get("channel"),
+                thread_ts=payload.get("reply_thread_ts") or conv_key,
+            ))
+            return
         await enqueue_message(team_id, conv_key, payload)
         log.info("message_queued", team_id=team_id, conv_key=conv_key)
         return
