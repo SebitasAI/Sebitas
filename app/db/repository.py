@@ -7,7 +7,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import AppUser, Message, MessageAttachment, Thread, Workspace
+from app.db.models import AppUser, Message, MessageAttachment, SlackUser, Thread, Workspace
 
 
 async def upsert_workspace(
@@ -174,3 +174,23 @@ async def get_thread_messages(
         .limit(limit)
     )
     return list(reversed(result.scalars().all()))
+
+
+async def get_slack_tz_for_app_user(
+    session: AsyncSession, app_user_id: uuid.UUID
+) -> str | None:
+    """Return the IANA timezone cached in slack_user for the given AppUser,
+    or None if not yet synced (or if the user is a bot / deleted / freshly
+    added with no tz set in Slack). Used by the scheduled-tasks agent tool
+    to default new tasks to the calling user's local time without an extra
+    chat round-trip."""
+    row = (
+        await session.execute(
+            select(SlackUser.tz)
+            .join(AppUser, (AppUser.workspace_id == SlackUser.workspace_id)
+                  & (AppUser.slack_user_id == SlackUser.slack_user_id))
+            .where(AppUser.id == app_user_id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return row if row else None

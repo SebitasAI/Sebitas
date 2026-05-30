@@ -22,7 +22,9 @@ import structlog
 
 from app.agent.context import app_user_id_var, workspace_id_var
 from app.agent.tools import Tool, register
+from app.db import repository as db_repo
 from app.db.models import ScheduledTask
+from app.db.session import get_session
 from app.scheduled_tasks import repository as repo
 from app.scheduled_tasks.timezone import resolve_timezone
 
@@ -117,10 +119,10 @@ async def _create_scheduled_task(
     name: str,
     prompt: str,
     cron_spec: str,
-    timezone: str,
     scope: str,
     destination_type: str,
     destination_slack_id: str,
+    timezone: str | None = None,
 ) -> str:
     workspace_id = _ctx_workspace_id()
     user_id = _ctx_user_id()
@@ -135,9 +137,14 @@ async def _create_scheduled_task(
             "tengamos el sistema de roles."
         )
 
-    # Resolve tz aliases (e.g. "hora Col"). Slack-tz fallback is None for now
-    # -- when we add a tz column to slack_user we can pull it from contextvars.
-    resolved_tz = resolve_timezone(timezone, fallback_slack_tz=None)
+    # Resolve tz aliases ("hora Col") and use the caller's Slack profile tz
+    # as fallback when the agent didn't pass an explicit timezone. The chain:
+    #   1. explicit `timezone` arg -> respected (alias-mapped if needed)
+    #   2. otherwise -> slack_user.tz of the calling AppUser
+    #   3. otherwise -> UTC (with structlog warning so we can audit drift)
+    async with get_session() as session:
+        slack_tz = await db_repo.get_slack_tz_for_app_user(session, user_id)
+    resolved_tz = resolve_timezone(timezone, fallback_slack_tz=slack_tz)
 
     try:
         task = await repo.create_task(
@@ -377,9 +384,11 @@ _CREATE_INPUT_SCHEMA: dict[str, Any] = {
         "timezone": {
             "type": "string",
             "description": (
-                "Timezone IANA (ej: 'America/Bogota') o alias en español "
-                "(ej: 'hora Col', 'hora Mex'). Si el usuario no la dice, "
-                "preguntale antes de crear la task."
+                "OPCIONAL. Timezone IANA ('America/Bogota') o alias ('hora Col', "
+                "'hora Mex'). Si OMITÍS este campo, el sistema usa la timezone "
+                "del perfil de Slack del usuario que está hablando. SOLO "
+                "pasalo cuando el usuario diga explícitamente una tz distinta "
+                "a la suya (ej: 'reporte para Brasil', 'hora Argentina')."
             ),
         },
         "scope": {
@@ -408,7 +417,6 @@ _CREATE_INPUT_SCHEMA: dict[str, Any] = {
         "name",
         "prompt",
         "cron_spec",
-        "timezone",
         "scope",
         "destination_type",
         "destination_slack_id",
@@ -422,10 +430,20 @@ register(
         description=(
             "Create a recurring task that Misterr will execute on a cron "
             "schedule. ALWAYS confirm with the user before calling: show them "
-            "the planned name, cron interpretation in plain language, "
-            "timezone, prompt, and destination, then ask 'confirmás?'. Only "
-            "call this tool AFTER the user explicitly says yes. v1 only "
-            "allows scope='local' (the task affects only the calling user)."
+            "the planned name, cron interpretation in plain language, the "
+            "timezone you will use, prompt, and destination, then ask "
+            "'confirmás?'. Only call this tool AFTER the user explicitly says "
+            "yes.\n\n"
+            "DO NOT ask the user which timezone to use unless the request is "
+            "ambiguous about that (e.g. 'reporte para Brasil', 'a las 9am hora "
+            "Argentina'). For the common case ('todos los días a las 9am'), "
+            "omit the `timezone` argument -- the system will default to the "
+            "user's Slack profile timezone, which is right ~95% of the time. "
+            "When you show the preview, just tell the user which tz you're "
+            "using so they can correct you if it's wrong (e.g. 'asumiendo "
+            "hora Colombia, decime si querés otra').\n\n"
+            "v1 only allows scope='local' (the task affects only the calling "
+            "user)."
         ),
         input_schema=_CREATE_INPUT_SCHEMA,
         handler=_create_scheduled_task,
