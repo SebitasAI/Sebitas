@@ -52,7 +52,12 @@ function ScheduledTasksBody() {
   const tasksQuery = useQuery({
     queryKey: TASKS_QUERY_KEY,
     queryFn: async (): Promise<TaskListResponse> => {
-      const token = await getToken();
+      // Use the "backend" JWT template configured in Clerk dashboard --
+      // the default session token doesn't carry `email`, which our backend
+      // needs to map the Clerk identity to an internal AppUser. The
+      // template must exist in Clerk dashboard with at least:
+      //   { "email": "{{user.primary_email_address}}" }
+      const token = await getToken({ template: "backend" });
       if (!token) {
         throw new Error("No Clerk session token available.");
       }
@@ -109,7 +114,7 @@ function ScheduledTasksBody() {
 
   const pauseMut = useMutation({
     mutationFn: async (vars: { idOrName: string; until: string | null }) => {
-      const token = await getToken();
+      const token = await getToken({ template: "backend" });
       if (!token) throw new Error("No Clerk session token available.");
       return scheduledTasksApi.pause(vars.idOrName, vars.until, token);
     },
@@ -152,7 +157,7 @@ function ScheduledTasksBody() {
 
   const resumeMut = useMutation({
     mutationFn: async (idOrName: string) => {
-      const token = await getToken();
+      const token = await getToken({ template: "backend" });
       if (!token) throw new Error("No Clerk session token available.");
       return scheduledTasksApi.resume(idOrName, token);
     },
