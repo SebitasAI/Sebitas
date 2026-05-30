@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import {
   Building2,
+  CalendarClock,
   CreditCard,
   Languages,
   UserCircle,
@@ -50,6 +51,10 @@ const MAIN_NAV: NavItem[] = [
   { href: "/skills", label: "Skills", icon: <SkillsIcon /> },
   { href: "/integrations", label: "Integraciones", icon: <IntegrationsIcon /> },
   { href: "/spaces", label: "Spaces", icon: <SpacesIcon /> },
+  // Outline icon (lucide) here is intentional: the filled SVGs in
+  // ./nav-icons were ported from Antiff and don't have a calendar variant.
+  // strokeWidth tuned to read at the same visual weight as the filled set.
+  { href: "/scheduled-tasks", label: "Scheduled tasks", icon: <CalendarClock className="size-5" strokeWidth={1.75} /> },
 ];
 
 const SETTINGS_NAV: NavItem[] = [
@@ -66,6 +71,13 @@ function useCollapsedSidebar(): readonly [boolean, (next: boolean) => void] {
   useEffect(() => {
     try {
       const saved = window.localStorage.getItem(COLLAPSE_KEY);
+      // The setState-in-effect lint rule fires here, but this is the
+      // standard SSR-safe pattern for hydrating from localStorage: server
+      // renders with the default (false) so HTML matches, then client
+      // post-hydration upgrades to the persisted value. A lazy initializer
+      // would cause a hydration mismatch when the saved value differs from
+      // the server-rendered default.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       if (saved === "true") setCollapsed(true);
     } catch {
       // private mode / disabled storage: ignore.

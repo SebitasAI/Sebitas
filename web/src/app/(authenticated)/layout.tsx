@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { auth } from "@clerk/nextjs/server";
 
+import { QueryClientShell } from "@/lib/query-client";
 import { DashboardShell } from "./_components/dashboard-shell";
 
 // Server-side gate on top of the middleware. The middleware enforces auth
@@ -21,5 +22,9 @@ export default async function AuthenticatedLayout({
   if (!userId) {
     redirect("/sign-in");
   }
-  return <DashboardShell>{children}</DashboardShell>;
+  return (
+    <QueryClientShell>
+      <DashboardShell>{children}</DashboardShell>
+    </QueryClientShell>
+  );
 }

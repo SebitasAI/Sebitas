@@ -11,6 +11,9 @@
   },
   "dependencies": {
     "@clerk/nextjs": "7.4.2",
+    "@tanstack/react-query": "^5.100.14",
+    "cronstrue": "^3.14.0",
+    "date-fns": "^4.4.0",
     "lucide-react": "^1.17.0",
     "next": "16.2.6",
     "react": "19.2.6",
