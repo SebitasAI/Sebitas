@@ -455,6 +455,13 @@ class ScheduledTask(TimestampMixin, Base):
     is_paused: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # True for "send X once at time Y" tasks. The scheduler deletes the row
+    # after the first successful fire instead of advancing next_run_at, so
+    # one-shot delays don't accidentally recur (e.g. cron `55 16 30 5 *` for
+    # "in 5 min on May 30" would otherwise fire every May 30 at that minute).
+    fire_once: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     # When set in the future, the task is dormant until that timestamp; the
     # scheduler auto-resumes once `paused_until <= now()`. When NULL with
     # is_paused=true, the task is paused indefinitely (user must resume).
