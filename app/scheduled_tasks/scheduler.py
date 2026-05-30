@@ -305,14 +305,16 @@ async def _execute_fire(fire: _PendingFire) -> tuple[str | None, str | None]:
 async def _resolve_post_channel(
     client: AsyncWebClient, destination_type: str, destination_slack_id: str
 ) -> str:
-    """For dm destinations (a Slack user U-id), open the DM and return the
-    D-channel id. For channel destinations, return the id as-is."""
-    if destination_type == "dm":
-        resp = await client.conversations_open(users=destination_slack_id)
-        chan = resp.get("channel") if isinstance(resp, dict) else resp["channel"]
-        if not chan or not chan.get("id"):
-            raise RuntimeError("conversations.open returned no channel id")
-        return chan["id"]
+    """Return the channel id `chat.postMessage` should target.
+
+    Slack's chat.postMessage accepts a Slack user id (UXXX) directly as the
+    `channel` argument and opens the DM channel server-side -- no need for
+    a pre-call to conversations.open, which would require the `im:write`
+    scope that Misterr's bot doesn't currently request. For both DM and
+    channel destinations we just pass through the stored id.
+
+    Kept as a function (rather than inlined) so future tweaks (e.g.
+    name-to-id resolution for `#channel` literals) live in one place."""
     return destination_slack_id
 
 
