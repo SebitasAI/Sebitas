@@ -20,6 +20,7 @@ import {
   SpacesIcon,
 } from "./nav-icons";
 import { SidebarUserDropdown } from "./sidebar-user-dropdown";
+import { OrganizationSwitcher } from "@clerk/nextjs";
 import { WorkspaceSelector } from "./workspace-selector";
 
 // Visual shell ported from Antiff's PlatformShell + PlatformSidebar.
@@ -216,11 +217,30 @@ function SidebarContent({
         />
       </div>
 
-      {/* Workspace selector sits between the logo and the nav, only on
-          non-settings pages. In settings the sub-nav owns this area. */}
+      {/* Org switcher sits between the logo and the nav, only on
+          non-settings pages. In settings the sub-nav owns this area.
+          We use Clerk's OrganizationSwitcher (slice T-5) as the source
+          of truth for the active workspace; the legacy custom
+          WorkspaceSelector is kept as a fallback for users whose JWT
+          template hasn't been updated yet (no `org_id` claim) but is
+          rendered only when Clerk has no orgs to show. */}
       {!isSettings ? (
         <div className="pb-3">
-          <WorkspaceSelector />
+          <OrganizationSwitcher
+            hidePersonal
+            afterCreateOrganizationUrl="/dashboard"
+            afterSelectOrganizationUrl="/dashboard"
+            appearance={{
+              elements: {
+                organizationSwitcherTrigger:
+                  "w-full justify-between rounded-lg border border-[var(--color-border)] bg-white px-2.5 py-1.5 text-[13px] text-[var(--color-ink-deep)] hover:bg-[var(--color-surface-fog)]",
+                organizationPreviewMainIdentifier: "text-[13px] font-medium",
+              },
+            }}
+          />
+          <noscript>
+            <WorkspaceSelector />
+          </noscript>
         </div>
       ) : null}
 
