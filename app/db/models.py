@@ -124,6 +124,7 @@ class Message(TimestampMixin, Base):
 # collisions on replay after a partial failure).
 _SKILL_SOURCES = ("upload", "catalog")
 _SKILL_ACTIVATIONS = ("always_active", "on_demand")
+_SKILL_SCOPES = ("workspace", "personal")
 
 
 class Skill(Base):
@@ -145,6 +146,10 @@ class Skill(Base):
             "activation_default IN ('always_active', 'on_demand')",
             name="ck_skill_activation_default",
         ),
+        CheckConstraint(
+            "scope IN ('workspace', 'personal')",
+            name="ck_skill_scope",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -165,6 +170,13 @@ class Skill(Base):
     )
     activation_default: Mapped[str] = mapped_column(
         String(32), nullable=False, default="on_demand", server_default="on_demand"
+    )
+    # 'workspace': visible to every member (default; preserves pre-0022
+    # behavior). 'personal': only the creator can see / install / use it.
+    # The web API + agent tools both filter on this so the visibility
+    # boundary is consistent.
+    scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="workspace", server_default="workspace"
     )
     # Slugs extracted from `[[name]]` references in the body. Not foreign-key
     # constrained: a body may reference a sibling skill that doesn't exist yet.
