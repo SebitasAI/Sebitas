@@ -280,6 +280,11 @@ class SlackUser(Base):
     display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     real_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    # IANA timezone name from Slack's users.info `tz` field (e.g.
+    # "America/Bogota"). Cached so the scheduled-tasks tool can default new
+    # tasks to the calling user's tz without an extra round-trip. Null for
+    # bots / deleted users / freshly added accounts without a tz set.
+    tz: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_bot: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_synced_at: Mapped[datetime] = mapped_column(

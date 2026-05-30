@@ -97,6 +97,11 @@ async def sync_workspace_users(workspace_id: uuid.UUID, client: AsyncWebClient |
             display_name = profile.get("display_name") or profile.get("display_name_normalized") or None
             real_name = m.get("real_name") or profile.get("real_name_normalized") or None
             email = profile.get("email")
+            # Slack returns IANA tz directly (e.g. "America/Bogota"). May be
+            # "" or missing for bots / freshly created accounts; normalise to
+            # None so downstream consumers can rely on "valid tz or null".
+            tz_raw = m.get("tz")
+            tz = tz_raw.strip() if isinstance(tz_raw, str) and tz_raw.strip() else None
             is_bot = bool(m.get("is_bot")) or uid == "USLACKBOT"
             deleted = bool(m.get("deleted"))
             await _upsert_user(
@@ -105,6 +110,7 @@ async def sync_workspace_users(workspace_id: uuid.UUID, client: AsyncWebClient |
                 display_name=display_name,
                 real_name=real_name,
                 email=email,
+                tz=tz,
                 is_bot=is_bot,
                 deleted=deleted,
             )
@@ -116,7 +122,7 @@ async def sync_workspace_users(workspace_id: uuid.UUID, client: AsyncWebClient |
     return upserts
 
 
-async def _upsert_user(*, workspace_id, slack_user_id, display_name, real_name, email, is_bot, deleted) -> None:
+async def _upsert_user(*, workspace_id, slack_user_id, display_name, real_name, email, tz, is_bot, deleted) -> None:
     async with get_session() as session:
         row = (
             await session.execute(
@@ -131,12 +137,17 @@ async def _upsert_user(*, workspace_id, slack_user_id, display_name, real_name, 
                 workspace_id=workspace_id,
                 slack_user_id=slack_user_id,
                 display_name=display_name, real_name=real_name, email=email,
-                is_bot=is_bot, deleted=deleted,
+                tz=tz, is_bot=is_bot, deleted=deleted,
             ))
         else:
             row.display_name = display_name
             row.real_name = real_name
             row.email = email
+            # Only overwrite tz when Slack returned a new value; if the user
+            # cleared their tz in Slack (unusual), keep the cached value
+            # rather than null it out -- a stale tz is more useful than no tz.
+            if tz is not None:
+                row.tz = tz
             row.is_bot = is_bot
             row.deleted = deleted
             row.last_synced_at = datetime.now(timezone.utc).replace(tzinfo=None)
