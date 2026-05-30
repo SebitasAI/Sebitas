@@ -462,6 +462,16 @@ class ScheduledTask(TimestampMixin, Base):
     fire_once: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # True when `prompt` is the LITERAL TEXT to post (no agent involvement).
+    # send_delayed_message sets this. The scheduler bypasses run_agent and
+    # calls chat.postMessage directly with `prompt` as the body. False (the
+    # default) means `prompt` is a task description the agent has to execute
+    # at fire time. Orthogonal to `fire_once` -- a one-shot agentic task
+    # (fire_once=T, prompt_is_literal=F) is legal and distinct from a
+    # one-shot literal delivery (fire_once=T, prompt_is_literal=T).
+    prompt_is_literal: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     # When set in the future, the task is dormant until that timestamp; the
     # scheduler auto-resumes once `paused_until <= now()`. When NULL with
     # is_paused=true, the task is paused indefinitely (user must resume).

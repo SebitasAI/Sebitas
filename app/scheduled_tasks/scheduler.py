@@ -85,6 +85,7 @@ class _PendingFire:
     timezone: str
     previous_summary: str | None
     fire_once: bool
+    prompt_is_literal: bool
 
 
 # --------------------------------------------------------------------------- #
@@ -158,6 +159,7 @@ async def _tick(now_utc: datetime | None = None) -> int:
                     timezone=task.timezone,
                     previous_summary=task.last_run_summary,
                     fire_once=task.fire_once,
+                    prompt_is_literal=task.prompt_is_literal,
                 )
             )
 
@@ -255,29 +257,30 @@ async def _execute_fire(fire: _PendingFire) -> tuple[str | None, str | None]:
     except Exception as exc:  # noqa: BLE001
         return None, f"could not resolve destination: {exc}"[: repo.MAX_LAST_RUN_ERROR_LEN]
 
-    # Recurring vs one-shot have fundamentally different semantics.
+    # Two orthogonal questions decide the fire flow:
+    #   1. Does the agent run? -> prompt_is_literal flips this.
+    #   2. Is it deleted after one fire? -> fire_once flips this (handled
+    #      in record_fire_finished, not here).
     #
-    # Recurring (fire_once=false, e.g. workflow-discovery, daily-brief):
-    #   - The prompt is a TASK DESCRIPTION; the agent has to do work each
-    #     fire (search the workspace, compose a summary, etc.).
-    #   - We post a parent message and thread the agent's output for context
-    #     in public channels and to gather heartbeat / preamble / final.
-    #
-    # One-shot (fire_once=true, from send_delayed_message):
-    #   - The prompt is the LITERAL TEXT to deliver. The agent ALREADY
-    #     composed it at scheduling time (with sender context, recipient
-    #     greeting, etc.) -- re-running the agent at fire time would
-    #     reinterpret the text and produce variance ("Colombia va a ganar
-    #     el mundial" -> agent rewrites as "Colombia no pasa de fase de
-    #     grupos" or similar). Skip the agent. Post the text directly.
-    if fire.fire_once:
+    # Combinations:
+    #   - prompt_is_literal=False, fire_once=False -> recurring agentic
+    #     (daily-brief, workflow-discovery). Parent + thread + agent.
+    #   - prompt_is_literal=False, fire_once=True  -> one-shot agentic
+    #     ("en 2 min revisame el chat y avisame"). Parent + thread + agent,
+    #     row deleted on fire.
+    #   - prompt_is_literal=True,  fire_once=True  -> one-shot literal
+    #     (send_delayed_message). No agent, post text verbatim.
+    #   - prompt_is_literal=True,  fire_once=False -> not currently exposed
+    #     in any tool but handled identically to the third case at fire
+    #     time. The row just doesn't get deleted.
+    if fire.prompt_is_literal:
         try:
             await client.chat_postMessage(channel=channel_id, text=fire.prompt)
         except Exception as exc:  # noqa: BLE001
             return None, f"chat.postMessage failed: {exc}"[: repo.MAX_LAST_RUN_ERROR_LEN]
         return None, None
 
-    # Recurring path: parent + thread + agent run.
+    # Agentic path (recurring OR one-shot): parent + thread + run_agent.
     parent_text = f":alarm_clock: Scheduled task `{fire.name}`"
     try:
         post_resp = await client.chat_postMessage(channel=channel_id, text=parent_text)
@@ -306,6 +309,10 @@ async def _execute_fire(fire: _PendingFire) -> tuple[str | None, str | None]:
     except Exception as exc:  # noqa: BLE001
         return None, f"agent run errored: {exc}"[: repo.MAX_LAST_RUN_ERROR_LEN]
 
+    # Don't bother fetching a summary for one-shot agentic rows -- they get
+    # deleted on fire so no future run consumes it.
+    if fire.fire_once:
+        return None, None
     summary = await _fetch_latest_assistant_text(
         ws.id, channel_id, parent_ts
     )

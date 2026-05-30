@@ -143,6 +143,7 @@ async def _create_scheduled_task(
     destination_type: str,
     timezone: str | None = None,
     destination_slack_id: str | None = None,
+    one_shot: bool = False,
 ) -> str:
     workspace_id = _ctx_workspace_id()
     user_id = _ctx_user_id()
@@ -197,6 +198,7 @@ async def _create_scheduled_task(
                 scope="local",
                 destination_type=destination_type,  # type: ignore[arg-type]
                 destination_slack_id=destination_slack_id,
+                fire_once=one_shot,
             )
         )
     except repo.TaskValidationError as exc:
@@ -452,6 +454,18 @@ _CREATE_INPUT_SCHEMA: dict[str, Any] = {
                 "por nombre o un user distinto al actual, resolvelo con "
                 "find_slack_user / context primero; NO le preguntes su propio "
                 "ID."
+            ),
+        },
+        "one_shot": {
+            "type": "boolean",
+            "description": (
+                "OPCIONAL. True para tasks que corren UNA SOLA VEZ y después "
+                "se autoborran (ej: 'en 2 min revisame el chat y avisame', "
+                "'mañana a las 9 hazme un resumen y mandalo'). False (default) "
+                "para tasks RECURRENTES (ej: 'todos los días a las 9am'). "
+                "Para mensajes literales de una sola vez SIN trabajo del "
+                "agente, usá `send_delayed_message` -- esta tool es para "
+                "tasks AGENTICAS (donde el agente tiene que hacer algo)."
             ),
         },
     },
@@ -756,11 +770,10 @@ async def _send_delayed_message(
                 workspace_id=workspace_id,
                 created_by_user_id=user_id,
                 name=name,
-                # The "prompt" for a delayed message IS the literal text to
-                # send. The scheduler feeds this into run_agent as the seed
-                # user message; the agent is instructed (via system prompt)
-                # to just deliver the text verbatim when the prompt looks
-                # like a literal message rather than a task description.
+                # `text` is the literal message to deliver. The scheduler
+                # bypasses run_agent (prompt_is_literal=True) and calls
+                # chat.postMessage directly -- the agent already composed
+                # the final wording at this point.
                 prompt=text.strip(),
                 cron_spec=cron_spec,
                 timezone=resolved_tz,
@@ -768,6 +781,7 @@ async def _send_delayed_message(
                 destination_type=destination_type,  # type: ignore[arg-type]
                 destination_slack_id=destination_slack_id,
                 fire_once=True,
+                prompt_is_literal=True,
             )
         )
     except repo.TaskValidationError as exc:
