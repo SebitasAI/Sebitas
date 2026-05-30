@@ -173,7 +173,11 @@ async def start_connect(client, ctx: dict, app: str) -> None:
 
     # If a row exists in 'pending' from a previous attempt, prefer its provider
     # so reconciliation looks at the same backend the user already authorized
-    # against. Falls back to fresh routing for brand-new rows.
+    # against. For anything else (disconnected, missing account_id, or a stale
+    # provider that doesn't match current routing preference) re-decide fresh
+    # — preserving a stale 'pipedream' on a row that should now go through
+    # Composio is exactly how the Simetrik metabase reset of 2026-05-29 ended
+    # up routing to the wrong catalog and the bot hallucinated missing actions.
     async with get_session() as session:
         prior = (
             await session.execute(
@@ -183,11 +187,18 @@ async def start_connect(client, ctx: dict, app: str) -> None:
                 )
             )
         ).scalar_one_or_none()
-    provider_name = (prior.provider if prior and prior.provider else None) \
-        or await decide_provider_for_new_connection(app)
+    # Only preserve the prior provider if the row is mid-flow (pending) AND
+    # the provider field is set. Everything else gets a fresh decision so
+    # we never end up routed against a provider the user has since moved
+    # away from.
+    if prior is not None and prior.status == "pending" and prior.provider:
+        provider_name = prior.provider
+    else:
+        provider_name = await decide_provider_for_new_connection(app)
     log.info(
         "connect_provider_selected", app=app, provider=provider_name,
         workspace_id=str(workspace_id),
+        prior_provider=(prior.provider if prior else None),
     )
 
     # Reconciliation: if a previous attempt left a row in 'pending' while the
