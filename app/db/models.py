@@ -9,6 +9,7 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    DateTime,
     ForeignKey,
     Integer,
     String,
@@ -452,15 +453,28 @@ class ScheduledTask(TimestampMixin, Base):
     # When set in the future, the task is dormant until that timestamp; the
     # scheduler auto-resumes once `paused_until <= now()`. When NULL with
     # is_paused=true, the task is paused indefinitely (user must resume).
-    paused_until: Mapped[datetime | None] = mapped_column(nullable=True)
-    last_run_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    #
+    # All three timestamps below MUST be TIMESTAMP WITH TIME ZONE to match
+    # migration 0017 and the aware datetimes the scheduler / repo pass in
+    # (datetime.now(timezone.utc) + croniter results). Omitting timezone=True
+    # makes SQLAlchemy infer TIMESTAMP WITHOUT TIME ZONE and asyncpg blows
+    # up when it tries to coerce an aware value into a naive bind parameter
+    # (`can't subtract offset-naive and offset-aware datetimes`).
+    paused_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_run_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
     last_run_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Short summary (1-3 sentences) of what the previous run produced; fed
     # into the next run as context so e.g. workflow-discovery can dedupe its
     # suggestions across executions. Set by the scheduler on a successful run.
     last_run_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    next_run_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class MessageAttachment(Base):
