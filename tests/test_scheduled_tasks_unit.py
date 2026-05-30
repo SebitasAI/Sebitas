@@ -232,6 +232,7 @@ class TestBuildSeedText:
             cron_spec="0 9 * * 1-5",
             timezone="America/Bogota",
             previous_summary=summary,
+            fire_once=False,
         )
 
     def test_includes_no_prior_summary_when_first_run(self):
