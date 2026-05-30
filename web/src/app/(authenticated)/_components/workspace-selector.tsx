@@ -63,26 +63,37 @@ export function WorkspaceSelector() {
   useEffect(() => {
     let cancelled = false;
     async function load() {
+      let real: Workspace[] = [];
       try {
         const res = await fetch("/api/workspaces", { credentials: "include" });
-        if (!res.ok) throw new Error(`status ${res.status}`);
-        const data = (await res.json()) as { workspaces: Workspace[] };
-        if (cancelled) return;
-        setWorkspaces(data.workspaces);
-        setActiveId(data.workspaces[0]?.id ?? null);
+        if (res.ok) {
+          const data = (await res.json()) as { workspaces: Workspace[] };
+          real = data.workspaces ?? [];
+        }
       } catch {
-        if (cancelled || !user) return;
-        const email =
-          user.primaryEmailAddress?.emailAddress ?? null;
-        const fallback: Workspace = {
-          id: "clerk-fallback",
-          name: deriveWorkspaceName(email, user.firstName),
-          iconUrl: user.imageUrl ?? null,
-          primaryEmail: email,
-        };
-        setWorkspaces([fallback]);
-        setActiveId(fallback.id);
+        // network / parse error — fall through to fallback below.
       }
+      if (cancelled) return;
+      if (real.length > 0) {
+        setWorkspaces(real);
+        setActiveId(real[0].id);
+        return;
+      }
+      // Backend returned no workspaces (email not in any SlackUser roster,
+      // or env vars not configured, or backend down). Show a single
+      // Clerk-derived placeholder so the UI doesn't render with empty
+      // state. The user can still navigate the app; the selector just
+      // doesn't have real Slack workspace data yet.
+      if (!user) return;
+      const email = user.primaryEmailAddress?.emailAddress ?? null;
+      const fallback: Workspace = {
+        id: "clerk-fallback",
+        name: deriveWorkspaceName(email, user.firstName),
+        iconUrl: user.imageUrl ?? null,
+        primaryEmail: email,
+      };
+      setWorkspaces([fallback]);
+      setActiveId(fallback.id);
     }
     load();
     return () => {

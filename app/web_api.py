@@ -17,7 +17,7 @@ import uuid
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.db.models import SlackUser, Workspace
@@ -47,10 +47,13 @@ async def list_workspaces_for_user(request: Request, email: str):
         return {"workspaces": []}
 
     async with get_session() as session:
+        # Case-insensitive match: Slack-cached emails preserve the case
+        # the user typed at signup, but Clerk normalises to lowercase.
+        # Compare via LOWER() on both sides to avoid missed matches.
         slack_users = (
             await session.execute(
                 select(SlackUser).where(
-                    SlackUser.email == needle,
+                    func.lower(SlackUser.email) == needle,
                     SlackUser.deleted == False,  # noqa: E712
                 )
             )
