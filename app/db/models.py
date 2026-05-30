@@ -49,6 +49,9 @@ class Workspace(TimestampMixin, Base):
     bot_user_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     bot_scopes: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     installed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # Channel where Misterr was installed. System tasks post here by default;
+    # null until the installer picks (or admin sets it manually). Migration 0017.
+    bot_home_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     users: Mapped[list["AppUser"]] = relationship(back_populates="workspace")
     threads: Mapped[list["Thread"]] = relationship(back_populates="workspace")
@@ -365,6 +368,99 @@ class ThreadInbox(Base):
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), nullable=False
     )
+
+
+# Allowed values for scheduled_task discriminators. Same VARCHAR + CHECK
+# convention as Skill / IntegrationConnection (see _SKILL_SOURCES comment above):
+# Postgres ENUMs trip Alembic + asyncpg on partial-failure replays.
+_TASK_SCOPES = ("local", "global", "system")
+_TASK_DESTINATIONS = ("channel", "dm")
+_TASK_RUN_STATUSES = ("success", "failed", "running")
+
+
+class ScheduledTask(TimestampMixin, Base):
+    """A cron-driven task. The scheduler fires it at `next_run_at`, opens a
+    fresh thread on the configured destination, and runs the agent with
+    `prompt` as the seed user message.
+
+    Scope semantics:
+    - `local`: owned by `owner_user_id`; only that user can edit / pause /
+      delete. Fires into a DM with the owner (destination_type='dm') or a
+      channel the owner picks.
+    - `global`: workspace-wide (created by a user with edit rights for the
+      whole workspace). Owner_user_id is null. Reserved for a later slice;
+      the create tool literal restricts to 'local' in v1.
+    - `system`: seeded by Misterr (workflow-discovery, daily-brief). No human
+      owner; cannot be deleted, cannot have its prompt / cron / timezone
+      changed. Only destination_slack_id is mutable in v1.
+
+    `next_run_at` is computed at write time from `cron_spec + timezone` and
+    advanced after every fire. The scheduler scans this column under a partial
+    index that excludes paused rows; `FOR UPDATE SKIP LOCKED` is the only
+    idempotency primitive (see scheduler.py)."""
+
+    __tablename__ = "scheduled_task"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "name", name="uq_scheduled_task_workspace_name"),
+        CheckConstraint(
+            "scope IN ('local', 'global', 'system')",
+            name="ck_scheduled_task_scope",
+        ),
+        CheckConstraint(
+            "destination_type IN ('channel', 'dm')",
+            name="ck_scheduled_task_destination_type",
+        ),
+        CheckConstraint(
+            "last_run_status IS NULL OR last_run_status IN ('success', 'failed', 'running')",
+            name="ck_scheduled_task_last_run_status",
+        ),
+        CheckConstraint(
+            "(scope = 'local' AND owner_user_id IS NOT NULL) "
+            "OR (scope IN ('global', 'system') AND owner_user_id IS NULL)",
+            name="ck_scheduled_task_scope_owner",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_user.id", ondelete="CASCADE"), nullable=True
+    )
+    # Slug, kebab-case in practice, unique per workspace. Used as a friendly
+    # handle in tools (`pause_scheduled_task name='daily-revops-report'`).
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    cron_spec: Mapped[str] = mapped_column(Text, nullable=False)
+    timezone: Mapped[str] = mapped_column(Text, nullable=False)
+    destination_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Slack id of the channel (CXXX) or user (UXXX) where the run posts.
+    # Nullable so a system task seeded before bot_home_channel_id is set still
+    # validates; the scheduler then marks the fire failed without disabling
+    # the task, so a later admin config recovers automatically.
+    destination_slack_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_paused: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    # When set in the future, the task is dormant until that timestamp; the
+    # scheduler auto-resumes once `paused_until <= now()`. When NULL with
+    # is_paused=true, the task is paused indefinitely (user must resume).
+    paused_until: Mapped[datetime | None] = mapped_column(nullable=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    last_run_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    last_run_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Short summary (1-3 sentences) of what the previous run produced; fed
+    # into the next run as context so e.g. workflow-discovery can dedupe its
+    # suggestions across executions. Set by the scheduler on a successful run.
+    last_run_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
 class MessageAttachment(Base):
