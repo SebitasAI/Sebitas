@@ -7,7 +7,15 @@
 import { useMemo, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Sparkles, Search, Plus, Minus, Lock } from "lucide-react";
+import {
+  Sparkles,
+  Search,
+  Plus,
+  Minus,
+  Lock,
+  Eye,
+  Upload,
+} from "lucide-react";
 
 import { PageBody, PageHeader } from "../_components/page-header";
 import {
@@ -15,6 +23,7 @@ import {
   type Skill,
   type SkillListResponse,
 } from "@/lib/api/skills";
+import { SkillModal } from "./_components/skill-modal";
 
 const SKILLS_QUERY_KEY = ["skills", "all"] as const;
 
@@ -34,6 +43,11 @@ export default function SkillsPage() {
 function SkillsBody() {
   const { getToken } = useAuth();
   const queryClient = useQueryClient();
+  // Modal state. `null` = closed. `{ kind: 'upload' }` opens the upload form.
+  // `{ kind: 'view', name: 'X' }` opens the Ver modal for skill X.
+  const [modal, setModal] = useState<
+    { kind: "upload" } | { kind: "view"; name: string } | null
+  >(null);
 
   const skillsQuery = useQuery({
     queryKey: SKILLS_QUERY_KEY,
@@ -138,15 +152,24 @@ function SkillsBody() {
 
   return (
     <div className="flex flex-col gap-5">
-      <p className="text-sm text-neutral-500">
-        Las skills son archivos markdown que le dan a Misterr contexto / playbooks
-        adicionales. Subilas desde el DM con Misterr (mandale un{" "}
-        <code className="rounded bg-[var(--color-surface-fog)] px-1 text-[12px]">
-          .md
-        </code>{" "}
-        y decile &ldquo;instalala como skill&rdquo;). Las que ves acá son las
-        del workspace + tus skills personales.
-      </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <p className="max-w-2xl text-sm text-neutral-500">
+          Las skills son archivos markdown que le dan a Misterr contexto /
+          playbooks adicionales. Subí desde acá o mandándole un{" "}
+          <code className="rounded bg-[var(--color-surface-fog)] px-1 text-[12px]">
+            .md
+          </code>{" "}
+          por DM a Misterr.
+        </p>
+        <button
+          type="button"
+          onClick={() => setModal({ kind: "upload" })}
+          className="inline-flex items-center gap-1.5 rounded-md bg-[#FF5200] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#e54a00]"
+        >
+          <Upload className="size-3.5" strokeWidth={2} />
+          Subir skill
+        </button>
+      </div>
 
       <SearchBar value={search} onChange={setSearch} />
 
@@ -169,10 +192,21 @@ function SkillsBody() {
               skill={skill}
               onInstall={() => installMut.mutate(skill.name)}
               onUninstall={() => uninstallMut.mutate(skill.name)}
+              onView={() => setModal({ kind: "view", name: skill.name })}
             />
           ))}
         </ul>
       )}
+
+      {modal?.kind === "upload" ? (
+        <SkillModal mode="upload" onClose={() => setModal(null)} />
+      ) : modal?.kind === "view" ? (
+        <SkillModal
+          mode="view"
+          skillName={modal.name}
+          onClose={() => setModal(null)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -313,10 +347,12 @@ function SkillCard({
   skill,
   onInstall,
   onUninstall,
+  onView,
 }: {
   skill: Skill;
   onInstall: () => void;
   onUninstall: () => void;
+  onView: () => void;
 }) {
   return (
     <li className="flex flex-col gap-3 rounded-lg border border-[var(--color-border)] bg-white p-4">
@@ -337,25 +373,36 @@ function SkillCard({
             </div>
           )}
         </div>
-        {skill.is_installed ? (
+        <div className="flex items-center gap-1.5">
           <button
             type="button"
-            onClick={onUninstall}
-            className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-fog)] px-2.5 py-1.5 text-xs font-medium text-neutral-700 hover:bg-white hover:text-[var(--color-ink-deep)]"
+            onClick={onView}
+            className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-white px-2 py-1.5 text-xs font-medium text-neutral-600 hover:text-[var(--color-ink-deep)]"
+            title="Ver contenido del .md"
           >
-            <Minus className="size-3.5" strokeWidth={2} />
-            Desinstalar
+            <Eye className="size-3.5" strokeWidth={1.75} />
+            Ver
           </button>
-        ) : (
-          <button
-            type="button"
-            onClick={onInstall}
-            className="inline-flex items-center gap-1 rounded-md bg-[var(--color-ink-deep)] px-2.5 py-1.5 text-xs font-medium text-white hover:bg-black"
-          >
-            <Plus className="size-3.5" strokeWidth={2.25} />
-            Instalar
-          </button>
-        )}
+          {skill.is_installed ? (
+            <button
+              type="button"
+              onClick={onUninstall}
+              className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-fog)] px-2.5 py-1.5 text-xs font-medium text-neutral-700 hover:bg-white hover:text-[var(--color-ink-deep)]"
+            >
+              <Minus className="size-3.5" strokeWidth={2} />
+              Desinstalar
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onInstall}
+              className="inline-flex items-center gap-1 rounded-md bg-[var(--color-ink-deep)] px-2.5 py-1.5 text-xs font-medium text-white hover:bg-black"
+            >
+              <Plus className="size-3.5" strokeWidth={2.25} />
+              Instalar
+            </button>
+          )}
+        </div>
       </header>
 
       <p className="line-clamp-3 text-[13px] text-neutral-600">

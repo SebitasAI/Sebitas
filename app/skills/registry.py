@@ -106,10 +106,14 @@ async def create_skill(
     size_bytes: int,
     created_by_user_id: uuid.UUID | None,
     source: str = "upload",
+    scope: str = "workspace",
 ) -> Skill:
     """Persist + upload. Two writes, in this order: insert the skill row to
     reserve (workspace_id, name) atomically; if R2 fails, the row is rolled
-    back. Returns the persisted Skill (refreshed)."""
+    back. Returns the persisted Skill (refreshed).
+
+    `scope` defaults to 'workspace' for back-compat with Slack DM uploads.
+    Web upload should pass 'personal' explicitly when the user picks it."""
     async with get_session() as session:
         existing = (
             await session.execute(
@@ -131,6 +135,7 @@ async def create_skill(
             version=1,
             source=source,
             activation_default=activation_default,
+            scope=scope,
             links=links,
             size_bytes=size_bytes,
             created_by_user_id=created_by_user_id,
