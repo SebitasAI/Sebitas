@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
@@ -20,6 +21,7 @@ from app.integrations.connect import (
     periodic_resume_loop as integration_resume_loop,
     resume_pending_polls,
 )
+from app.api.scheduled_tasks import router as scheduled_tasks_router
 from app.integrations.webhook import router as pipedream_webhook_router
 from app.logging import configure_logging
 from app.scheduled_tasks.repository import seed_system_tasks_for_all_workspaces
@@ -141,9 +143,25 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Misterr", lifespan=lifespan)
+
+# CORS: the Misterr web app (slice T-2) calls the new /api/scheduled-tasks/*
+# endpoints directly from the browser with a Bearer Clerk JWT. The legacy
+# /api/web/* endpoints don't need CORS (they're server-to-server with a
+# shared secret, never browser-direct), but the middleware is global so they
+# inherit it harmlessly.
+_cors_origins = [o.strip() for o in get_settings().frontend_origins.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Misterr-Workspace-Id"],
+)
+
 app.include_router(pipedream_webhook_router)
 app.include_router(spaces_internal_router)
 app.include_router(web_api_router)
+app.include_router(scheduled_tasks_router)
 
 
 @app.get("/health")

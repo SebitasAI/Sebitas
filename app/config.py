@@ -159,6 +159,16 @@ class Settings(BaseSettings):
     clerk_publishable_key: str | None = None
     clerk_secret_key: str | None = None
     clerk_jwt_issuer: str | None = None
+    # JWKS URL for verifying Clerk-issued JWTs in this backend (slice T-2 web
+    # endpoints). If unset, defaults to `<clerk_jwt_issuer>/.well-known/jwks.json`.
+    # Override only if you've moved Clerk behind a custom domain.
+    clerk_jwks_url: str | None = None
+
+    # Allowed origins for the Misterr web app (Bearer-JWT-authenticated REST
+    # endpoints under /api/scheduled-tasks). Comma-separated; the CORS
+    # middleware splits on commas. The default covers local dev on the
+    # Doppler-configured port 3002.
+    frontend_origins: str = "http://localhost:3002,http://localhost:3001"
 
     log_level: str = "INFO"
 
