@@ -29,7 +29,9 @@ import {
   scheduledTasksApi,
   type ListFilter,
   type ScheduledTask,
+  type ScheduledTaskRun,
   type TaskListResponse,
+  type TaskRunsResponse,
 } from "@/lib/api/scheduled-tasks";
 
 const TASKS_QUERY_KEY = ["scheduled-tasks", "all"] as const;
@@ -380,6 +382,20 @@ function TaskCard({
   onResume: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const { getToken } = useAuth();
+
+  // Runs for this task are fetched lazily when the card is first expanded.
+  // The expanded-card panel below renders them inline. We keep `enabled` on
+  // the query so it never fires when the card is collapsed.
+  const runsQuery = useQuery({
+    queryKey: ["scheduled-tasks", "runs", task.id],
+    enabled: expanded,
+    queryFn: async (): Promise<TaskRunsResponse> => {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("No Clerk session token available.");
+      return scheduledTasksApi.runs(task.id, token);
+    },
+  });
 
   const cronHuman = useMemo(() => {
     try {
@@ -399,6 +415,13 @@ function TaskCard({
   const createdRelative = formatDistanceToNow(new Date(task.created_at), {
     addSuffix: true,
   });
+
+  // A one-shot task whose scheduler tick already ran (next_run_at=null)
+  // is "completed". The badge + the pause toggle's disabled state both
+  // depend on this so the user can't pause/resume something that has
+  // already run.
+  const isOneShot = task.fire_once;
+  const isCompleted = isOneShot && task.next_run_at === null;
 
   return (
     <li className="overflow-hidden rounded-lg border border-[var(--color-border)] bg-white">
@@ -422,6 +445,7 @@ function TaskCard({
                 {task.name}
               </span>
               <ScopeBadge scope={task.scope} />
+              {isOneShot ? <OneShotBadge completed={isCompleted} /> : null}
               {task.is_paused ? <PausedBadge until={task.paused_until} /> : null}
             </div>
             <div className="mt-0.5 text-xs text-neutral-500">
@@ -430,11 +454,13 @@ function TaskCard({
             </div>
           </div>
         </button>
-        <PauseToggle
-          isPaused={task.is_paused}
-          onPause={onPause}
-          onResume={onResume}
-        />
+        {!isCompleted ? (
+          <PauseToggle
+            isPaused={task.is_paused}
+            onPause={onPause}
+            onResume={onResume}
+          />
+        ) : null}
       </header>
 
       {expanded ? (
@@ -465,6 +491,99 @@ function TaskCard({
               {task.last_run_error}
             </div>
           ) : null}
+
+          <RunHistoryPanel
+            runs={runsQuery.data?.runs}
+            isLoading={runsQuery.isLoading}
+            isError={runsQuery.isError}
+          />
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
+function RunHistoryPanel({
+  runs,
+  isLoading,
+  isError,
+}: {
+  runs: ScheduledTaskRun[] | undefined;
+  isLoading: boolean;
+  isError: boolean;
+}) {
+  return (
+    <div className="mt-3 border-t border-[var(--color-border)] pt-3">
+      <div className="text-[10px] font-medium uppercase tracking-wide text-neutral-500">
+        Historial de ejecuciones
+      </div>
+      {isLoading ? (
+        <div className="mt-1 text-[11px] text-neutral-500">Cargando…</div>
+      ) : isError ? (
+        <div className="mt-1 text-[11px] text-red-600">
+          No pude cargar el historial.
+        </div>
+      ) : !runs || runs.length === 0 ? (
+        <div className="mt-1 text-[11px] text-neutral-500">
+          Sin ejecuciones registradas todavía.
+        </div>
+      ) : (
+        <ul className="mt-1 flex flex-col gap-2">
+          {runs.map((run) => (
+            <RunItem key={run.id} run={run} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function RunItem({ run }: { run: ScheduledTaskRun }) {
+  const [open, setOpen] = useState(false);
+  const startedRelative = formatDistanceToNow(new Date(run.started_at), {
+    addSuffix: true,
+  });
+  const dot =
+    run.status === "success"
+      ? "bg-emerald-500"
+      : run.status === "failed"
+        ? "bg-red-500"
+        : "bg-amber-500";
+  return (
+    <li className="rounded-md border border-[var(--color-border)] bg-white">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between gap-3 px-2 py-1.5 text-left"
+      >
+        <div className="flex items-center gap-2">
+          <span className={`inline-block size-1.5 rounded-full ${dot}`} />
+          <span className="text-[11px] font-medium text-neutral-700">
+            {run.status}
+          </span>
+          <span className="text-[11px] text-neutral-500">{startedRelative}</span>
+        </div>
+        <span className="text-neutral-400">
+          {open ? (
+            <ChevronUp className="size-3.5" strokeWidth={1.75} />
+          ) : (
+            <ChevronDown className="size-3.5" strokeWidth={1.75} />
+          )}
+        </span>
+      </button>
+      {open ? (
+        <div className="border-t border-[var(--color-border)] px-2 py-2 text-[11px] text-neutral-700">
+          {run.output ? (
+            <pre className="whitespace-pre-wrap font-sans leading-relaxed">
+              {run.output}
+            </pre>
+          ) : run.error ? (
+            <pre className="whitespace-pre-wrap font-sans leading-relaxed text-red-700">
+              {run.error}
+            </pre>
+          ) : (
+            <span className="text-neutral-400">(sin output)</span>
+          )}
         </div>
       ) : null}
     </li>
@@ -503,6 +622,20 @@ function ScopeBadge({ scope }: { scope: ScheduledTask["scope"] }) {
       : scope === "global"
         ? "bg-amber-100 text-amber-700"
         : "bg-[#FF5200]/10 text-[#FF5200]";
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${cls}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+function OneShotBadge({ completed }: { completed: boolean }) {
+  const label = completed ? "Completada" : "Una vez";
+  const cls = completed
+    ? "bg-emerald-100 text-emerald-700"
+    : "bg-violet-100 text-violet-700";
   return (
     <span
       className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${cls}`}

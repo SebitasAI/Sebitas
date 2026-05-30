@@ -499,6 +499,42 @@ class ScheduledTask(TimestampMixin, Base):
     )
 
 
+class ScheduledTaskRun(Base):
+    """One row per execution of a scheduled_task. Persists across the parent
+    task's lifecycle (ON DELETE SET NULL) so the UI can render history for
+    deleted / completed one-shot tasks. Created when the scheduler claims
+    the task (status='running') and finalized when the agent run or literal
+    post returns (status='success' or 'failed')."""
+
+    __tablename__ = "scheduled_task_run"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'success', 'failed')",
+            name="ck_scheduled_task_run_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("scheduled_task.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    task_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    output: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class MessageAttachment(Base):
     """A file attached to a user message. The bytes live in R2 (`r2_ref`); this
     row keeps the reference so multi-turn re-attachment works without

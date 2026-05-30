@@ -54,6 +54,29 @@ class ScheduledTaskOut(BaseModel):
     next_run_at: datetime | None
     created_at: datetime
     created_by_user_id: str | None
+    # T-4 / T-5 flags. fire_once + prompt_is_literal let the UI render a
+    # "One-shot" badge and distinguish "completed" vs "active" rows.
+    fire_once: bool = False
+    prompt_is_literal: bool = False
+
+
+class TaskRunOut(BaseModel):
+    """One execution of a scheduled task. The web app renders these in the
+    expanded card as a vertical run-history list."""
+
+    id: str
+    task_id: str | None
+    task_name_snapshot: str
+    started_at: datetime
+    finished_at: datetime | None
+    status: str
+    output: str | None
+    error: str | None
+
+
+class TaskRunsResponse(BaseModel):
+    runs: list[TaskRunOut]
+    total_count: int
 
 
 class TaskListResponse(BaseModel):
@@ -90,6 +113,21 @@ def _serialize(task) -> ScheduledTaskOut:  # type: ignore[no-untyped-def]
         next_run_at=task.next_run_at,
         created_at=task.created_at,
         created_by_user_id=str(task.created_by_user_id) if task.created_by_user_id else None,
+        fire_once=task.fire_once,
+        prompt_is_literal=task.prompt_is_literal,
+    )
+
+
+def _serialize_run(run) -> TaskRunOut:  # type: ignore[no-untyped-def]
+    return TaskRunOut(
+        id=str(run.id),
+        task_id=str(run.task_id) if run.task_id else None,
+        task_name_snapshot=run.task_name_snapshot,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+        status=run.status,
+        output=run.output,
+        error=run.error,
     )
 
 
@@ -188,6 +226,33 @@ async def resume_scheduled_task(
     except repo.ScheduledTaskError as exc:
         raise _domain_error_to_http(exc) from exc
     return _serialize(task)
+
+
+# --------------------------------------------------------------------------- #
+# GET /api/scheduled-tasks/{id_or_name}/runs
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/{id_or_name}/runs", response_model=TaskRunsResponse)
+async def list_scheduled_task_runs(
+    id_or_name: str,
+    limit: int = 50,
+    user: ResolvedAppUser = Depends(require_app_user),
+) -> TaskRunsResponse:
+    """Return recent runs of a task. Newest first. Capped to `limit` rows;
+    we don't paginate yet (50 is plenty for the v1 expandable card)."""
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be 1..200")
+    try:
+        runs = await repo.list_runs_for_task(
+            user.workspace_id, id_or_name, limit=limit
+        )
+    except repo.ScheduledTaskError as exc:
+        raise _domain_error_to_http(exc) from exc
+    return TaskRunsResponse(
+        runs=[_serialize_run(r) for r in runs],
+        total_count=len(runs),
+    )
 
 
 __all__ = ["router"]
