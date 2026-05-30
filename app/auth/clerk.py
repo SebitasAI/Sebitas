@@ -36,7 +36,7 @@ from jose.exceptions import JWKError
 from sqlalchemy import func, select
 
 from app.config import get_settings
-from app.db.models import AppUser, SlackUser
+from app.db.models import AppUser, SlackUser, Workspace
 from app.db.session import get_session
 
 log = structlog.get_logger(__name__)
@@ -57,6 +57,13 @@ class ClerkClaims:
 
     sub: str  # Clerk user id (e.g. "user_2abc...")
     email: str | None
+    # Clerk org context: present only when the session has an "active
+    # organization" AND the JWT template emits these claims (the "backend"
+    # template under JWT Templates in Clerk dashboard must include
+    # `org_id`, `org_role`, `org_slug` -- see app/auth/README.md).
+    org_id: str | None
+    org_role: str | None
+    org_slug: str | None
     raw: dict[str, Any]
 
 
@@ -173,7 +180,16 @@ async def verify_clerk_jwt(token: str) -> ClerkClaims:
         or payload.get("primary_email_address")
         or payload.get("email_address")
     )
-    return ClerkClaims(sub=sub, email=email, raw=payload)
+    # Org context: present in default Clerk session tokens when the user has
+    # an active organization; in templated tokens only if the template
+    # explicitly emits these claims (see Clerk dashboard -> JWT Templates).
+    org_id = payload.get("org_id") or payload.get("organization_id")
+    org_role = payload.get("org_role") or payload.get("organization_role")
+    org_slug = payload.get("org_slug") or payload.get("organization_slug")
+    return ClerkClaims(
+        sub=sub, email=email, org_id=org_id, org_role=org_role,
+        org_slug=org_slug, raw=payload,
+    )
 
 
 async def require_clerk_user(
@@ -243,6 +259,103 @@ async def _candidate_app_users_for_email(email: str) -> list[AppUser]:
         return results
 
 
+async def _resolve_via_org(
+    clerk: ClerkClaims,
+) -> ResolvedAppUser | None:
+    """New org-based resolution: when the Clerk session has an active
+    organization, the JWT carries `org_id`. We map that 1:1 to a Workspace
+    row (via the `clerk_org_id` column populated at install / backfill
+    time) and then locate the AppUser by `(workspace_id, clerk_user_id)`.
+
+    Returns None when no `org_id` claim is present -- the caller should
+    then fall back to the legacy email-match path (transition mode).
+
+    Raises HTTPException on the org-mapped failure modes:
+      - 404 if Workspace.clerk_org_id is not provisioned yet for this org.
+      - 403 if the calling user has no AppUser in that workspace
+        (i.e. they joined the Clerk org but never interacted with Misterr
+        in Slack -- web-only members can't act on per-user data yet).
+    """
+    if not clerk.org_id:
+        return None
+
+    async with get_session() as session:
+        ws = (
+            await session.execute(
+                select(Workspace).where(Workspace.clerk_org_id == clerk.org_id)
+            )
+        ).scalar_one_or_none()
+        if ws is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Clerk organization not yet linked to a Misterr workspace. "
+                    "If you just installed the bot, wait ~30s and refresh; "
+                    "otherwise contact support."
+                ),
+            )
+
+        # Direct hit: clerk_user_id already linked.
+        app_user = (
+            await session.execute(
+                select(AppUser).where(
+                    AppUser.workspace_id == ws.id,
+                    AppUser.clerk_user_id == clerk.sub,
+                )
+            )
+        ).scalar_one_or_none()
+
+        # Lazy link: not linked yet, but the user's email matches a
+        # SlackUser in this workspace and that SlackUser has an AppUser.
+        # Bind them so subsequent requests are O(1).
+        if app_user is None and clerk.email:
+            needle = clerk.email.strip().lower()
+            slack_user = (
+                await session.execute(
+                    select(SlackUser).where(
+                        SlackUser.workspace_id == ws.id,
+                        func.lower(SlackUser.email) == needle,
+                        SlackUser.deleted == False,  # noqa: E712
+                    )
+                )
+            ).scalar_one_or_none()
+            if slack_user is not None:
+                app_user = (
+                    await session.execute(
+                        select(AppUser).where(
+                            AppUser.workspace_id == ws.id,
+                            AppUser.slack_user_id == slack_user.slack_user_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if app_user is not None and app_user.clerk_user_id != clerk.sub:
+                    app_user.clerk_user_id = clerk.sub
+                    await session.commit()
+                    log.info(
+                        "clerk_user_lazily_linked",
+                        app_user_id=str(app_user.id),
+                        clerk_user_id=clerk.sub,
+                        workspace_id=str(ws.id),
+                    )
+
+        if app_user is None:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Your Clerk account is in this organization but has not "
+                    "interacted with Misterr in Slack yet. Send the bot any "
+                    "DM in Slack to finish setup, then refresh."
+                ),
+            )
+
+        return ResolvedAppUser(
+            workspace_id=ws.id,
+            app_user_id=app_user.id,
+            clerk_user_id=clerk.sub,
+            email=clerk.email or "",
+        )
+
+
 async def require_app_user(
     clerk: ClerkClaims = Depends(require_clerk_user),
     x_misterr_workspace_id: str | None = Header(
@@ -251,14 +364,28 @@ async def require_app_user(
 ) -> ResolvedAppUser:
     """Map a verified Clerk JWT to a single AppUser.
 
-    Resolution:
-      - If Clerk has no email -> 403 (email is the join key in v1).
-      - If `X-Misterr-Workspace-Id` is set, look up the AppUser in that
-        specific workspace; reject if it doesn't match.
-      - Else if the user has exactly one candidate AppUser -> use it.
-      - Else -> 400 with a structured payload listing the candidate
-        workspace ids so the frontend can prompt the user.
+    Resolution order:
+      1. If the JWT has an `org_id` claim, use the org-based lookup
+         (`Workspace.clerk_org_id`). This is the post-migration path and
+         the source of truth going forward.
+      2. Else, legacy email-match path: find SlackUsers with the same
+         email, narrow by `X-Misterr-Workspace-Id` if multiple. Kept
+         during the transition window so users whose session still
+         predates the org rollout don't get locked out.
     """
+    # Preferred path once the org-migration backfill has run.
+    via_org = await _resolve_via_org(clerk)
+    if via_org is not None:
+        return via_org
+
+    # Legacy fallback: no `org_id` claim. Logged so we can audit how often
+    # this still fires and decide when to remove it.
+    log.info(
+        "auth_resolve_via_email_fallback",
+        clerk_user_id=clerk.sub,
+        email=clerk.email,
+    )
+
     if not clerk.email:
         raise HTTPException(
             status_code=403,
