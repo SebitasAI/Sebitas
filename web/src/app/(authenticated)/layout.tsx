@@ -1,11 +1,17 @@
 import { redirect } from "next/navigation";
 import { auth } from "@clerk/nextjs/server";
-import { SignOutButton } from "@clerk/nextjs";
+
+import { DashboardShell } from "./_components/dashboard-shell";
 
 // Server-side gate on top of the middleware. The middleware enforces auth
 // at the request boundary; this layout re-checks so any future server
 // component inside this segment can rely on a non-null userId without
-// re-querying. Belt + suspenders.
+// re-querying. Belt + suspenders. Once we have a real user/workspace
+// model in our DB, also bootstrap the AppUser <-> Clerk user link here.
+//
+// User profile data (name, email, avatar) is read client-side from Clerk
+// inside `SidebarUserDropdown` via useUser(), so this layout doesn't need
+// to pass it down.
 export default async function AuthenticatedLayout({
   children,
 }: {
@@ -15,20 +21,5 @@ export default async function AuthenticatedLayout({
   if (!userId) {
     redirect("/sign-in");
   }
-  return (
-    <div className="flex min-h-screen">
-      <aside className="flex w-56 flex-col justify-between border-r border-neutral-200 p-6 dark:border-neutral-800">
-        <div className="text-xl font-semibold tracking-tight">Misterr</div>
-        <SignOutButton>
-          <button
-            type="button"
-            className="rounded-md border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700"
-          >
-            Sign out
-          </button>
-        </SignOutButton>
-      </aside>
-      <main className="flex-1 p-8">{children}</main>
-    </div>
-  );
+  return <DashboardShell>{children}</DashboardShell>;
 }

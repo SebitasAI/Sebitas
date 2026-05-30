@@ -126,6 +126,12 @@ class Settings(BaseSettings):
     composio_base_url: str = "https://backend.composio.dev/api/v3"
     composio_webhook_secret: str | None = None
 
+    # Shared secret used by the Misterr web app to call private backend
+    # endpoints (e.g. /api/web/workspaces). The web's Next.js route handler
+    # signs requests with this token; the backend verifies the header before
+    # serving. Rotate by updating both Doppler envs together.
+    misterr_web_api_key: str | None = None
+
     # Metabase HTTP-direct fallback (2026-05-29). Composio's wrapper for
     # METABASE_POST_API_CARD strips `database_id` from the body, which Metabase
     # then rejects with a NOT NULL constraint violation. Workaround: when the

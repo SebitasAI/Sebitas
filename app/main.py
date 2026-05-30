@@ -26,6 +26,7 @@ from app.skills.preview_store import cleanup_expired as cleanup_expired_previews
 from app.slack.app import build_socket_handler, init_slack_app
 from app.slack.roster import periodic_refresh_loop as roster_periodic
 from app.spaces.api import router as spaces_internal_router
+from app.web_api import router as web_api_router
 from app.spaces.convex_backend import ConvexSharedSpaceBackend
 from app.spaces.gateway import set_backend as set_space_backend
 
@@ -127,6 +128,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Misterr", lifespan=lifespan)
 app.include_router(pipedream_webhook_router)
 app.include_router(spaces_internal_router)
+app.include_router(web_api_router)
 
 
 @app.get("/health")
