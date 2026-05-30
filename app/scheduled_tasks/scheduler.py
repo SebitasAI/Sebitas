@@ -255,49 +255,40 @@ async def _execute_fire(fire: _PendingFire) -> tuple[str | None, str | None]:
     except Exception as exc:  # noqa: BLE001
         return None, f"could not resolve destination: {exc}"[: repo.MAX_LAST_RUN_ERROR_LEN]
 
-    # Recurring vs one-shot UX differ.
+    # Recurring vs one-shot have fundamentally different semantics.
     #
-    # Recurring (fire_once=false, e.g. workflow-discovery, daily-brief): we
-    # post a parent message "⏰ Scheduled task <name>" and thread the agent's
-    # output under it. The parent gives context in public channels and
-    # gathers all replies / heartbeats into one thread instead of spamming.
+    # Recurring (fire_once=false, e.g. workflow-discovery, daily-brief):
+    #   - The prompt is a TASK DESCRIPTION; the agent has to do work each
+    #     fire (search the workspace, compose a summary, etc.).
+    #   - We post a parent message and thread the agent's output for context
+    #     in public channels and to gather heartbeat / preamble / final.
     #
-    # One-shot (fire_once=true, from send_delayed_message): no parent, no
-    # thread. The reply posts flat in the DM/channel so it reads like any
-    # other message. Otherwise users see a confusing wrapper -- e.g. Alberto
-    # would see "⏰ Scheduled task ping-alberto" + a threaded message from
-    # Misterr, when from his POV it should just be a clean direct message.
-    parent_ts: str | None = None
-    if not fire.fire_once:
-        parent_text = f":alarm_clock: Scheduled task `{fire.name}`"
+    # One-shot (fire_once=true, from send_delayed_message):
+    #   - The prompt is the LITERAL TEXT to deliver. The agent ALREADY
+    #     composed it at scheduling time (with sender context, recipient
+    #     greeting, etc.) -- re-running the agent at fire time would
+    #     reinterpret the text and produce variance ("Colombia va a ganar
+    #     el mundial" -> agent rewrites as "Colombia no pasa de fase de
+    #     grupos" or similar). Skip the agent. Post the text directly.
+    if fire.fire_once:
         try:
-            post_resp = await client.chat_postMessage(channel=channel_id, text=parent_text)
-            parent_ts = post_resp.get("ts") if isinstance(post_resp, dict) else post_resp["ts"]
+            await client.chat_postMessage(channel=channel_id, text=fire.prompt)
         except Exception as exc:  # noqa: BLE001
-            return None, f"could not post parent message: {exc}"[: repo.MAX_LAST_RUN_ERROR_LEN]
-        if not parent_ts:
-            return None, "Slack returned no ts for parent message"
+            return None, f"chat.postMessage failed: {exc}"[: repo.MAX_LAST_RUN_ERROR_LEN]
+        return None, None
 
-    # Build the synthetic user message. For recurring tasks we prepend the
-    # [Scheduled task context] block so the agent can dedupe vs prior runs
-    # (last_run_summary). For one-shot tasks we keep the prompt verbatim --
-    # there's no prior run to reference, and the user's intent is "deliver
-    # this", not "deliver this with metadata appended". The agent system
-    # prompt already knows it's a scheduled-task run via langfuse tags.
-    seed_text = fire.prompt if fire.fire_once else _build_seed_text(fire)
+    # Recurring path: parent + thread + agent run.
+    parent_text = f":alarm_clock: Scheduled task `{fire.name}`"
+    try:
+        post_resp = await client.chat_postMessage(channel=channel_id, text=parent_text)
+        parent_ts = post_resp.get("ts") if isinstance(post_resp, dict) else post_resp["ts"]
+    except Exception as exc:  # noqa: BLE001
+        return None, f"could not post parent message: {exc}"[: repo.MAX_LAST_RUN_ERROR_LEN]
+    if not parent_ts:
+        return None, "Slack returned no ts for parent message"
 
-    # Conversation key + user_ts: for recurring we use the parent ts (real
-    # Slack timestamp, used by reactions + threading). For one-shot we have
-    # no parent, so we synthesize a unique conversation_key from the task id
-    # (so the Thread row is unique) and pass empty user_ts (the runner's
-    # reaction-add will fail silently which is the same outcome as today
-    # when the bot can't add reactions in a particular conversation).
-    conversation_key = parent_ts if parent_ts else str(fire.task_id)
-    user_ts = parent_ts or ""
-    reply_thread_ts = parent_ts  # None for fire_once -> flat post
+    seed_text = _build_seed_text(fire)
 
-    # The agent runner upserts the AppUser by slack_user_id; passing the
-    # sentinel creates one per workspace on first fire and reuses it after.
     try:
         await run_agent(
             client=client,
@@ -305,25 +296,18 @@ async def _execute_fire(fire: _PendingFire) -> tuple[str | None, str | None]:
             slack_user_id=SYSTEM_ACTOR_SLACK_USER_ID,
             channel=channel_id,
             user_text=seed_text,
-            user_ts=user_ts,
-            conversation_key=conversation_key,
-            reply_thread_ts=reply_thread_ts,
+            user_ts=parent_ts,
+            conversation_key=parent_ts,
+            reply_thread_ts=parent_ts,
             require_existing_thread=False,
             files=None,
             lock_handle=None,
         )
     except Exception as exc:  # noqa: BLE001
-        # run_agent has its own user-facing error path; only "hard" errors
-        # (e.g. graph build issues) reach us. Surface as the failure reason.
         return None, f"agent run errored: {exc}"[: repo.MAX_LAST_RUN_ERROR_LEN]
 
-    # Summarize for recurring runs only -- one-shot tasks get deleted on
-    # fire so a summary would never be consumed (and the conversation key
-    # is synthetic, no Thread row matches).
-    if fire.fire_once:
-        return None, None
     summary = await _fetch_latest_assistant_text(
-        ws.id, channel_id, conversation_key
+        ws.id, channel_id, parent_ts
     )
     return summary, None
 
