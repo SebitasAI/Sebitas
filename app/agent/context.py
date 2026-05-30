@@ -33,6 +33,13 @@ skills_context_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 channel_roster_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "channel_roster", default=""
 )
+# Pre-rendered identity block for the calling user (Slack U-id, display name,
+# email, timezone). The agent uses this to know who it is talking to without
+# having to ask, and to default "tu DM / mandame por DM" to the right id.
+# Set by the runner at the start of each turn; empty if lookup failed.
+calling_user_identity_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "calling_user_identity", default=""
+)
 
 
 def set_run_context(
@@ -42,9 +49,11 @@ def set_run_context(
     skills_context: str,
     channel_roster: str = "",
     app_user_id: str | None = None,
+    calling_user_identity: str = "",
 ) -> None:
     workspace_id_var.set(workspace_id)
     app_user_id_var.set(app_user_id)
     run_id_var.set(run_id)
     skills_context_var.set(skills_context)
     channel_roster_var.set(channel_roster)
+    calling_user_identity_var.set(calling_user_identity)

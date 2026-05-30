@@ -132,6 +132,63 @@ async def _process_youtube_links(
     return "\n\n".join(text_blocks), records, unsupported
 
 
+async def _build_calling_user_identity_block(
+    workspace_id: uuid.UUID, slack_user_id: str | None
+) -> str:
+    """Render an uncached system block stating who the agent is talking to.
+    The agent reads this to know the calling user's Slack U-id (for "tu DM"
+    style requests), their display name (for friendly phrasing), and their
+    Slack profile timezone (for scheduled-task defaults). Returns "" if we
+    don't have a slack_user_id (shouldn't happen on real runs)."""
+    if not slack_user_id:
+        return ""
+    from app.db.models import SlackUser
+    from app.db.session import get_session
+    from sqlalchemy import select as _select
+
+    name: str | None = None
+    email: str | None = None
+    tz: str | None = None
+    try:
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    _select(SlackUser).where(
+                        SlackUser.workspace_id == workspace_id,
+                        SlackUser.slack_user_id == slack_user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is not None:
+                name = row.display_name or row.real_name
+                email = row.email
+                tz = row.tz
+    except Exception as exc:  # noqa: BLE001
+        log.warning("identity_block_lookup_failed", error=str(exc))
+
+    bits = [f"You are currently talking to <@{slack_user_id}>"]
+    if name:
+        bits.append(f"(display name: {name}")
+        if email:
+            bits[-1] += f", email: {email}"
+        bits[-1] += ")"
+    elif email:
+        bits.append(f"(email: {email})")
+    line1 = " ".join(bits) + "."
+
+    line2 = (
+        f"Their Slack profile timezone is `{tz}`."
+        if tz
+        else "Their Slack profile timezone is unknown (roster not yet synced)."
+    )
+    line3 = (
+        f"When the user says 'tu DM' / 'mandame por DM' / 'a mí', the "
+        f"destination_slack_id is `{slack_user_id}`. Never ask them for "
+        "their own ID or name."
+    )
+    return "\n".join([line1, line2, line3])
+
+
 async def _build_channel_roster_block(workspace_id: uuid.UUID, channel: str | None) -> str:
     """Compact members list (max 50) for the current channel, surfaced to the
     model as an uncached system block so it can use real <@U...> mentions
@@ -954,10 +1011,19 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
     except Exception as exc:  # noqa: BLE001
         log.warning("roster_sync_failed", workspace_id=str(workspace_id), error=str(exc))
     channel_roster_text = await _build_channel_roster_block(workspace_id, channel)
+    # Identity block: who is the agent talking to right now? Prevents the
+    # agent from asking the user for their own name / U-id when scheduling
+    # a DM to themselves. Looks up SlackUser by (workspace_id, slack_user_id)
+    # to enrich with display_name + tz when available; falls back to just
+    # the U-id when roster sync hasn't populated this user yet.
+    identity_text = await _build_calling_user_identity_block(
+        workspace_id, slack_user_id
+    )
     set_run_context(
         workspace_id=str(workspace_id), run_id=run_id,
         skills_context=skills_context, channel_roster=channel_roster_text,
         app_user_id=str(app_user_id),
+        calling_user_identity=identity_text,
     )
     ctx = {
         "run_id": run_id, "seed_len": len(seed), "team_id": team_id,
@@ -1016,6 +1082,7 @@ async def resume_run(*, client, ctx: dict, decision: str) -> None:
     if workspace is not None:
         app_user_str = ctx.get("app_user_id")
         skills_ctx = ""
+        slack_user_id: str | None = None
         if app_user_str:
             try:
                 skills_ctx = await build_skills_context(uuid.UUID(app_user_str))
@@ -1024,11 +1091,32 @@ async def resume_run(*, client, ctx: dict, decision: str) -> None:
                     "skills_context_rebuild_failed",
                     error=str(exc), app_user_id=app_user_str,
                 )
+            # Resolve the calling user's slack_user_id so the resumed turn keeps
+            # the identity block (otherwise the agent forgets who it's talking
+            # to between the approval gate and the post-approval execution).
+            try:
+                from app.db.models import AppUser
+                from sqlalchemy import select as _select
+
+                async with get_session() as session:
+                    slack_user_id = (
+                        await session.execute(
+                            _select(AppUser.slack_user_id).where(
+                                AppUser.id == uuid.UUID(app_user_str)
+                            )
+                        )
+                    ).scalar_one_or_none()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("identity_resume_lookup_failed", error=str(exc))
+        identity_text = await _build_calling_user_identity_block(
+            workspace.id, slack_user_id
+        )
         set_run_context(
             workspace_id=str(workspace.id),
             run_id=ctx["run_id"],
             skills_context=skills_ctx,
             app_user_id=app_user_str,
+            calling_user_identity=identity_text,
         )
 
     with _langfuse.start_as_current_observation(

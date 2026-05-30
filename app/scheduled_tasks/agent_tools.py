@@ -14,16 +14,20 @@ to the global tool registry.
 
 from __future__ import annotations
 
+import re
 import uuid
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta
+from datetime import timezone as dt_tz
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
+from sqlalchemy import select as _select
 
 from app.agent.context import app_user_id_var, workspace_id_var
 from app.agent.tools import Tool, register
 from app.db import repository as db_repo
-from app.db.models import ScheduledTask
+from app.db.models import AppUser, ScheduledTask
 from app.db.session import get_session
 from app.scheduled_tasks import repository as repo
 from app.scheduled_tasks.timezone import resolve_timezone
@@ -56,6 +60,22 @@ def _ctx_user_id() -> uuid.UUID | None:
         return None
 
 
+async def _calling_slack_user_id(app_user_id: uuid.UUID) -> str | None:
+    """Resolve the calling AppUser's Slack U-id. Used to default
+    `destination_slack_id` for DM-typed scheduled tasks so the agent
+    doesn't have to ask the user for their own ID."""
+    try:
+        async with get_session() as session:
+            return (
+                await session.execute(
+                    _select(AppUser.slack_user_id).where(AppUser.id == app_user_id)
+                )
+            ).scalar_one_or_none()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("slack_user_id_lookup_failed", error=str(exc))
+        return None
+
+
 # Match Spanish "natural" inputs like "2026-06-15" or "15/06/2026" for the
 # pause `until` arg. Keeping it loose; the parser tries each pattern in order.
 _DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d")
@@ -72,14 +92,14 @@ def _parse_until(raw: str | None) -> datetime | None:
     for fmt in _DATE_FORMATS:
         try:
             d = datetime.strptime(raw, fmt).date()
-            return datetime.combine(d, time(0, 0, 0, tzinfo=timezone.utc))
+            return datetime.combine(d, time(0, 0, 0, tzinfo=dt_tz.utc))
         except ValueError:
             continue
     # Last-ditch: full ISO datetime.
     try:
         dt = datetime.fromisoformat(raw)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=dt_tz.utc)
         return dt
     except ValueError:
         return None
@@ -121,8 +141,8 @@ async def _create_scheduled_task(
     cron_spec: str,
     scope: str,
     destination_type: str,
-    destination_slack_id: str,
     timezone: str | None = None,
+    destination_slack_id: str | None = None,
 ) -> str:
     workspace_id = _ctx_workspace_id()
     user_id = _ctx_user_id()
@@ -136,6 +156,25 @@ async def _create_scheduled_task(
             "para vos). El scope `global` queda para una versión futura cuando "
             "tengamos el sistema de roles."
         )
+
+    # Auto-default destination_slack_id for DMs to the calling user's
+    # Slack U-id. The most common case ("mandame por DM") used to require
+    # the agent to know its caller's U-id; now the tool resolves it server-
+    # side. For channel destinations the agent still needs to pass the C-id
+    # explicitly (we don't know which channel the user means).
+    if not destination_slack_id:
+        if destination_type == "dm":
+            destination_slack_id = await _calling_slack_user_id(user_id)
+            if not destination_slack_id:
+                return (
+                    "No pude resolver tu Slack user id para mandarte el DM. "
+                    "Decime el ID o pedile a alguien que reinstale el bot."
+                )
+        else:
+            return (
+                "Para tasks que postean en un canal necesito el channel id "
+                "(CXXX...). Decime en qué canal lo querés."
+            )
 
     # Resolve tz aliases ("hora Col") and use the caller's Slack profile tz
     # as fallback when the agent didn't pass an explicit timezone. The chain:
@@ -407,9 +446,12 @@ _CREATE_INPUT_SCHEMA: dict[str, Any] = {
         "destination_slack_id": {
             "type": "string",
             "description": (
-                "Channel ID (CXXX...) o user ID (UXXX...) de Slack según el "
-                "destination_type. Para DMs del dueño consigo, pasame el U-ID "
-                "del usuario actual."
+                "OPCIONAL para destination_type='dm' -- el sistema usa el U-id "
+                "del usuario que está hablando. REQUERIDO para 'channel' "
+                "(pasame el C-id del canal). Si el usuario menciona un canal "
+                "por nombre o un user distinto al actual, resolvelo con "
+                "find_slack_user / context primero; NO le preguntes su propio "
+                "ID."
             ),
         },
     },
@@ -419,7 +461,6 @@ _CREATE_INPUT_SCHEMA: dict[str, Any] = {
         "cron_spec",
         "scope",
         "destination_type",
-        "destination_slack_id",
     ],
 }
 
@@ -576,6 +617,257 @@ register(
             "required": ["task_id_or_name"],
         },
         handler=_resume_scheduled_task,
+    )
+)
+
+
+# --------------------------------------------------------------------------- #
+# send_delayed_message: one-shot delayed message.
+#
+# Distinct from create_scheduled_task because:
+#   - One-shot, NOT recurring (the row is deleted after the first fire via
+#     scheduled_task.fire_once + repository.record_fire_finished).
+#   - The agent / user thinks in absolute or relative time ("en 5 minutos",
+#     "mañana a las 9"), not in cron expressions.
+#   - The agent passes a literal message body; there's no "prompt the LLM
+#     to do work" semantics. The scheduler still routes through run_agent
+#     so we get retries / observability for free; the seed user message
+#     is the literal text the user asked us to send.
+# --------------------------------------------------------------------------- #
+
+
+_ISO_DATETIME_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$"
+)
+
+
+def _parse_at_local(at: str, tz_name: str) -> datetime | None:
+    """Parse an `at` string ("YYYY-MM-DD HH:MM" or "YYYY-MM-DDTHH:MM") as
+    a wall-clock time in the given tz, return UTC-aware. The agent emits
+    timezone-naive ISO strings; we attach the user's tz here so 'mañana a
+    las 9am' resolves correctly without putting tz parsing on the model."""
+    if not at or not _ISO_DATETIME_RE.match(at.strip()):
+        return None
+    try:
+        tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        return None
+    raw = at.strip().replace("T", " ")
+    fmt = "%Y-%m-%d %H:%M:%S" if raw.count(":") == 2 else "%Y-%m-%d %H:%M"
+    try:
+        local = datetime.strptime(raw, fmt).replace(tzinfo=tz)
+    except ValueError:
+        return None
+    return local.astimezone(dt_tz.utc)
+
+
+def _fire_at_to_cron(fire_at_local: datetime) -> str:
+    """Render a one-shot cron expression that matches the given moment.
+    The expression is recurring by definition (cron only does recurrence),
+    but `fire_once=True` makes the scheduler delete the row after the
+    first fire so the recurrence is harmless."""
+    return (
+        f"{fire_at_local.minute} {fire_at_local.hour} "
+        f"{fire_at_local.day} {fire_at_local.month} *"
+    )
+
+
+def _slug_for_delayed(prefix: str) -> str:
+    """Generate a unique-ish slug for a one-shot. We don't try hard for
+    human readability since the row is short-lived; embed a uuid suffix to
+    avoid colliding with another concurrent delayed message."""
+    suffix = uuid.uuid4().hex[:6]
+    base = re.sub(r"[^a-z0-9-]+", "-", prefix.lower()).strip("-")[:32] or "delayed"
+    return f"{base}-{suffix}"
+
+
+async def _send_delayed_message(
+    text: str,
+    delay_minutes: int | None = None,
+    at: str | None = None,
+    timezone: str | None = None,
+    destination_type: str = "dm",
+    destination_slack_id: str | None = None,
+    label: str | None = None,
+) -> str:
+    workspace_id = _ctx_workspace_id()
+    user_id = _ctx_user_id()
+    if workspace_id is None or user_id is None:
+        return "Error: no hay contexto de workspace/usuario."
+
+    if not text or not text.strip():
+        return "Necesito el texto del mensaje a enviar."
+
+    # When/where logic. Either `delay_minutes` or `at` must be given (not
+    # both). `at` is parsed in the resolved tz.
+    if delay_minutes is None and not at:
+        return (
+            "Decime cuándo: pasame `delay_minutes` (ej: 5) o `at` con un ISO "
+            "datetime (ej: '2026-05-31 09:00')."
+        )
+    if delay_minutes is not None and at:
+        return "Pasame `delay_minutes` O `at`, no ambos."
+
+    # Resolve tz from explicit arg -> Slack profile -> UTC. Same chain as
+    # create_scheduled_task.
+    async with get_session() as session:
+        slack_tz = await db_repo.get_slack_tz_for_app_user(session, user_id)
+    resolved_tz = resolve_timezone(timezone, fallback_slack_tz=slack_tz)
+
+    if delay_minutes is not None:
+        if delay_minutes < 1:
+            return "El delay mínimo es 1 minuto."
+        if delay_minutes > 60 * 24 * 30:
+            return "Pasaste un delay muy grande (>30 días). Usá `at` si querés algo así."
+        fire_at_utc = datetime.now(dt_tz.utc) + timedelta(minutes=delay_minutes)
+    else:
+        fire_at_utc = _parse_at_local(at, resolved_tz)
+        if fire_at_utc is None:
+            return (
+                f"No entendí `at={at!r}`. Usá ISO 'YYYY-MM-DD HH:MM' (en la "
+                f"timezone del usuario, ej: '2026-05-31 09:00')."
+            )
+        if fire_at_utc <= datetime.now(dt_tz.utc) + timedelta(seconds=30):
+            return (
+                "Ese momento ya pasó (o está demasiado cerca). Si querés "
+                "mandarlo ahora, decímelo y lo mando directo sin scheduler."
+            )
+
+    fire_at_local = fire_at_utc.astimezone(ZoneInfo(resolved_tz))
+    cron_spec = _fire_at_to_cron(fire_at_local)
+
+    # Default destination to DM with caller.
+    if not destination_slack_id:
+        if destination_type == "dm":
+            destination_slack_id = await _calling_slack_user_id(user_id)
+            if not destination_slack_id:
+                return "No pude resolver tu Slack user id. Decime el ID o reinstalá el bot."
+        else:
+            return (
+                "Para mandar a un canal necesito el channel id (CXXX...). "
+                "Decime en qué canal."
+            )
+
+    name = _slug_for_delayed(label or "msg")
+
+    try:
+        task = await repo.create_task(
+            repo.CreateTaskInput(
+                workspace_id=workspace_id,
+                created_by_user_id=user_id,
+                name=name,
+                # The "prompt" for a delayed message IS the literal text to
+                # send. The scheduler feeds this into run_agent as the seed
+                # user message; the agent is instructed (via system prompt)
+                # to just deliver the text verbatim when the prompt looks
+                # like a literal message rather than a task description.
+                prompt=text.strip(),
+                cron_spec=cron_spec,
+                timezone=resolved_tz,
+                scope="local",
+                destination_type=destination_type,  # type: ignore[arg-type]
+                destination_slack_id=destination_slack_id,
+                fire_once=True,
+            )
+        )
+    except repo.TaskValidationError as exc:
+        return str(exc)
+    except repo.ScheduledTaskError as exc:
+        return f"No pude programar el mensaje: {exc}"
+
+    return (
+        f"✓ Programado: te lo mando el "
+        f"{fire_at_local.strftime('%Y-%m-%d %H:%M')} ({resolved_tz}). "
+        f"Si querés cancelarlo, decime `borrá {task.name}`."
+    )
+
+
+_SEND_DELAYED_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "text": {
+            "type": "string",
+            "description": (
+                "Texto literal del mensaje a enviar. NO es un prompt para que "
+                "el agente actúe; es el mensaje que va a llegarle al destino."
+            ),
+        },
+        "delay_minutes": {
+            "type": "integer",
+            "description": (
+                "Cuántos minutos esperar desde AHORA. Usá esto cuando el "
+                "usuario diga 'en N minutos / en una hora'. Mínimo 1, máximo "
+                "30 días en minutos (43200)."
+            ),
+            "minimum": 1,
+        },
+        "at": {
+            "type": "string",
+            "description": (
+                "Hora absoluta en formato 'YYYY-MM-DD HH:MM' (24h) en la "
+                "timezone del usuario. Usá esto para 'mañana a las 9' o "
+                "'el 15 de junio a las 14:00'. Pasame `delay_minutes` O `at`, "
+                "no ambos."
+            ),
+        },
+        "timezone": {
+            "type": "string",
+            "description": (
+                "OPCIONAL. IANA tz o alias ('hora Col'). Si OMITÍS, usa la "
+                "tz del perfil de Slack del usuario actual."
+            ),
+        },
+        "destination_type": {
+            "type": "string",
+            "enum": ["channel", "dm"],
+            "description": "Por default 'dm' al usuario actual.",
+        },
+        "destination_slack_id": {
+            "type": "string",
+            "description": (
+                "OPCIONAL para 'dm' (default = caller). Para 'channel' o para "
+                "DM a OTRA persona, pasame el id (resolvelo con find_slack_user "
+                "si solo tenés el nombre)."
+            ),
+        },
+        "label": {
+            "type": "string",
+            "description": (
+                "OPCIONAL. Tag corto para identificar la task en logs / web "
+                "(ej: 'ping-alberto'). Si no pasás nada, uso 'msg-XXXXXX'."
+            ),
+        },
+    },
+    "required": ["text"],
+}
+
+
+register(
+    Tool(
+        name="send_delayed_message",
+        description=(
+            "Schedule a ONE-SHOT message to be sent later. Use this -- NOT "
+            "create_scheduled_task -- whenever the user says 'en N minutos', "
+            "'mañana a las 9', 'el 15 a las 14:00', or anything that's a "
+            "single future delivery (not a recurring schedule).\n\n"
+            "Examples:\n"
+            "  - 'mandale a Alberto en 5 min que avanza bien'\n"
+            "    -> find_slack_user('Alberto') -> send_delayed_message(\n"
+            "       text='Sam dice que avanza bien',\n"
+            "       delay_minutes=5,\n"
+            "       destination_type='dm',\n"
+            "       destination_slack_id=<Alberto U-id>)\n"
+            "  - 'recordame mañana a las 9 revisar el reporte'\n"
+            "    -> send_delayed_message(\n"
+            "       text='Recordatorio: revisar el reporte',\n"
+            "       at='2026-05-31 09:00')\n"
+            "       (destination defaults to caller's DM, tz to caller's tz)\n\n"
+            "Confirm with the user before calling (show the planned time + "
+            "destination + text). DO NOT use create_scheduled_task for "
+            "one-shot delays -- that creates a recurring cron task."
+        ),
+        input_schema=_SEND_DELAYED_SCHEMA,
+        handler=_send_delayed_message,
     )
 )
 

@@ -11,7 +11,11 @@ import structlog
 from anthropic import AsyncAnthropic
 from langfuse import get_client
 
-from app.agent.context import channel_roster_var, skills_context_var
+from app.agent.context import (
+    calling_user_identity_var,
+    channel_roster_var,
+    skills_context_var,
+)
 from app.agent.tools import anthropic_tool_specs
 from app.config import get_settings
 
@@ -122,10 +126,14 @@ _langfuse = get_client()
 
 def _system_blocks() -> list[dict]:
     # Static prompt is cached; per-run, volatile context (skills list + channel
-    # roster) is appended after (uncached) so the cached prefix stays stable.
+    # roster + calling-user identity) is appended after (uncached) so the
+    # cached prefix stays stable.
     blocks: list[dict] = [
         {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
     ]
+    identity = calling_user_identity_var.get()
+    if identity:
+        blocks.append({"type": "text", "text": identity})
     skills = skills_context_var.get()
     if skills:
         blocks.append({"type": "text", "text": skills})

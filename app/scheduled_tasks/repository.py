@@ -399,6 +399,11 @@ class CreateTaskInput:
     scope: Literal["local"]  # v1: only 'local' from the tool path
     destination_type: Literal["channel", "dm"]
     destination_slack_id: str
+    # True only for one-shot delayed messages (created via
+    # `send_delayed_message`). When set, the cadence-floor validation is
+    # skipped (a one-shot has no consecutive fires) and the scheduler
+    # deletes the row after the first successful fire.
+    fire_once: bool = False
 
 
 async def create_task(payload: CreateTaskInput) -> ScheduledTask:
@@ -411,10 +416,23 @@ async def create_task(payload: CreateTaskInput) -> ScheduledTask:
             "números y guiones; entre 2 y 64 chars, sin guion al inicio/fin)."
         )
 
-    # Cron + tz validation: tz must be IANA, cron must parse and respect the
-    # min cadence. The tool layer already passed us an IANA name; we revalidate
-    # here so direct callers (tests) can't bypass.
-    validate_cron_spec(payload.cron_spec, payload.timezone)
+    # Cron + tz validation: tz must be IANA, cron must parse. For recurring
+    # tasks we also enforce the 5-minute cadence floor; for one-shot
+    # (fire_once) tasks the cadence is meaningless (the row gets deleted
+    # after the first fire), so we just check parse-ability.
+    if payload.fire_once:
+        if not croniter.is_valid(payload.cron_spec):
+            raise TaskValidationError(
+                f"Cron `{payload.cron_spec}` no es válido."
+            )
+        try:
+            ZoneInfo(payload.timezone)
+        except Exception as exc:
+            raise TaskValidationError(
+                f"Timezone `{payload.timezone}` no es válido."
+            ) from exc
+    else:
+        validate_cron_spec(payload.cron_spec, payload.timezone)
     next_run = compute_next_run_at(payload.cron_spec, payload.timezone)
 
     async with get_session() as session:
@@ -445,6 +463,7 @@ async def create_task(payload: CreateTaskInput) -> ScheduledTask:
             destination_slack_id=payload.destination_slack_id,
             is_paused=False,
             next_run_at=next_run,
+            fire_once=payload.fire_once,
         )
         session.add(task)
         await session.commit()
@@ -868,7 +887,12 @@ async def record_fire_finished(
     """Update the row after the agent run completes. Opens its own session
     (the scheduler's claim transaction is long gone by the time the agent
     finishes). Best-effort: a failure here only loses observability, not
-    the run itself."""
+    the run itself.
+
+    Special case for `fire_once` rows: on success, DELETE the row instead
+    of updating it. The task is done; there's no next_run_at and no value
+    in keeping a stale "last_run_status=success" lingering forever. On
+    failure, keep the row so the user can inspect / retry / debug."""
     assert status in ("success", "failed")
     if summary and len(summary) > MAX_LAST_RUN_SUMMARY_LEN:
         summary = summary[:MAX_LAST_RUN_SUMMARY_LEN].rstrip() + "…"
@@ -882,6 +906,16 @@ async def record_fire_finished(
         ).scalar_one_or_none()
         if row is None:
             log.warning("scheduled_task_finish_row_missing", task_id=str(task_id))
+            return
+        if status == "success" and row.fire_once:
+            log.info(
+                "scheduled_task_fire_once_deleted",
+                task_id=str(task_id),
+                workspace_id=str(row.workspace_id),
+                name=row.name,
+            )
+            await session.delete(row)
+            await session.commit()
             return
         row.last_run_status = status
         row.last_run_error = error if status == "failed" else None
