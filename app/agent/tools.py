@@ -590,3 +590,188 @@ register(Tool(
     handler=_update_space_binding,
     # Reversible: another update_space_binding call restores the previous query.
 ))
+
+
+# --------------------------------------------------------------------------- #
+# Natural-language skill management. These tools exist so the agent can handle
+# "lista mis skills", "instalá X", "desinstalá Y" without depending on Slack
+# slash commands. Slash commands are fragile across workspaces (manifest
+# propagation, OAuth lifecycle, etc.); the LLM-driven path is robust because
+# it only needs DM message delivery, which works wherever the bot is installed.
+# --------------------------------------------------------------------------- #
+
+
+def _current_user_id():
+    """Resolve the current AppUser.id (UUID) from contextvars. Returns None if
+    no user context is set (shouldn't happen during a real run, but defensive
+    so tools don't crash on missing context)."""
+    import uuid as _uuid
+    from app.agent.context import app_user_id_var
+    s = app_user_id_var.get()
+    if not s:
+        return None
+    try:
+        return _uuid.UUID(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _current_workspace_id():
+    """Resolve the current workspace_id (UUID) from contextvars."""
+    import uuid as _uuid
+    from app.agent.context import workspace_id_var
+    s = workspace_id_var.get()
+    if not s:
+        return None
+    if isinstance(s, _uuid.UUID):
+        return s
+    try:
+        return _uuid.UUID(str(s))
+    except (ValueError, TypeError):
+        return None
+
+
+async def _list_my_skills() -> str:
+    """List the skills installed for the current user. Returns a human-readable
+    block with name, description, and activation. Used when the user says
+    'lista mis skills', 'qué skills tengo', etc."""
+    from app.skills import registry as _sk
+    user_id = _current_user_id()
+    if user_id is None:
+        return "Error: no hay contexto de usuario."
+    installs = await _sk.list_for_user(user_id)
+    if not installs:
+        return (
+            "No tenés skills instaladas todavía. Subí una mandándome un archivo "
+            "`.md` en este DM y decime 'instalala como skill'."
+        )
+    lines = [f"Tenés *{len(installs)}* skills instaladas:"]
+    for i in installs:
+        s = i.skill
+        lines.append(
+            f"• `{s.name}` [{i.effective_activation}] — {s.description[:120]}"
+        )
+    return "\n".join(lines)
+
+
+async def _list_workspace_skills() -> str:
+    """List ALL skills in the workspace, marking which the current user has
+    installed vs not. Useful when the user wants to discover what's available
+    to install."""
+    from app.skills import registry as _sk
+    user_id = _current_user_id()
+    workspace_id = _current_workspace_id()
+    if user_id is None or workspace_id is None:
+        return "Error: no hay contexto de usuario/workspace."
+    all_skills = await _sk.list_for_workspace(workspace_id)
+    if not all_skills:
+        return "No hay skills en este workspace todavía."
+    user_installs = await _sk.list_for_user(user_id)
+    installed_names = {i.skill.name for i in user_installs}
+    lines = [f"Skills del workspace ({len(all_skills)} total):"]
+    for s in all_skills:
+        marker = "✓ instalada" if s.name in installed_names else "○ disponible"
+        lines.append(f"• `{s.name}` [{marker}] — {s.description[:120]}")
+    lines.append(
+        "\nPara instalar una que no tengas, decime 'instalá `nombre`'."
+    )
+    return "\n".join(lines)
+
+
+async def _install_skill_by_name(name: str) -> str:
+    """Install an existing workspace skill for the current user. The skill
+    must already exist in the workspace (it doesn't create new ones; for that
+    use upload_skill_from_attachment)."""
+    from app.skills import registry as _sk
+    user_id = _current_user_id()
+    workspace_id = _current_workspace_id()
+    if user_id is None or workspace_id is None:
+        return "Error: no hay contexto de usuario/workspace."
+    skill = await _sk.get_skill_in_workspace(workspace_id, name)
+    if skill is None:
+        # Be helpful: list what IS available so the LLM can suggest a close match
+        # or the user can pick.
+        available = await _sk.list_for_workspace(workspace_id)
+        names = ", ".join(f"`{s.name}`" for s in available[:10])
+        suffix = f" Tenemos: {names}." if names else ""
+        return (
+            f"No encuentro una skill llamada `{name}` en este workspace.{suffix}"
+        )
+    await _sk.install_for_user(user_id=user_id, skill_id=skill.id)
+    return (
+        f"✓ Instalé `{skill.name}` para vos. "
+        f"Activation: `{skill.activation_default}`. "
+        f"{skill.description[:200]}"
+    )
+
+
+async def _uninstall_skill_by_name(name: str) -> str:
+    """Remove a skill from the current user's installs (does NOT delete the
+    workspace skill; other users keep it). Idempotent."""
+    from app.skills import registry as _sk
+    user_id = _current_user_id()
+    if user_id is None:
+        return "Error: no hay contexto de usuario."
+    install = await _sk.get_skill_for_user(user_id, name)
+    if install is None:
+        return f"No tenés `{name}` instalada, no hay nada para remover."
+    await _sk.uninstall_for_user(user_id=user_id, skill_id=install.skill.id)
+    return f"✓ Removí `{name}` de tus skills. Podés reinstalarla cuando quieras."
+
+
+register(Tool(
+    name="list_my_skills",
+    description=(
+        "List the skills currently installed for THIS user. Use when the user "
+        "says 'lista mis skills', 'qué skills tengo', 'what skills do I have', "
+        "'cuáles skills uso', etc."
+    ),
+    input_schema={"type": "object", "properties": {}, "required": []},
+    handler=_list_my_skills,
+))
+register(Tool(
+    name="list_workspace_skills",
+    description=(
+        "List ALL skills available in the workspace, marking which ones the "
+        "current user has installed vs not. Use when the user asks 'qué skills "
+        "hay', 'qué puedo instalar', 'cuáles están disponibles', 'browse skills'."
+    ),
+    input_schema={"type": "object", "properties": {}, "required": []},
+    handler=_list_workspace_skills,
+))
+register(Tool(
+    name="install_skill",
+    description=(
+        "Install an EXISTING workspace skill for the current user by name. "
+        "Does NOT create a new skill from a file; for that the user must "
+        "send a .md attachment in DM. Use when the user says 'instalá X', "
+        "'install X skill', 'agregame Y'."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Exact skill name (kebab-case slug)",
+            },
+        },
+        "required": ["name"],
+    },
+    handler=_install_skill_by_name,
+))
+register(Tool(
+    name="uninstall_skill",
+    description=(
+        "Remove a skill from the current user's installs. Does NOT delete the "
+        "skill from the workspace. Use when the user says 'desinstalá X', "
+        "'sacame Y', 'remove X skill', 'quitamela'."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Skill name to uninstall"},
+        },
+        "required": ["name"],
+    },
+    handler=_uninstall_skill_by_name,
+))

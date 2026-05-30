@@ -241,19 +241,30 @@ def register_handlers(app: AsyncApp) -> None:
         if bot_user_id and f"<@{bot_user_id}>" in text:
             return  # handled by app_mention
 
-        # Skill upload precursor interception: if the user ran `/misterr skill
-        # upload` within the last 5 min AND this message brings a `.md` file,
-        # we process it as a skill (not as agent content) and stop here. The
-        # skill_commands module decides whether the file looks like markdown.
+        # Skill upload interception. Two trigger paths, both accepted:
+        # (a) Precursor: user ran `/misterr skill upload` within the last 5 min.
+        # (b) Natural language: user sent a `.md` in a DM with the bot (no
+        #     precursor required). The slash command path is fragile across
+        #     workspaces (manifest propagation), the DM-with-md path is robust
+        #     because it only depends on bot DMs working, which they do
+        #     wherever the app is installed. The preview Block Kit still gates
+        #     the actual install with Install/Edit/Cancel buttons, so an
+        #     accidental .md attached in a DM is one cancel-click away.
         files = event.get("files") or []
         team_id_pre = body.get("team_id") or event.get("team")
         user_pre = event.get("user")
+        channel_type_pre = event.get("channel_type")
+        has_md = sub == "file_share" and any(_looks_like_md(f) for f in files)
+        is_dm = channel_type_pre == "im"
+        precursor_pending = bool(
+            team_id_pre and user_pre
+            and is_skill_upload_pending(team_id_pre, user_pre)
+        )
         if (
-            sub == "file_share"
+            has_md
             and team_id_pre
             and user_pre
-            and is_skill_upload_pending(team_id_pre, user_pre)
-            and any(_looks_like_md(f) for f in files)
+            and (precursor_pending or is_dm)
         ):
             # Spawn one task per .md file. Each gets its own preview ephemeral
             # so the user can independently install / edit / cancel each. The
