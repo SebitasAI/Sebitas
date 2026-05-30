@@ -25,6 +25,7 @@ dependencies = [
     "youtube-transcript-api>=1.2.4",
     "cryptography>=48.0.0",
     "pyyaml>=6.0",
+    "croniter>=2.0",
 ]
 
 # This is an application, not a library: uv manages the venv + deps but does not

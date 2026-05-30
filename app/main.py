@@ -22,6 +22,8 @@ from app.integrations.connect import (
 )
 from app.integrations.webhook import router as pipedream_webhook_router
 from app.logging import configure_logging
+from app.scheduled_tasks.repository import seed_system_tasks_for_all_workspaces
+from app.scheduled_tasks.scheduler import run_scheduler_loop
 from app.skills.preview_store import cleanup_expired as cleanup_expired_previews
 from app.slack.app import build_socket_handler, init_slack_app
 from app.slack.roster import periodic_refresh_loop as roster_periodic
@@ -109,6 +111,18 @@ async def lifespan(_: FastAPI):
             log.warning("resume_pending_polls_failed", error=str(exc))
         integration_resume_task = asyncio.create_task(integration_resume_loop())
 
+        # Scheduled tasks (slice T-1): idempotently re-seed the two system
+        # tasks for every installed workspace at startup, then spawn the
+        # scheduler loop that fires due tasks on a 30s tick. Seeding is
+        # ON CONFLICT-safe so concurrent replicas don't duplicate rows.
+        try:
+            inserted = await seed_system_tasks_for_all_workspaces()
+            if inserted:
+                log.info("scheduled_task_seed_on_startup", inserted=inserted)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("scheduled_task_seed_startup_failed", error=str(exc))
+        scheduled_task_loop = asyncio.create_task(run_scheduler_loop())
+
         try:
             yield
         finally:
@@ -116,6 +130,7 @@ async def lifespan(_: FastAPI):
             roster_task.cancel()
             preview_cleanup_task.cancel()
             integration_resume_task.cancel()
+            scheduled_task_loop.cancel()
             try:
                 await handler.close_async()
             except Exception as exc:  # noqa: BLE001

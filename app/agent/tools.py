@@ -775,3 +775,12 @@ register(Tool(
     },
     handler=_uninstall_skill_by_name,
 ))
+
+
+# --------------------------------------------------------------------------- #
+# Scheduled tasks (slice T-1). Imported for side effects so the six
+# `create/list/update/delete/pause/resume_scheduled_task` tools register at
+# module load. Domain logic lives in `app.scheduled_tasks.*`; this just wires
+# the tool entries into the global registry.
+# --------------------------------------------------------------------------- #
+from app.scheduled_tasks import agent_tools as _scheduled_task_tools  # noqa: E402, F401

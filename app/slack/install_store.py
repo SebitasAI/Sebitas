@@ -26,6 +26,7 @@ from sqlalchemy import select
 
 from app.db.models import Workspace
 from app.db.session import get_session
+from app.scheduled_tasks.repository import seed_system_tasks_for_workspace
 from app.slack.crypto import TokenCryptoError, decrypt_token, encrypt_token
 from app.slack.tokens import invalidate_token_cache
 
@@ -73,6 +74,8 @@ class MisterrInstallationStore(AsyncInstallationStore):
                 ws.name = installation.team_name
             ws.installed_at = datetime.now(timezone.utc).replace(tzinfo=None)
             await session.commit()
+            ws_id = ws.id
+            ws_home_channel = ws.bot_home_channel_id
         invalidate_token_cache()
         log.info(
             "workspace_installed",
@@ -81,6 +84,28 @@ class MisterrInstallationStore(AsyncInstallationStore):
             bot_user_id=installation.bot_user_id,
             scopes_count=len(scopes) if isinstance(scopes, list) else None,
         )
+        # Seed Misterr's system scheduled tasks (workflow-discovery + daily-brief)
+        # for this workspace. Idempotent via INSERT ... ON CONFLICT so re-installs
+        # don't duplicate rows. bot_home_channel_id may still be NULL here -- the
+        # rows are seeded anyway and the scheduler treats NULL destination as a
+        # logged failure until admin configures the channel.
+        try:
+            seeded = await seed_system_tasks_for_workspace(ws_id, ws_home_channel)
+            log.info(
+                "workspace_install_seed_complete",
+                workspace_id=str(ws_id),
+                team_id=team_id,
+                seeded=seeded,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Don't fail the install because seeding failed; the startup hook
+            # in main.py retries idempotently.
+            log.warning(
+                "workspace_install_seed_failed",
+                workspace_id=str(ws_id),
+                team_id=team_id,
+                error=str(exc),
+            )
 
     async def async_save_bot(self, bot: Bot) -> None:
         # Bolt sometimes saves just the bot (e.g. after a token rotation). The
