@@ -255,8 +255,21 @@ class ComposioProvider(IntegrationProvider):
     # cards correctly. Requires a 2-step flow (POST empty, PUT with dashcards)
     # because Metabase's POST /api/dashboard doesn't accept inline dashcards.
     _COMPOSIO_BROKEN_ACTIONS_WITH_DIRECT_FALLBACK = {
+        # Write actions where Composio's wrapper strips required fields:
         "METABASE_POST_API_CARD": ("POST", "/api/card", "metabase"),
         "METABASE_CREATE_DASHBOARD_SAVE_COLLECTION": ("CUSTOM_DASHBOARD", "", "metabase"),
+        # Read + execute actions: routed here for workspaces with direct
+        # credentials but no Composio connected_account (e.g. Simetrik, where
+        # we backfilled the API key into integration_connection rather than
+        # going through Composio's OAuth flow). For workspaces WITH a Composio
+        # connection, HTTP-direct still works and avoids the connection
+        # round-trip; cost is symmetric.
+        "METABASE_POST_API_DATASET": ("POST", "/api/dataset", "metabase"),
+        "METABASE_GET_API_SEARCH": ("GET", "/api/search", "metabase"),
+        "METABASE_GET_API_CARD": ("GET", "/api/card", "metabase"),
+        "METABASE_GET_API_COLLECTION": ("GET", "/api/collection", "metabase"),
+        "METABASE_GET_API_DATABASE": ("GET", "/api/database", "metabase"),
+        "METABASE_GET_API_USER_CURRENT": ("GET", "/api/user/current", "metabase"),
     }
 
     async def _get_metabase_fallback_creds(self, workspace_id: str) -> tuple[str, str] | None:
@@ -309,9 +322,12 @@ class ComposioProvider(IntegrationProvider):
         path: str,
         body: dict | None,
     ) -> dict:
-        """Direct call against the Metabase REST API with the env-configured
-        API key. Used only for actions in the bypass list above; everything
-        else still goes through Composio."""
+        """Direct call against the Metabase REST API with the stored API key.
+        Method dispatch:
+          GET  -> body is sent as query-string params (not JSON body)
+          POST / PUT / DELETE -> body is sent as JSON
+        Used for the bypass allowlist when direct credentials are configured;
+        Composio is still the default for actions not in the allowlist."""
         api_key, base_url = creds
         # base_url often ends in /api; our `path` is /api/...; collapse to avoid /api/api.
         base = base_url.rstrip("/")
@@ -325,8 +341,17 @@ class ComposioProvider(IntegrationProvider):
             "Accept": "application/json",
         }
         timeout = aiohttp.ClientTimeout(total=30)
+        # GET passes the dict as query-string params; POST/PUT/DELETE pass it as JSON body.
+        kwargs: dict = {"headers": headers}
+        if method.upper() == "GET":
+            if body:
+                # aiohttp's `params` doesn't accept list values directly; flatten.
+                cleaned = {k: v for k, v in body.items() if v is not None}
+                kwargs["params"] = cleaned
+        else:
+            kwargs["json"] = body
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.request(method, url, headers=headers, json=body) as resp:
+            async with session.request(method, url, **kwargs) as resp:
                 text = await resp.text()
                 if resp.status >= 400:
                     log.warning(
@@ -443,8 +468,14 @@ class ComposioProvider(IntegrationProvider):
                     if method == "CUSTOM_DASHBOARD":
                         result = await self._create_dashboard_two_step(creds, params)
                     else:
-                        body = self._normalise_metabase_card_body(params) \
-                            if action_id == "METABASE_POST_API_CARD" else params
+                        # Per-action body normalisation. POST_API_CARD needs
+                        # database_id copied from dataset_query.database; the
+                        # rest pass params through (GETs become query string
+                        # in _http_direct_metabase, POSTs send JSON body).
+                        if action_id == "METABASE_POST_API_CARD":
+                            body = self._normalise_metabase_card_body(params)
+                        else:
+                            body = params
                         result = await self._http_direct_metabase(creds, method, path, body)
                     log.info(
                         "metabase_direct_action_ok",
