@@ -6,6 +6,10 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 const isPublicRoute = createRouteMatcher([
   "/sign-in(.*)",
   "/sign-up(.*)",
+  // SSO callback lands here after Slack OAuth; Clerk's
+  // AuthenticateWithRedirectCallback needs to run before the user has a
+  // session, so this path must not be gated.
+  "/sso-callback(.*)",
 ]);
 
 export default clerkMiddleware(async (auth, request) => {
