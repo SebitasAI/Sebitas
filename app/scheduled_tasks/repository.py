@@ -907,12 +907,20 @@ async def record_fire_finished(
         if row is None:
             log.warning("scheduled_task_finish_row_missing", task_id=str(task_id))
             return
-        if status == "success" and row.fire_once:
+        # fire_once tasks are by definition one-shot. Delete the row after
+        # the first attempt regardless of outcome -- otherwise a failed
+        # one-shot keeps its (already-advanced-to-next-year) next_run_at
+        # and silently retries 12 months later. The user gets the failure
+        # via the structlog event + langfuse trace; not worth keeping the
+        # row in the DB just to surface it later.
+        if row.fire_once:
             log.info(
                 "scheduled_task_fire_once_deleted",
                 task_id=str(task_id),
                 workspace_id=str(row.workspace_id),
                 name=row.name,
+                outcome=status,
+                error=error if status == "failed" else None,
             )
             await session.delete(row)
             await session.commit()
