@@ -247,6 +247,13 @@ class IntegrationConnection(Base):
     # In-conversation connect flow: the paused run to auto-resume once connected.
     pending_run_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     pending_ctx: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Per-tenant direct credentials for apps where the upstream provider's
+    # wrapper is broken (Composio strips required fields, etc.) and we have
+    # to bypass and call the app's REST API ourselves. JSON shape depends on
+    # the app (Metabase: {api_key, base_url}, others TBD). Fernet-encrypted
+    # at rest with WORKSPACE_TOKEN_ENCRYPTION_KEY; null for connections that
+    # don't need direct access.
+    direct_credentials_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
 
 

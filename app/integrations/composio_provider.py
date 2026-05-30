@@ -259,18 +259,48 @@ class ComposioProvider(IntegrationProvider):
         "METABASE_CREATE_DASHBOARD_SAVE_COLLECTION": ("CUSTOM_DASHBOARD", "", "metabase"),
     }
 
-    def _get_metabase_fallback_creds(self, workspace_id: str) -> tuple[str, str] | None:
-        """Return (api_key, base_url) iff the workspace matches the configured
-        fallback tenant. None means 'no override, use Composio'."""
+    async def _get_metabase_fallback_creds(self, workspace_id: str) -> tuple[str, str] | None:
+        """Return (api_key, base_url) for the per-tenant Metabase fallback,
+        reading from the encrypted `direct_credentials_encrypted` column on
+        `integration_connection`. Falls back to the legacy env-var path
+        (METABASE_FALLBACK_*) when the column is empty, to keep PR #54-era
+        single-tenant setups working during the transition. The env path is
+        scheduled to go away once the column is the source of truth for all
+        live tenants.
+        """
+        import uuid as _uuid
+        from app.integrations.direct_credentials import get_direct_credentials
+
+        # DB-first path (the long-term answer; scales to N tenants without
+        # touching env vars).
+        try:
+            ws_uuid = _uuid.UUID(workspace_id)
+        except (ValueError, TypeError):
+            ws_uuid = None
+        if ws_uuid is not None:
+            creds = await get_direct_credentials(ws_uuid, "metabase")
+            if isinstance(creds, dict):
+                api_key = (creds.get("api_key") or "").strip()
+                base_url = (creds.get("base_url") or "").strip()
+                if api_key and base_url:
+                    return api_key, base_url
+
+        # Env-var fallback (legacy; remove once all live tenants are
+        # migrated into the DB column). Only matches when the configured
+        # workspace_id equals the caller.
         s = get_settings()
         target_ws = (s.metabase_fallback_workspace_id or "").strip()
-        if not target_ws or target_ws != workspace_id:
-            return None
-        api_key = (s.metabase_fallback_api_key or "").strip()
-        base_url = (s.metabase_fallback_base_url or "").strip()
-        if not api_key or not base_url:
-            return None
-        return api_key, base_url
+        if target_ws and target_ws == workspace_id:
+            api_key = (s.metabase_fallback_api_key or "").strip()
+            base_url = (s.metabase_fallback_base_url or "").strip()
+            if api_key and base_url:
+                log.info(
+                    "metabase_fallback_via_env_var",
+                    workspace_id=workspace_id,
+                    msg="DB column empty; using legacy env var. Backfill.",
+                )
+                return api_key, base_url
+        return None
 
     async def _http_direct_metabase(
         self,
@@ -406,7 +436,7 @@ class ComposioProvider(IntegrationProvider):
         # this specific action around Composio.
         bypass = self._COMPOSIO_BROKEN_ACTIONS_WITH_DIRECT_FALLBACK.get(action_id)
         if bypass is not None and bypass[2] == "metabase":
-            creds = self._get_metabase_fallback_creds(external_user_id)
+            creds = await self._get_metabase_fallback_creds(external_user_id)
             if creds is not None:
                 method, path, _ = bypass
                 try:
