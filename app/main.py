@@ -23,6 +23,7 @@ from app.integrations.connect import (
 )
 from app.api.scheduled_tasks import router as scheduled_tasks_router
 from app.api.skills import router as skills_router
+from app.api.team import router as team_router
 from app.auth.clerk_provisioning import provision_and_backfill_all_workspaces
 from app.integrations.webhook import router as pipedream_webhook_router
 from app.logging import configure_logging
@@ -178,6 +179,7 @@ app.include_router(spaces_internal_router)
 app.include_router(web_api_router)
 app.include_router(scheduled_tasks_router)
 app.include_router(skills_router)
+app.include_router(team_router)
 
 
 @app.get("/health")
