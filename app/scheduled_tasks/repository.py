@@ -34,7 +34,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ScheduledTask, Workspace
+from app.db.models import ScheduledTask, ScheduledTaskRun, Workspace
 from app.db.session import get_session
 from app.scheduled_tasks.system_defaults import ALL_SYSTEM_TASKS, SystemTaskDefault
 from app.scheduled_tasks.timezone import resolve_timezone
@@ -51,6 +51,9 @@ MIN_CRON_INTERVAL_S: int = 300
 # future schema bump only changes one constant.
 MAX_LAST_RUN_ERROR_LEN: int = 1000
 MAX_LAST_RUN_SUMMARY_LEN: int = 2000
+# Per-run output column cap. Higher than summary because the run log stores
+# the full agent reply / literal text, not a condensed summary.
+MAX_RUN_OUTPUT_LEN: int = 4000
 
 # UUID v1-v5 regex. Anchored. Used by the resolver to decide UUID-lookup vs
 # slug-lookup; cheap enough to run on every call.
@@ -888,15 +891,18 @@ async def record_fire_finished(
     summary: str | None = None,
     error: str | None = None,
 ) -> None:
-    """Update the row after the agent run completes. Opens its own session
-    (the scheduler's claim transaction is long gone by the time the agent
-    finishes). Best-effort: a failure here only loses observability, not
-    the run itself.
+    """Update the row after the agent run / literal post completes. Opens
+    its own session (the scheduler's claim transaction is long gone by
+    the time the agent finishes). Best-effort: a failure here only loses
+    observability, not the run itself.
 
-    Special case for `fire_once` rows: on success, DELETE the row instead
-    of updating it. The task is done; there's no next_run_at and no value
-    in keeping a stale "last_run_status=success" lingering forever. On
-    failure, keep the row so the user can inspect / retry / debug."""
+    For fire_once tasks: we DO NOT delete the row anymore (was the old
+    behavior). Instead we set `next_run_at=NULL` so the scheduler ignores
+    the row going forward, and keep `last_run_status` etc. populated.
+    Reason: the web app's expandable card needs the row to exist so the
+    user can drill into the run history (`scheduled_task_run` rows are
+    keyed by `task_id` and would orphan with task_id=NULL).
+    """
     assert status in ("success", "failed")
     if summary and len(summary) > MAX_LAST_RUN_SUMMARY_LEN:
         summary = summary[:MAX_LAST_RUN_SUMMARY_LEN].rstrip() + "…"
@@ -911,29 +917,118 @@ async def record_fire_finished(
         if row is None:
             log.warning("scheduled_task_finish_row_missing", task_id=str(task_id))
             return
-        # fire_once tasks are by definition one-shot. Delete the row after
-        # the first attempt regardless of outcome -- otherwise a failed
-        # one-shot keeps its (already-advanced-to-next-year) next_run_at
-        # and silently retries 12 months later. The user gets the failure
-        # via the structlog event + langfuse trace; not worth keeping the
-        # row in the DB just to surface it later.
-        if row.fire_once:
-            log.info(
-                "scheduled_task_fire_once_deleted",
-                task_id=str(task_id),
-                workspace_id=str(row.workspace_id),
-                name=row.name,
-                outcome=status,
-                error=error if status == "failed" else None,
-            )
-            await session.delete(row)
-            await session.commit()
-            return
         row.last_run_status = status
         row.last_run_error = error if status == "failed" else None
         if status == "success" and summary is not None:
             row.last_run_summary = summary
+        if row.fire_once:
+            # Deactivate one-shot tasks after the (single) attempt so the
+            # scheduler ignores them. Row stays in the DB for log purposes.
+            row.next_run_at = None
+            log.info(
+                "scheduled_task_fire_once_completed",
+                task_id=str(task_id),
+                workspace_id=str(row.workspace_id),
+                name=row.name,
+                outcome=status,
+            )
         await session.commit()
+
+
+async def start_run(
+    *,
+    workspace_id: uuid.UUID,
+    task_id: uuid.UUID,
+    task_name: str,
+    started_at: datetime | None = None,
+) -> uuid.UUID:
+    """Insert a `scheduled_task_run` row with status='running' for the fire
+    we're about to dispatch. The id is returned so the dispatcher can
+    finalize it later with `finish_run`."""
+    started_at = started_at or datetime.now(timezone.utc)
+    new_id = uuid.uuid4()
+    async with get_session() as session:
+        session.add(
+            ScheduledTaskRun(
+                id=new_id,
+                task_id=task_id,
+                workspace_id=workspace_id,
+                task_name_snapshot=task_name,
+                started_at=started_at,
+                finished_at=None,
+                status="running",
+            )
+        )
+        await session.commit()
+    return new_id
+
+
+async def finish_run(
+    run_id: uuid.UUID,
+    *,
+    status: Literal["success", "failed"],
+    output: str | None = None,
+    error: str | None = None,
+) -> None:
+    """Finalize a previously-started run row with its outcome + output."""
+    assert status in ("success", "failed")
+    if output and len(output) > MAX_RUN_OUTPUT_LEN:
+        output = output[:MAX_RUN_OUTPUT_LEN].rstrip() + "…"
+    if error and len(error) > MAX_LAST_RUN_ERROR_LEN:
+        error = error[:MAX_LAST_RUN_ERROR_LEN].rstrip() + "…"
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                select(ScheduledTaskRun).where(ScheduledTaskRun.id == run_id)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            log.warning("scheduled_task_run_finish_missing", run_id=str(run_id))
+            return
+        row.status = status
+        row.output = output
+        row.error = error if status == "failed" else None
+        row.finished_at = datetime.now(timezone.utc)
+        await session.commit()
+
+
+async def list_runs_for_task(
+    workspace_id: uuid.UUID,
+    task_id_or_name: str,
+    *,
+    limit: int = 50,
+) -> list[ScheduledTaskRun]:
+    """Return the most recent runs of a task in the given workspace, newest
+    first. Works even for deleted tasks (task_id_or_name matches the
+    snapshot column when the parent row is gone)."""
+    async with get_session() as session:
+        task = None
+        try:
+            task = await resolve_task(session, workspace_id, task_id_or_name)
+        except TaskNotFound:
+            task = None
+
+        if task is not None:
+            stmt = (
+                select(ScheduledTaskRun)
+                .where(ScheduledTaskRun.task_id == task.id)
+                .order_by(ScheduledTaskRun.started_at.desc())
+                .limit(limit)
+            )
+        else:
+            # Fallback: caller passed a slug for a now-deleted task. Filter
+            # by snapshot name + workspace scoping.
+            stmt = (
+                select(ScheduledTaskRun)
+                .where(
+                    ScheduledTaskRun.workspace_id == workspace_id,
+                    ScheduledTaskRun.task_id.is_(None),
+                    ScheduledTaskRun.task_name_snapshot == task_id_or_name,
+                )
+                .order_by(ScheduledTaskRun.started_at.desc())
+                .limit(limit)
+            )
+        return list((await session.execute(stmt)).scalars().all())
 
 
 __all__ = [
@@ -967,4 +1062,9 @@ __all__ = [
     "claim_due_tasks",
     "record_fire_started",
     "record_fire_finished",
+    # Run history
+    "start_run",
+    "finish_run",
+    "list_runs_for_task",
+    "MAX_RUN_OUTPUT_LEN",
 ]

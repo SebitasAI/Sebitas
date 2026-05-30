@@ -35,7 +35,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any  # noqa: F401  (used in pending_args dict annotation)
 
 import structlog
 from slack_sdk.web.async_client import AsyncWebClient
@@ -86,6 +86,9 @@ class _PendingFire:
     previous_summary: str | None
     fire_once: bool
     prompt_is_literal: bool
+    # ID of the scheduled_task_run row already created at claim time. The
+    # dispatcher uses it to finalize the run with success/failure + output.
+    run_id: uuid.UUID
 
 
 # --------------------------------------------------------------------------- #
@@ -99,6 +102,7 @@ async def _tick(now_utc: datetime | None = None) -> int:
     failures must not kill the loop."""
     now_utc = now_utc or datetime.now(timezone.utc)
     pending: list[_PendingFire] = []
+    pending_args: list[dict[str, Any]] = []
     skipped_missing_destination: list[uuid.UUID] = []
 
     async with get_session() as session:
@@ -146,21 +150,25 @@ async def _tick(now_utc: datetime | None = None) -> int:
                 next_run_at=task.next_run_at.isoformat() if task.next_run_at else None,
                 timezone=task.timezone,
             )
-            pending.append(
-                _PendingFire(
-                    task_id=task.id,
-                    workspace_id=task.workspace_id,
-                    scope=task.scope,
-                    name=task.name,
-                    prompt=task.prompt,
-                    destination_type=task.destination_type,
-                    destination_slack_id=task.destination_slack_id,
-                    cron_spec=task.cron_spec,
-                    timezone=task.timezone,
-                    previous_summary=task.last_run_summary,
-                    fire_once=task.fire_once,
-                    prompt_is_literal=task.prompt_is_literal,
-                )
+            # Pre-capture values for the run-log row. We start the run
+            # outside the claim transaction (after commit) so we keep the
+            # row-lock window tight; the run insert is its own short tx.
+            pending_args.append(
+                {
+                    "task_id": task.id,
+                    "workspace_id": task.workspace_id,
+                    "scope": task.scope,
+                    "name": task.name,
+                    "prompt": task.prompt,
+                    "destination_type": task.destination_type,
+                    "destination_slack_id": task.destination_slack_id,
+                    "cron_spec": task.cron_spec,
+                    "timezone": task.timezone,
+                    "previous_summary": task.last_run_summary,
+                    "fire_once": task.fire_once,
+                    "prompt_is_literal": task.prompt_is_literal,
+                    "started_at": now_utc,
+                }
             )
 
         # Commit BEFORE dispatching anything: a row-state failure must not
@@ -171,6 +179,44 @@ async def _tick(now_utc: datetime | None = None) -> int:
         log.warning(
             "scheduled_task_missing_destination",
             task_id=str(task_id),
+        )
+
+    # Now that the scheduled_task rows are committed, insert a
+    # scheduled_task_run row per fire (status='running') and build the
+    # _PendingFire objects with the run_id attached. If the insert fails
+    # for any reason we skip that fire so the dispatcher doesn't run
+    # without a log row.
+    for args in pending_args:
+        try:
+            run_id = await repo.start_run(
+                workspace_id=args["workspace_id"],
+                task_id=args["task_id"],
+                task_name=args["name"],
+                started_at=args["started_at"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "scheduled_task_run_start_failed",
+                task_id=str(args["task_id"]),
+                error=str(exc)[:200],
+            )
+            continue
+        pending.append(
+            _PendingFire(
+                task_id=args["task_id"],
+                workspace_id=args["workspace_id"],
+                scope=args["scope"],
+                name=args["name"],
+                prompt=args["prompt"],
+                destination_type=args["destination_type"],
+                destination_slack_id=args["destination_slack_id"],
+                cron_spec=args["cron_spec"],
+                timezone=args["timezone"],
+                previous_summary=args["previous_summary"],
+                fire_once=args["fire_once"],
+                prompt_is_literal=args["prompt_is_literal"],
+                run_id=run_id,
+            )
         )
 
     for fire in pending:
@@ -188,14 +234,23 @@ async def _tick(now_utc: datetime | None = None) -> int:
 
 async def _dispatch_fire(fire: _PendingFire) -> None:
     """Execute a single fire end-to-end. Always lands on `record_fire_finished`
-    so the row reflects the outcome even when the agent run dies."""
+    + `finish_run` so both the scheduled_task row AND the per-run log
+    row reflect the outcome even when the agent run dies."""
     start = time.monotonic()
     status: str = "failed"
     summary: str | None = None
+    output: str | None = None
     error: str | None = None
     try:
         summary, error = await _execute_fire(fire)
         status = "success" if error is None else "failed"
+        # `output` for the run log: for literal delivery it's the verbatim
+        # text we posted; for agentic runs it's the last assistant reply
+        # (already what `summary` carries).
+        if fire.prompt_is_literal:
+            output = fire.prompt
+        else:
+            output = summary
     except Exception as exc:  # noqa: BLE001
         # The runner has its own user-facing error handler; if we land here,
         # something deeper broke (e.g. token decrypt failure).
@@ -207,6 +262,9 @@ async def _dispatch_fire(fire: _PendingFire) -> None:
         status = "failed"
         error = str(exc)[: repo.MAX_LAST_RUN_ERROR_LEN]
     finally:
+        # Update parent task row (last_run_status etc., and deactivate
+        # fire_once rows). Best-effort; we still write the run log even
+        # if this fails.
         try:
             await repo.record_fire_finished(
                 fire.task_id, status=status, summary=summary, error=error
@@ -217,9 +275,22 @@ async def _dispatch_fire(fire: _PendingFire) -> None:
                 task_id=str(fire.task_id),
                 error=str(exc)[:500],
             )
+        # Always finalize the per-run row so the UI sees the outcome.
+        try:
+            await repo.finish_run(
+                fire.run_id, status=status, output=output, error=error
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "scheduled_task_run_finish_failed",
+                task_id=str(fire.task_id),
+                run_id=str(fire.run_id),
+                error=str(exc)[:500],
+            )
         log.info(
             "scheduled_task_completed",
             task_id=str(fire.task_id),
+            run_id=str(fire.run_id),
             workspace_id=str(fire.workspace_id),
             status=status,
             duration_seconds=round(time.monotonic() - start, 3),
