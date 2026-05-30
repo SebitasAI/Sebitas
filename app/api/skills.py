@@ -22,6 +22,7 @@ from app.auth.clerk import ResolvedAppUser, require_app_user
 from app.db.models import Skill, SkillInstall
 from app.db.session import get_session
 from app.skills import registry as skill_registry
+from app.skills import storage as skill_storage
 
 log = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/skills", tags=["skills"])
@@ -53,6 +54,22 @@ class SkillOut(BaseModel):
 class SkillListResponse(BaseModel):
     skills: list[SkillOut]
     total_count: int
+
+
+class SkillDetailOut(SkillOut):
+    """Same as SkillOut but with the full body markdown attached. Returned
+    by the per-skill GET endpoint; the list endpoint skips it to keep the
+    response small."""
+    body: str
+
+
+class SkillCreateIn(BaseModel):
+    name: str
+    description: str
+    activation_default: Literal["always_active", "on_demand"] = "on_demand"
+    scope: Literal["workspace", "personal"] = "personal"
+    body: str
+    links: list[str] = []
 
 
 def _effective_activation(
@@ -185,6 +202,116 @@ async def _resolve_visible_skill(name: str, user: ResolvedAppUser) -> Skill:
     if row.scope == "personal" and row.created_by_user_id != user.app_user_id:
         raise HTTPException(status_code=404, detail=f"skill `{name}` not found")
     return row
+
+
+# --------------------------------------------------------------------------- #
+# GET /api/skills/{name} (with body)
+# --------------------------------------------------------------------------- #
+
+
+_SLUG_RE = __import__("re").compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
+
+
+@router.get("/{name}", response_model=SkillDetailOut)
+async def get_skill_detail(
+    name: str,
+    user: ResolvedAppUser = Depends(require_app_user),
+) -> SkillDetailOut:
+    """Return the full skill including its markdown body. The web app's
+    "Ver" modal uses this to show what's inside a skill without
+    duplicating the body in every list response."""
+    skill = await _resolve_visible_skill(name, user)
+    body = ""
+    if skill.body_r2_ref:
+        try:
+            body = await skill_storage.download_skill_body(
+                workspace_id=skill.workspace_id,
+                skill_id=skill.id,
+                version=skill.version,
+                r2_ref=skill.body_r2_ref,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "skill_body_fetch_failed",
+                skill_id=str(skill.id),
+                error=str(exc)[:200],
+            )
+            body = ""
+
+    # Build the base + add body. Install state lookup mirrors the list path.
+    async with get_session() as session:
+        install = (
+            await session.execute(
+                select(SkillInstall).where(
+                    SkillInstall.user_id == user.app_user_id,
+                    SkillInstall.skill_id == skill.id,
+                )
+            )
+        ).scalar_one_or_none()
+
+    base = _serialize(skill, install, user.app_user_id)
+    return SkillDetailOut(**base.model_dump(), body=body)
+
+
+# --------------------------------------------------------------------------- #
+# POST /api/skills (upload new)
+# --------------------------------------------------------------------------- #
+
+
+@router.post("", response_model=SkillDetailOut, status_code=201)
+async def create_skill_endpoint(
+    payload: SkillCreateIn,
+    user: ResolvedAppUser = Depends(require_app_user),
+) -> SkillDetailOut:
+    """Create a new skill in the caller's workspace. `scope` controls
+    visibility (default 'personal' to keep the privacy bar low). Returns
+    the skill + body so the UI can render the same Ver modal it just
+    asked the user to fill in.
+
+    Conflict (name already in workspace) -> 409. Body cap is enforced at
+    the storage layer; oversized uploads -> 413."""
+    nm = (payload.name or "").strip().lower()
+    if not _SLUG_RE.match(nm):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "`name` debe ser kebab-case (letras minúsculas, números y "
+                "guiones; 2-64 chars, sin guión al inicio/fin)."
+            ),
+        )
+    if not payload.description.strip():
+        raise HTTPException(status_code=400, detail="`description` no puede estar vacío")
+    if not payload.body.strip():
+        raise HTTPException(status_code=400, detail="`body` no puede estar vacío")
+
+    size_bytes = len(payload.body.encode("utf-8"))
+
+    try:
+        skill = await skill_registry.create_skill(
+            workspace_id=user.workspace_id,
+            name=nm,
+            description=payload.description.strip(),
+            activation_default=payload.activation_default,
+            body=payload.body,
+            links=payload.links or [],
+            size_bytes=size_bytes,
+            created_by_user_id=user.app_user_id,
+            source="upload",
+            scope=payload.scope,
+        )
+    except skill_registry.SkillNameTaken as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        # SkillBodyTooLarge from storage layer surfaces here. Map to 413.
+        if "max is" in str(exc):
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        log.warning("skill_create_failed", error=str(exc)[:300])
+        raise HTTPException(status_code=500, detail="couldn't create skill") from exc
+
+    # Return the just-created skill with body included so the frontend can
+    # transition straight into the "Ver" modal without an extra fetch.
+    base = _serialize(skill, None, user.app_user_id)
+    return SkillDetailOut(**base.model_dump(), body=payload.body)
 
 
 __all__ = ["router"]
