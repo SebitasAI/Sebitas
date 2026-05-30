@@ -400,10 +400,13 @@ class CreateTaskInput:
     destination_type: Literal["channel", "dm"]
     destination_slack_id: str
     # True only for one-shot delayed messages (created via
-    # `send_delayed_message`). When set, the cadence-floor validation is
-    # skipped (a one-shot has no consecutive fires) and the scheduler
-    # deletes the row after the first successful fire.
+    # `send_delayed_message`) and one-shot agentic tasks. When set, the
+    # cadence-floor validation is skipped (a one-shot has no consecutive
+    # fires) and the scheduler deletes the row after the first attempt.
     fire_once: bool = False
+    # True only for send_delayed_message: the `prompt` is the literal text
+    # to post (no agent run at fire time). Orthogonal to fire_once.
+    prompt_is_literal: bool = False
 
 
 async def create_task(payload: CreateTaskInput) -> ScheduledTask:
@@ -464,6 +467,7 @@ async def create_task(payload: CreateTaskInput) -> ScheduledTask:
             is_paused=False,
             next_run_at=next_run,
             fire_once=payload.fire_once,
+            prompt_is_literal=payload.prompt_is_literal,
         )
         session.add(task)
         await session.commit()
