@@ -162,6 +162,7 @@ app.include_router(pipedream_webhook_router)
 app.include_router(spaces_internal_router)
 app.include_router(web_api_router)
 app.include_router(scheduled_tasks_router)
+app.include_router(skills_router)
 
 
 @app.get("/health")
