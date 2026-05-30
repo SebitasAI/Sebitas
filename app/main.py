@@ -22,6 +22,7 @@ from app.integrations.connect import (
     resume_pending_polls,
 )
 from app.api.scheduled_tasks import router as scheduled_tasks_router
+from app.api.skills import router as skills_router
 from app.integrations.webhook import router as pipedream_webhook_router
 from app.logging import configure_logging
 from app.scheduled_tasks.repository import seed_system_tasks_for_all_workspaces
