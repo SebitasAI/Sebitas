@@ -25,7 +25,7 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from app.auth import clerk_backend as clerk_api
@@ -69,7 +69,10 @@ class TeamMembersResponse(BaseModel):
 
 
 class InviteRequest(BaseModel):
-    email: EmailStr
+    # Plain str + cheap regex shape check. Clerk's create-invitation
+    # endpoint validates the email properly and 422s on bad shape, so we
+    # don't need pydantic[email] / email-validator just for this surface.
+    email: str = Field(min_length=3, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     role: str = Field(default="org:member", pattern=r"^org:(admin|member)$")
     redirect_url: str | None = None
 
