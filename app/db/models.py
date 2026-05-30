@@ -53,6 +53,12 @@ class Workspace(TimestampMixin, Base):
     # Channel where Misterr was installed. System tasks post here by default;
     # null until the installer picks (or admin sets it manually). Migration 0017.
     bot_home_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Clerk Organization id (e.g. "org_2abc...") backing this Slack workspace's
+    # team membership. 1:1 mapping enforced by UNIQUE. Created automatically
+    # on first install (when the installer has a Clerk user); for legacy
+    # workspaces installed before this slice, populated by the backfill
+    # script `app/auth/migrations/backfill_clerk_orgs.py`.
+    clerk_org_id: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)
 
     users: Mapped[list["AppUser"]] = relationship(back_populates="workspace")
     threads: Mapped[list["Thread"]] = relationship(back_populates="workspace")
@@ -60,7 +66,15 @@ class Workspace(TimestampMixin, Base):
 
 class AppUser(TimestampMixin, Base):
     __tablename__ = "app_user"
-    __table_args__ = (UniqueConstraint("workspace_id", "slack_user_id"),)
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "slack_user_id"),
+        # One Clerk user maps to exactly one AppUser per workspace. Cross
+        # workspaces, the same Clerk user can have many AppUser rows (one per
+        # workspace they belong to). Migration 0024.
+        UniqueConstraint(
+            "workspace_id", "clerk_user_id", name="uq_app_user_workspace_clerk_user"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -69,6 +83,10 @@ class AppUser(TimestampMixin, Base):
         ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
     )
     slack_user_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Clerk user id ("user_2..."). Populated by the backfill script for
+    # legacy rows, and on first web login for new users. Once non-null, the
+    # require_app_user Depends uses this instead of email matching.
+    clerk_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     workspace: Mapped["Workspace"] = relationship(back_populates="users")
 
