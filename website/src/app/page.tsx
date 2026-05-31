@@ -135,23 +135,9 @@ export default function HomePage() {
       {/* ===== WHAT MISTERR DOES ===== */}
       <WhatMisterrDoes />
 
-      {/* ===== OWN RESULTS ===== */}
-      <section className="flex w-full flex-col items-center justify-center gap-[40px] overflow-clip rounded-t-[8px] bg-[#faf5f1] px-[24px] py-[64px] sm:px-[40px] sm:py-[80px]">
-        <p className="w-full max-w-[660px] font-[family-name:var(--font-lexend)] text-[44px] font-semibold leading-[0.98] tracking-[-2.2px] text-center text-[#191919] [word-break:break-word] sm:text-[64px] sm:tracking-[-3.2px] md:text-[94px] md:leading-[0.95] md:tracking-[-4.7px]">
-          Own results for every team
-        </p>
-
+      {/* ===== USE CASES BY TEAM ===== */}
+      <section className="flex w-full flex-col items-center justify-center overflow-clip rounded-t-[8px] bg-[#faf5f1] px-[24px] py-[64px] sm:px-[40px] sm:py-[80px]">
         <UseCases />
-
-        <div className="flex flex-col items-center gap-[16px] py-[20px] shrink-0 sm:flex-row sm:gap-[20px]">
-          <GetStartedFree />
-          <Link
-            href="#use-cases"
-            className="font-[family-name:var(--font-inter)] text-[20px] font-medium leading-[19.2px] tracking-[-0.24px] text-center text-[#191919] whitespace-nowrap hover:underline sm:text-[24px]"
-          >
-            See all use cases
-          </Link>
-        </div>
       </section>
 
       {/* ===== TESTIMONIALS ===== */}
