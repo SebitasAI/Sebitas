@@ -72,9 +72,9 @@ export default function Header() {
         hidden ? "-translate-y-full" : "translate-y-0"
       }`}
     >
-      <div className="mx-auto flex w-full max-w-[1280px] items-center justify-between px-[64px] py-[12px] backdrop-blur-[3px]">
+      <div className="mx-auto flex w-full max-w-[1280px] items-center justify-between px-[20px] py-[12px] backdrop-blur-[3px] md:px-[64px]">
         <Link href="/" className="relative h-[39px] shrink-0">
-          <div className="flex size-full items-center px-[12px]">
+          <div className="flex size-full items-center px-[4px] md:px-[12px]">
             <img
               className="block h-[28px] w-[131px] max-w-none"
               src="/landing/misterr-logo.svg"
@@ -85,7 +85,7 @@ export default function Header() {
 
         <nav
           ref={navRef}
-          className="flex items-center gap-[2px] rounded-[14px] border border-[#ececec] bg-white px-[6px] py-[4px] shadow-[0px_2px_8px_rgba(0,0,0,0.06)] shrink-0"
+          className="hidden items-center gap-[2px] rounded-[14px] border border-[#ececec] bg-white px-[6px] py-[4px] shadow-[0px_2px_8px_rgba(0,0,0,0.06)] shrink-0 lg:flex"
         >
           <Link
             href="/pricing"
@@ -142,7 +142,7 @@ export default function Header() {
         <div className="flex h-[39px] items-center gap-[8px] shrink-0">
           <a
             href={TALK_TO_SALES}
-            className="flex h-full flex-col items-start justify-center rounded-[12px] bg-[#eee] pb-[4px] transition-transform active:translate-y-[2px]"
+            className="hidden h-full flex-col items-start justify-center rounded-[12px] bg-[#eee] pb-[4px] transition-transform active:translate-y-[2px] sm:flex"
           >
             <div className="flex flex-[1_0_0] min-h-px min-w-[74px] items-center justify-center rounded-[12px] bg-white px-[17px]">
               <p className="font-[family-name:var(--font-geist)] text-[16px] font-medium leading-[19.2px] tracking-[-0.24px] text-[#191919] whitespace-nowrap">
@@ -152,7 +152,7 @@ export default function Header() {
           </a>
           <Link
             href={LOGIN_HREF}
-            className="flex h-full flex-col items-start justify-center rounded-[12px] bg-[#626262] pb-[4px] transition-transform active:translate-y-[2px]"
+            className="hidden h-full flex-col items-start justify-center rounded-[12px] bg-[#626262] pb-[4px] transition-transform active:translate-y-[2px] md:flex"
           >
             <div className="flex flex-[1_0_0] min-h-px min-w-[74px] items-center justify-center rounded-[12px] bg-[#191919] px-[17px]">
               <p className="font-[family-name:var(--font-geist)] text-[16px] font-medium leading-[19.2px] tracking-[-0.24px] text-white whitespace-nowrap">

@@ -3,10 +3,10 @@ import Link from "next/link";
 // Shared site footer (same one used on the landing page).
 export default function Footer() {
   return (
-    <footer className="relative isolate flex w-full flex-col items-center gap-[80px] overflow-clip bg-[#def2ff] px-[80px] pt-[112px]">
-      <div className="z-[3] grid h-[472px] w-full max-w-[1120px] grid-cols-[repeat(12,minmax(0,1fr))] grid-rows-[repeat(2,minmax(0,1fr))] gap-x-[24px] gap-y-[40px]">
+    <footer className="relative isolate flex w-full flex-col items-center gap-[48px] overflow-clip bg-[#def2ff] px-[24px] pt-[64px] md:gap-[80px] md:px-[80px] md:pt-[112px]">
+      <div className="z-[3] grid h-auto w-full max-w-[1120px] grid-cols-2 gap-x-[24px] gap-y-[40px] md:h-[472px] md:grid-cols-[repeat(12,minmax(0,1fr))] md:grid-rows-[repeat(2,minmax(0,1fr))]">
         {/* col 1 - brand */}
-        <div className="col-[1/span_4] row-[1/span_2] flex flex-col items-start justify-between justify-self-stretch self-start">
+        <div className="col-span-2 flex flex-col items-start justify-between justify-self-stretch self-start md:col-[1/span_4] md:row-[1/span_2]">
           <div className="flex w-full flex-col items-start gap-[64px]">
             <Link href="/" aria-label="Misterr home">
               <img
@@ -39,7 +39,7 @@ export default function Footer() {
               </a>
             </div>
           </div>
-          <div className="flex h-[356px] min-h-[36px] w-full flex-col items-start justify-end pt-[320px]">
+          <div className="flex min-h-[36px] w-full flex-col items-start justify-end pt-[24px] md:h-[356px] md:pt-[320px]">
             <div className="flex w-full flex-col items-start gap-[4px]">
               <p className="w-full font-[family-name:var(--font-inter)] text-[11.1px] font-normal leading-[16px] text-[#9693a3]">
                 © 2026 Misterr. All rights reserved.
@@ -53,7 +53,7 @@ export default function Footer() {
 
         {/* link columns */}
         <FooterCol
-          col="col-[5/span_2] row-1"
+          col="md:col-[5/span_2] md:row-1"
           title="Product"
           items={[
             { label: "Overview", href: "/#features" },
@@ -62,7 +62,7 @@ export default function Footer() {
           ]}
         />
         <FooterCol
-          col="col-[8/span_2] row-1"
+          col="md:col-[8/span_2] md:row-1"
           title="Why Misterr"
           items={[
             { label: "vs ChatGPT", href: "#" },
@@ -72,7 +72,7 @@ export default function Footer() {
           ]}
         />
         <FooterCol
-          col="col-[11/span_2] row-1"
+          col="md:col-[11/span_2] md:row-1"
           title="Solutions"
           items={[
             { label: "Integrations", href: "#" },
@@ -80,7 +80,7 @@ export default function Footer() {
           ]}
         />
         <FooterCol
-          col="col-[5/span_2] row-2"
+          col="md:col-[5/span_2] md:row-2"
           title="Company"
           items={[
             { label: "Partner program", href: "#" },
@@ -91,7 +91,7 @@ export default function Footer() {
           ]}
         />
         <FooterCol
-          col="col-[8/span_2] row-2"
+          col="md:col-[8/span_2] md:row-2"
           title="Resources"
           items={[
             { label: "Blog", href: "#" },
@@ -100,7 +100,7 @@ export default function Footer() {
           ]}
         />
         <FooterCol
-          col="col-[11/span_2] row-2"
+          col="md:col-[11/span_2] md:row-2"
           title="Legal & Docs"
           items={[
             { label: "Terms of service", href: "/terms" },
@@ -111,8 +111,8 @@ export default function Footer() {
         />
       </div>
 
-      {/* decorative objects */}
-      <div className="absolute left-1/2 top-[584px] z-[2] flex h-[438px] w-[576.181px] -translate-x-1/2 items-center justify-center">
+      {/* decorative objects (desktop only) */}
+      <div className="absolute left-1/2 top-[584px] z-[2] hidden h-[438px] w-[576.181px] -translate-x-1/2 items-center justify-center md:flex">
         <div className="rotate-180">
           <img
             className="pointer-events-none h-[438px] w-[576.181px] max-w-none"
@@ -121,7 +121,7 @@ export default function Footer() {
           />
         </div>
       </div>
-      <div className="z-[1] flex h-[331.625px] w-full flex-col items-start">
+      <div className="z-[1] hidden h-[331.625px] w-full flex-col items-start md:flex">
         <div className="absolute left-[-20%] right-[-20%] top-[calc(50%+111.98px)] flex aspect-[1568/980] -translate-y-1/2 flex-col items-center justify-center overflow-clip">
           <img
             className="h-[980px] w-[1568px] max-w-none"
