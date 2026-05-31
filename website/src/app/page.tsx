@@ -123,10 +123,10 @@ export default function HomePage() {
             {[...INTEGRATIONS, ...INTEGRATIONS].map((logo, i) => (
               <img
                 key={i}
-                src={`/landing/logos/${logo.file}.svg`}
+                src={`/landing/logos/${logo.file}.png`}
                 alt={logo.name}
                 title={logo.name}
-                className="h-[34px] w-auto shrink-0 opacity-60 transition-opacity hover:opacity-100"
+                className="h-[34px] w-auto shrink-0 object-contain opacity-80 transition-opacity hover:opacity-100"
               />
             ))}
           </div>
