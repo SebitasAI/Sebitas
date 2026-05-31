@@ -52,7 +52,7 @@ a[href] {
 
 /* Infinite logo marquee. Two identical groups sit side by side; both translate
    left by exactly one group width plus the inter-group gap, so when the
-   animation loops the second group lands precisely where the first started —
+   animation loops the second group lands precisely where the first started,
    the reset is invisible and a group always fills the viewport. */
 .logo-marquee {
   --gap: 56px;

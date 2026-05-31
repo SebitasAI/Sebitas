@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-// Placeholder testimonials — replace copy/authors with real ones.
+// Placeholder testimonials: replace copy/authors with real ones.
 const ITEMS = [
   { quote: "Misterr handles our disputes end to end. We barely touch them now.", name: "Ana Pérez", role: "COO, Retailco" },
   { quote: "It feels like a teammate that never sleeps. Output ships in Slack.", name: "Liam Carter", role: "Eng Lead, Buildr" },

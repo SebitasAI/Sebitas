@@ -259,7 +259,7 @@ function CrmArtifact() {
       </span>
       <span className="flex min-w-0 flex-col">
         <span className="truncate font-[family-name:var(--font-inter)] text-[12px] font-semibold text-[#1d1c1d]">
-          Acme Inc — Billing follow-up
+          Acme Inc · Billing follow-up
         </span>
         <span className="font-[family-name:var(--font-inter)] text-[11px] text-[#9a9a9a]">
           HubSpot · Draft ready to send

@@ -115,7 +115,7 @@ export default function PriceCalculator() {
           <span>credits</span>
           <span className="text-[#9a9a9a]">→</span>
           <span className="font-semibold text-[#191919]">
-            ≈ {tasks !== null ? fmt(tasks) : "—"} tasks / mo
+            ≈ {tasks !== null ? fmt(tasks) : "n/a"} tasks / mo
           </span>
         </div>
         <p className="font-[family-name:var(--font-inter)] text-[13px] leading-[1.5] text-[#9a9a9a]">

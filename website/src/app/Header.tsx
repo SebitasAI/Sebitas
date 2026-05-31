@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
-// Dropdown contents — swap hrefs for real routes when they exist.
+// Dropdown contents: swap hrefs for real routes when they exist.
 const MENUS: Record<string, { label: string; href: string }[]> = {
   Solutions: [
     { label: "Customer Support", href: "#" },
@@ -20,7 +20,7 @@ const MENUS: Record<string, { label: string; href: string }[]> = {
   ],
 };
 
-// CTA targets — placeholders; point to real app/contact URLs when ready.
+// CTA targets: placeholders; point to real app/contact URLs when ready.
 const TALK_TO_SALES = "mailto:sales@misterr.ai";
 const LOGIN_HREF = "/login";
 const GET_STARTED_HREF = "/signup";

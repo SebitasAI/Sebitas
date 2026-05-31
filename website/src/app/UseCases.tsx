@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-// TODO use cases: each feature is a public capability claim — only keep what Misterr does well TODAY.
+// TODO use cases: each feature is a public capability claim: only keep what Misterr does well TODAY.
 // Finance especially: never imply autonomous money movement; keep it draft/flag/chase + approval.
 // If a tab can't hold 4 distinct, true features, fold it into Other rather than padding it.
 
@@ -16,7 +16,7 @@ const TEAMS: Record<string, Team> = {
   "Founders & CEOs": {
     icon: "crown",
     summary:
-      "Misterr keeps you on top of the company — drafting your updates, briefing your decisions, and surfacing what needs you.",
+      "Misterr keeps you on top of the company. It drafts your updates, briefs your decisions, and surfaces what needs you.",
     features: [
       {
         icon: "doc",
@@ -47,7 +47,7 @@ const TEAMS: Record<string, Team> = {
   "Marketing & Growth": {
     icon: "megaphone",
     summary:
-      "Misterr runs the busywork behind growth — recapping campaigns, drafting content, and watching the competition.",
+      "Misterr runs the busywork behind growth: recapping campaigns, drafting content, and watching the competition.",
     features: [
       {
         icon: "chart",
@@ -78,7 +78,7 @@ const TEAMS: Record<string, Team> = {
   Operations: {
     icon: "gear",
     summary:
-      "Misterr handles the recurring operational work no one wants to own — tracking, reporting, and chasing, so nothing slips.",
+      "Misterr handles the recurring operational work no one wants to own: tracking, reporting, and chasing, so nothing slips.",
     features: [
       {
         icon: "refresh",
@@ -109,7 +109,7 @@ const TEAMS: Record<string, Team> = {
   Finance: {
     icon: "dollar",
     summary:
-      "Misterr keeps the numbers tidy — categorizing, flagging, and chasing — and always asks before anything touches money.",
+      "Misterr keeps the numbers tidy: categorizing, flagging, and chasing. And it always asks before anything touches money.",
     features: [
       {
         icon: "tag",
@@ -139,7 +139,7 @@ const TEAMS: Record<string, Team> = {
   Sales: {
     icon: "funnel",
     summary:
-      "Misterr keeps your pipeline clean and moving — logging, recapping, and following up — so deals don't go cold.",
+      "Misterr keeps your pipeline clean and moving: logging, recapping, and following up, so deals don't go cold.",
     features: [
       {
         icon: "checkCircle",
