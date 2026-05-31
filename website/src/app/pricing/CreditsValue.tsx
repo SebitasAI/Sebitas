@@ -56,7 +56,7 @@ export default function CreditsValue() {
         {/* Quick tasks */}
         <TierCard tier={TIERS[0]}>
           <SlackThread
-            user={{ name: "Dana Lee", initials: "DL", tint: "bg-[#cdb4f6]" }}
+            user={{ name: "Dana Lee", img: "/landing/avatars/dana.jpg" }}
             time="9:14 AM"
             userText={
               <>
@@ -82,7 +82,7 @@ export default function CreditsValue() {
         {/* Complex workflows */}
         <TierCard tier={TIERS[1]}>
           <SlackThread
-            user={{ name: "Sam Ortiz", initials: "SO", tint: "bg-[#7fd1b9]" }}
+            user={{ name: "Sam Ortiz", img: "/landing/avatars/sam.jpg" }}
             time="2:48 PM"
             userText={
               <>
@@ -104,7 +104,7 @@ export default function CreditsValue() {
         {/* Full projects */}
         <TierCard tier={TIERS[2]}>
           <SlackThread
-            user={{ name: "Priya Nair", initials: "PN", tint: "bg-[#f6b87f]" }}
+            user={{ name: "Priya Nair", img: "/landing/avatars/priya.jpg" }}
             time="11:02 AM"
             userText={
               <>
@@ -169,7 +169,7 @@ function SlackThread({
   replyText,
   reactions,
 }: {
-  user: { name: string; initials: string; tint: string };
+  user: { name: string; img: string };
   time: string;
   userText: ReactNode;
   replyTime: string;
@@ -180,11 +180,11 @@ function SlackThread({
     <div className="flex flex-col gap-[14px] rounded-[14px] border border-[#e7e2db] bg-white p-[16px]">
       <SlackMessage
         avatar={
-          <div
-            className={`flex size-[36px] shrink-0 items-center justify-center rounded-[8px] ${user.tint} font-[family-name:var(--font-inter)] text-[13px] font-semibold text-[#1d1c1d]`}
-          >
-            {user.initials}
-          </div>
+          <img
+            src={user.img}
+            alt={user.name}
+            className="size-[36px] shrink-0 rounded-[8px] object-cover"
+          />
         }
         name={user.name}
         time={time}
@@ -192,9 +192,11 @@ function SlackThread({
       />
       <SlackMessage
         avatar={
-          <div className="flex size-[36px] shrink-0 items-center justify-center rounded-[8px] bg-[#191919] font-[family-name:var(--font-lexend)] text-[18px] font-semibold text-white">
-            M
-          </div>
+          <img
+            src="/landing/misterr-avatar.png"
+            alt="Misterr"
+            className="size-[36px] shrink-0 rounded-[8px] object-cover"
+          />
         }
         name="Misterr"
         isApp
