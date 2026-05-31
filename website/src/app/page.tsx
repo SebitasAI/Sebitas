@@ -35,11 +35,11 @@ const SlackIcon = () => (
 );
 
 const GetStartedFree = () => (
-  <Link href="/signup" className="flex items-center shrink-0">
-    <div className="flex h-[48px] flex-col items-start justify-center rounded-[12px] bg-[#626262] pb-[4px] shrink-0 transition-transform active:translate-y-[2px]">
-      <div className="flex flex-[1_0_0] min-h-px min-w-[119px] items-center justify-center gap-[10px] rounded-[12px] bg-[#191919] px-[17.58px]">
+  <Link href="/signup" className="group flex items-center shrink-0">
+    <div className="flex h-[48px] flex-col items-start justify-center rounded-[12px] bg-[#626262] pb-[4px] shrink-0 transition-transform active:translate-y-[2px] group-hover:bg-[#cfcfcf]">
+      <div className="flex flex-[1_0_0] min-h-px min-w-[119px] items-center justify-center gap-[10px] rounded-[12px] bg-[#191919] px-[17.58px] transition-colors group-hover:bg-white">
         <SlackIcon />
-        <p className="font-[family-name:var(--font-inter)] text-[24px] font-medium leading-[19.2px] tracking-[-0.24px] text-white whitespace-nowrap">
+        <p className="font-[family-name:var(--font-inter)] text-[24px] font-medium leading-[19.2px] tracking-[-0.24px] text-white whitespace-nowrap transition-colors group-hover:text-[#191919]">
           Get started for Free
         </p>
       </div>
@@ -138,7 +138,7 @@ export default function HomePage() {
 
       {/* ===== OWN RESULTS ===== */}
       <section className="flex w-full flex-col items-center justify-center gap-[40px] overflow-clip rounded-t-[8px] bg-[#faf5f1] px-[40px] py-[80px]">
-        <p className="w-[660px] font-[family-name:var(--font-lexend)] text-[94px] font-semibold tracking-[-4.7px] text-center text-[#191919] [word-break:break-word]">
+        <p className="w-[660px] font-[family-name:var(--font-lexend)] text-[94px] font-semibold leading-[0.95] tracking-[-4.7px] text-center text-[#191919] [word-break:break-word]">
           Own results for every team
         </p>
 
@@ -197,46 +197,6 @@ export default function HomePage() {
             src="/landing/branch-sloth.png"
             alt=""
           />
-        </div>
-      </section>
-
-      {/* ===== SECURITY ===== */}
-      <section className="flex w-full flex-col items-center gap-[20px] bg-[#ddf2ff] px-[58px] py-[60px]">
-        <div className="flex w-full items-center justify-between overflow-clip rounded-[12px] border border-[#191919] bg-white pb-[30px] pl-[40px] pr-[20px] pt-[40px] shadow-[0px_4px_0px_0px_#626262]">
-          <div className="flex w-[539px] flex-col items-start gap-[20px] font-medium text-[#191919] shrink-0">
-            <p className="font-[family-name:var(--font-lexend)] text-[40px] leading-[1.2] tracking-[-1.2px] whitespace-nowrap">
-              Enterprise grade
-              <br aria-hidden />
-              {`security & privacity`}
-            </p>
-            <p className="min-w-full font-[family-name:var(--font-inter)] text-[18px] leading-[1.4] tracking-[-0.36px]">
-              We take security and compliance seriously. Supersonik is SOC 2 Type
-              II and GDPR compliant, trusted by thousands of businesses to build
-              secure and compliant AI Agents.
-            </p>
-          </div>
-          <div className="inline-grid grid-cols-[max-content] grid-rows-[max-content] place-items-start leading-[0] shrink-0">
-            <div className="col-1 row-1 ml-0 mt-0 h-[201px] w-[200px]">
-              <img
-                className="pointer-events-none absolute inset-0 size-full max-w-none object-cover"
-                src="/landing/badge-soc2.png"
-                alt="SOC 2"
-              />
-            </div>
-            <div className="col-1 row-1 ml-[210px] mt-0 h-[201px] w-[200px]">
-              <img
-                className="pointer-events-none absolute inset-0 size-full max-w-none object-cover"
-                src="/landing/badge-gdpr.png"
-                alt="GDPR"
-              />
-            </div>
-          </div>
-        </div>
-        <div className="flex w-full flex-col items-center">
-          <div className="flex w-full items-end justify-between font-[family-name:var(--font-inter)] text-[18px] font-normal leading-[1.4] tracking-[-0.36px] text-[#191919] [word-break:break-word]">
-            <p className="w-[454px]">Misterr is commited to safeguarding your data.</p>
-            <p className="whitespace-nowrap">Learn more</p>
-          </div>
         </div>
       </section>
 

@@ -83,10 +83,7 @@ export default function Header() {
           </div>
         </Link>
 
-        <nav
-          ref={navRef}
-          className="flex items-center gap-[2px] rounded-[14px] border border-[#ececec] bg-white px-[6px] py-[4px] shadow-[0px_2px_8px_rgba(0,0,0,0.06)] shrink-0"
-        >
+        <nav ref={navRef} className="flex items-center gap-[2px] shrink-0">
           <Link
             href="#pricing"
             className="flex h-[39px] items-center rounded-[12px] px-[16px] hover:bg-[#f3f3f3]"
@@ -139,39 +136,64 @@ export default function Header() {
           </Link>
         </nav>
 
-        <div className="flex h-[39px] items-center gap-[8px] shrink-0">
-          <a
+        <div className="flex h-[48px] items-center gap-[8px] shrink-0">
+          <CtaButton
             href={TALK_TO_SALES}
-            className="flex h-full flex-col items-start justify-center rounded-[12px] bg-[#eee] pb-[4px] transition-transform active:translate-y-[2px]"
+            shadow="bg-[#eee]"
+            face="bg-white"
+            text="text-[#191919]"
           >
-            <div className="flex flex-[1_0_0] min-h-px min-w-[74px] items-center justify-center rounded-[12px] bg-white px-[17px]">
-              <p className="font-[family-name:var(--font-geist)] text-[16px] font-medium leading-[19.2px] tracking-[-0.24px] text-[#191919] whitespace-nowrap">
-                Talk to sales
-              </p>
-            </div>
-          </a>
-          <Link
+            Talk to sales
+          </CtaButton>
+          <CtaButton
             href={LOGIN_HREF}
-            className="flex h-full flex-col items-start justify-center rounded-[12px] bg-[#626262] pb-[4px] transition-transform active:translate-y-[2px]"
+            shadow="bg-[#626262]"
+            face="bg-[#191919]"
+            text="text-white"
           >
-            <div className="flex flex-[1_0_0] min-h-px min-w-[74px] items-center justify-center rounded-[12px] bg-[#191919] px-[17px]">
-              <p className="font-[family-name:var(--font-geist)] text-[16px] font-medium leading-[19.2px] tracking-[-0.24px] text-white whitespace-nowrap">
-                Login
-              </p>
-            </div>
-          </Link>
-          <Link
+            Login
+          </CtaButton>
+          <CtaButton
             href={GET_STARTED_HREF}
-            className="flex h-full flex-col items-start justify-center rounded-[12px] bg-[#cc4a00] pb-[4px] transition-transform active:translate-y-[2px]"
+            shadow="bg-[#cc4a00]"
+            face="bg-[#ff5200]"
+            text="text-white"
           >
-            <div className="flex flex-[1_0_0] min-h-px min-w-[119px] items-center justify-center rounded-[12px] bg-[#ff5200] px-[17.58px]">
-              <p className="font-[family-name:var(--font-geist)] text-[16px] font-medium leading-[19.2px] tracking-[-0.24px] text-white whitespace-nowrap">
-                Get started
-              </p>
-            </div>
-          </Link>
+            Get started
+          </CtaButton>
         </div>
       </div>
     </header>
+  );
+}
+
+function CtaButton({
+  href,
+  shadow,
+  face,
+  text,
+  children,
+}: {
+  href: string;
+  shadow: string;
+  face: string;
+  text: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <a
+      href={href}
+      className={`flex h-full flex-col items-start justify-center rounded-[12px] ${shadow} pb-[4px] transition-transform active:translate-y-[2px]`}
+    >
+      <div
+        className={`flex flex-[1_0_0] min-h-px min-w-[88px] items-center justify-center rounded-[12px] ${face} px-[17px]`}
+      >
+        <p
+          className={`font-[family-name:var(--font-geist)] text-[16px] font-medium leading-[19.2px] tracking-[-0.24px] ${text} whitespace-nowrap`}
+        >
+          {children}
+        </p>
+      </div>
+    </a>
   );
 }
