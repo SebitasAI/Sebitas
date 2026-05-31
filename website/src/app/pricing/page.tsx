@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Header from "../Header";
 import PriceCalculator from "./PriceCalculator";
 import CreditsValue from "./CreditsValue";
+import Faq from "./Faq";
 
 export const metadata: Metadata = {
   title: "Pricing — Misterr",
@@ -32,6 +33,9 @@ export default function PricingPage() {
 
       {/* What your credits get done */}
       <CreditsValue />
+
+      {/* FAQ */}
+      <Faq />
     </main>
   );
 }
