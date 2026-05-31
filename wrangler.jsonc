@@ -3,11 +3,18 @@
 // Cloudflare unified Workers + Pages: a "static site" now deploys as a
 // Worker with an `assets.directory` binding. The custom domain `misterr.ai`
 // is attached to this Worker in the dashboard; this config tells wrangler
-// what to upload when `wrangler deploy` runs.
+// what to upload when `wrangler deploy` / `wrangler versions upload` runs.
 //
-// The actual build happens in the Cloudflare project's Deploy command:
-//
-//     pnpm --filter @misterr/website build && npx wrangler deploy
+// The `build.command` field runs BEFORE the upload step so the static
+// export (`website/out`) is generated as part of the same wrangler
+// invocation. That keeps the deploy self-contained: it doesn't matter
+// whether the Cloudflare project's "Deploy command" is set to
+// `wrangler deploy` or just `wrangler versions upload`, this hook
+// produces `out/` either way. Without it the upload step looks for
+// `./website/out`, finds nothing (since the CF env doesn't run pnpm
+// build by default), and fails with:
+//   ✘ The directory specified by the "assets.directory" field in your
+//     configuration file does not exist: .../website/out
 //
 // Next runs `output: 'export'` and writes static HTML/CSS/JS to
 // `website/out`, which wrangler then ships to the Worker's asset namespace.
@@ -19,6 +26,9 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "misterr",
   "compatibility_date": "2026-05-28",
+  "build": {
+    "command": "pnpm --filter @misterr/website build"
+  },
   "assets": {
     "directory": "./website/out"
   }
