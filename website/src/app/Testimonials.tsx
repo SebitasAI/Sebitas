@@ -23,7 +23,7 @@ export default function Testimonials() {
 
   return (
     <>
-      <div className="w-[1164px] overflow-hidden shrink-0">
+      <div className="w-full max-w-[1164px] overflow-hidden">
         <div
           className="flex items-center gap-[24px] transition-transform duration-300 ease-out"
           style={{ transform: `translateX(-${index * (CARD_W + GAP)}px)` }}
