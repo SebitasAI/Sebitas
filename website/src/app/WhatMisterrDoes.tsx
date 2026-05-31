@@ -10,7 +10,7 @@ type Card = {
   label: string;
   headline: string;
   description: string;
-  user: { name: string; initials: string; tint: string };
+  user: { name: string; img: string };
   time: string;
   userText: ReactNode;
   replyTime: string;
@@ -25,7 +25,7 @@ const CARDS: Card[] = [
     headline: "Nothing slips through the cracks",
     description:
       "Ask Misterr to triage a channel and it summarizes the thread, flags what needs a reply, and drafts the CRM follow-up, ready to send.",
-    user: { name: "Dana Lee", initials: "DL", tint: "bg-[#8e6fd4]" },
+    user: { name: "Dana Lee", img: "/landing/avatars/dana.jpg" },
     time: "9:14 AM",
     userText: (
       <>
@@ -53,7 +53,7 @@ const CARDS: Card[] = [
     headline: "Docs that keep themselves current",
     description:
       "Point Misterr at a release and it updates the docs to match, then hands you a preview link to review before anything goes live.",
-    user: { name: "Sam Ortiz", initials: "SO", tint: "bg-[#3aa181]" },
+    user: { name: "Sam Ortiz", img: "/landing/avatars/sam.jpg" },
     time: "2:48 PM",
     userText: (
       <>
@@ -71,7 +71,7 @@ const CARDS: Card[] = [
     headline: "A finished deliverable, not a chat reply",
     description:
       "Give Misterr a brief and it comes back with the actual file: a board-ready PDF with the work done, not a wall of text to copy-paste.",
-    user: { name: "Priya Nair", initials: "PN", tint: "bg-[#d98a3d]" },
+    user: { name: "Priya Nair", img: "/landing/avatars/priya.jpg" },
     time: "11:02 AM",
     userText: (
       <>
@@ -144,11 +144,11 @@ function SlackThread({
     <div className="flex flex-col gap-[14px] rounded-[14px] border border-[#e7e2db] bg-white p-[16px]">
       <SlackMessage
         avatar={
-          <span
-            className={`flex size-[36px] shrink-0 items-center justify-center rounded-full ${user.tint} font-[family-name:var(--font-inter)] text-[13px] font-semibold text-white`}
-          >
-            {user.initials}
-          </span>
+          <img
+            src={user.img}
+            alt={user.name}
+            className="size-[36px] shrink-0 rounded-[8px] object-cover"
+          />
         }
         name={user.name}
         time={time}
@@ -227,10 +227,7 @@ function SlackMessage({
 function AttachmentChip({ attachment }: { attachment: Attachment }) {
   if (attachment.kind === "link") {
     return (
-      <a
-        href="#"
-        className="mt-[6px] flex max-w-full items-center gap-[8px] self-start rounded-[10px] border border-[#e1dfde] bg-[#f8f8f8] px-[10px] py-[7px]"
-      >
+      <span className="mt-[6px] flex max-w-full items-center gap-[8px] self-start rounded-[10px] border border-[#e1dfde] bg-[#f8f8f8] px-[10px] py-[7px]">
         <span className="flex size-[22px] shrink-0 items-center justify-center rounded-[6px] bg-[#1264a3] text-white">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="size-[13px]">
             <path d="M9 15l6-6M10 6h5a3 3 0 0 1 0 6h-1M14 18H9a3 3 0 0 1 0-6h1" strokeLinecap="round" strokeLinejoin="round" />
@@ -239,7 +236,7 @@ function AttachmentChip({ attachment }: { attachment: Attachment }) {
         <span className="truncate font-[family-name:var(--font-inter)] text-[13px] font-medium text-[#1264a3]">
           {attachment.label}
         </span>
-      </a>
+      </span>
     );
   }
 
