@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Header from "../Header";
+import Footer from "../Footer";
 import PriceCalculator from "./PriceCalculator";
 import CreditsValue from "./CreditsValue";
 import Faq from "./Faq";
@@ -36,6 +37,9 @@ export default function PricingPage() {
 
       {/* FAQ */}
       <Faq />
+
+      {/* Footer */}
+      <Footer />
     </main>
   );
 }
