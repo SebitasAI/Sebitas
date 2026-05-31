@@ -1,24 +1,30 @@
 import type { ReactNode } from "react";
 
-// Each card proves the hero's claim by showing a real Slack request and the
-// finished thing Misterr hands back. Same example "voice" as the pricing
-// "what your credits get done" section, but the emphasis here is the artifact.
-const CARDS: {
+// Each card proves the hero's claim: a real Slack request and the finished
+// thing Misterr hands back, shown as a contained Slack file/link attachment.
+type Attachment =
+  | { kind: "file"; tile: "pdf" | "hubspot"; name: string; meta: string }
+  | { kind: "link"; label: string };
+
+type Card = {
   label: string;
   headline: string;
-  body: string;
+  description: string;
   user: { name: string; img: string };
   time: string;
   userText: ReactNode;
   replyTime: string;
   replyText: ReactNode;
-  reactions?: { emoji: string; count: number }[];
-  artifact: ReactNode;
-}[] = [
+  attachment: Attachment;
+  reaction?: { emoji: string; count: number };
+};
+
+const CARDS: Card[] = [
   {
     label: "Support & CRM",
     headline: "Nothing slips through the cracks",
-    body: "Ask Misterr to triage a channel and it summarizes the thread, flags what needs a reply, and drafts the CRM follow-up, ready to send.",
+    description:
+      "Ask Misterr to triage a channel and it summarizes the thread, flags what needs a reply, and drafts the CRM follow-up, ready to send.",
     user: { name: "Dana Lee", img: "/landing/avatars/dana.jpg" },
     time: "9:14 AM",
     userText: (
@@ -34,16 +40,19 @@ const CARDS: {
         unanswered for 4h. I drafted a follow-up in HubSpot, want me to send it?
       </>
     ),
-    reactions: [
-      { emoji: "✅", count: 3 },
-      { emoji: "🙏", count: 1 },
-    ],
-    artifact: <CrmArtifact />,
+    attachment: {
+      kind: "file",
+      tile: "hubspot",
+      name: "Acme follow-up",
+      meta: "HubSpot draft",
+    },
+    reaction: { emoji: "✅", count: 3 },
   },
   {
-    label: "Docs & Engineering",
+    label: "Docs & engineering",
     headline: "Docs that keep themselves current",
-    body: "Point Misterr at a release and it updates the docs to match, then hands you a preview link to review before anything goes live.",
+    description:
+      "Point Misterr at a release and it updates the docs to match, then hands you a preview link to review before anything goes live.",
     user: { name: "Sam Ortiz", img: "/landing/avatars/sam.jpg" },
     time: "2:48 PM",
     userText: (
@@ -53,19 +62,15 @@ const CARDS: {
       </>
     ),
     replyTime: "2:51 PM",
-    replyText: (
-      <>
-        Done. Updated 6 doc pages to v2.3. Preview ready for your review:{" "}
-        <ThreadLink>docs-preview/v2.3</ThreadLink>
-      </>
-    ),
-    reactions: [{ emoji: "🚀", count: 2 }],
-    artifact: <DocArtifact />,
+    replyText: <>Done. Updated 6 doc pages to v2.3. Preview ready for your review:</>,
+    attachment: { kind: "link", label: "docs-preview/v2.3" },
+    reaction: { emoji: "🚀", count: 2 },
   },
   {
-    label: "Research & Deliverables",
+    label: "Research & deliverables",
     headline: "A finished deliverable, not a chat reply",
-    body: "Give Misterr a brief and it comes back with the actual file: a board-ready PDF with the work done, not a wall of text to copy-paste.",
+    description:
+      "Give Misterr a brief and it comes back with the actual file: a board-ready PDF with the work done, not a wall of text to copy-paste.",
     user: { name: "Priya Nair", img: "/landing/avatars/priya.jpg" },
     time: "11:02 AM",
     userText: (
@@ -81,11 +86,13 @@ const CARDS: {
         positioning map.
       </>
     ),
-    reactions: [
-      { emoji: "🙌", count: 4 },
-      { emoji: "🔥", count: 2 },
-    ],
-    artifact: <PdfArtifact />,
+    attachment: {
+      kind: "file",
+      tile: "pdf",
+      name: "competitive-analysis-q1.pdf",
+      meta: "10 pages",
+    },
+    reaction: { emoji: "🙌", count: 4 },
   },
 ];
 
@@ -100,17 +107,9 @@ export default function WhatMisterrDoes() {
         {CARDS.map((c) => (
           <div
             key={c.label}
-            className="flex flex-col gap-[20px] rounded-[16px] border border-[#191919] bg-[#ddf2ff] p-[20px] shadow-[0px_4px_0px_0px_#626262]"
+            className="flex flex-col gap-[18px] rounded-[16px] border border-[#bcd9ef] bg-[#ddf2ff] p-[20px]"
           >
-            {/* visual: slack thread + artifact peek */}
-            <div className="relative pb-[28px] pt-[14px]">
-              {c.artifact}
-              <div className="relative z-10">
-                <SlackThread {...c} />
-              </div>
-            </div>
-
-            {/* copy */}
+            {/* 1-3: copy on top */}
             <div className="flex flex-col gap-[8px]">
               <span className="font-[family-name:var(--font-inter)] text-[13px] font-semibold uppercase tracking-[0.5px] text-[#3f6ea5]">
                 {c.label}
@@ -119,9 +118,12 @@ export default function WhatMisterrDoes() {
                 {c.headline}
               </p>
               <p className="font-[family-name:var(--font-inter)] text-[15px] font-medium leading-[1.45] tracking-[-0.2px] text-[#3a4250]">
-                {c.body}
+                {c.description}
               </p>
             </div>
+
+            {/* 4: slack thread as proof, below */}
+            <SlackThread {...c} />
           </div>
         ))}
       </div>
@@ -135,17 +137,11 @@ function SlackThread({
   userText,
   replyTime,
   replyText,
-  reactions,
-}: {
-  user: { name: string; img: string };
-  time: string;
-  userText: ReactNode;
-  replyTime: string;
-  replyText: ReactNode;
-  reactions?: { emoji: string; count: number }[];
-}) {
+  attachment,
+  reaction,
+}: Card) {
   return (
-    <div className="relative flex flex-col gap-[14px] rounded-[14px] border border-[#e7e2db] bg-white p-[16px] shadow-[0px_2px_8px_rgba(0,0,0,0.06)]">
+    <div className="flex flex-col gap-[14px] rounded-[14px] border border-[#e7e2db] bg-white p-[16px]">
       <SlackMessage
         avatar={
           <img
@@ -170,7 +166,8 @@ function SlackThread({
         isApp
         time={replyTime}
         body={replyText}
-        reactions={reactions}
+        attachment={attachment}
+        reaction={reaction}
       />
     </div>
   );
@@ -182,19 +179,21 @@ function SlackMessage({
   isApp = false,
   time,
   body,
-  reactions,
+  attachment,
+  reaction,
 }: {
   avatar: ReactNode;
   name: string;
   isApp?: boolean;
   time: string;
   body: ReactNode;
-  reactions?: { emoji: string; count: number }[];
+  attachment?: Attachment;
+  reaction?: { emoji: string; count: number };
 }) {
   return (
-    <div className="flex gap-[10px]">
+    <div className="flex min-w-0 gap-[10px]">
       {avatar}
-      <div className="flex min-w-0 flex-col gap-[3px]">
+      <div className="flex min-w-0 flex-1 flex-col gap-[3px]">
         <div className="flex items-center gap-[6px]">
           <span className="font-[family-name:var(--font-inter)] text-[15px] font-semibold text-[#1d1c1d]">
             {name}
@@ -211,21 +210,55 @@ function SlackMessage({
         <p className="font-[family-name:var(--font-inter)] text-[14px] leading-[1.5] text-[#1d1c1d]">
           {body}
         </p>
-        {reactions && reactions.length > 0 && (
-          <div className="mt-[6px] flex flex-wrap gap-[6px]">
-            {reactions.map((r) => (
-              <span
-                key={r.emoji}
-                className="flex items-center gap-[4px] rounded-full border border-[#e1dfde] bg-[#f8f8f8] px-[8px] py-[2px] font-[family-name:var(--font-inter)] text-[12px] font-medium text-[#616061]"
-              >
-                <span>{r.emoji}</span>
-                <span>{r.count}</span>
-              </span>
-            ))}
+        {attachment && <AttachmentChip attachment={attachment} />}
+        {reaction && (
+          <div className="mt-[6px] flex">
+            <span className="flex items-center gap-[4px] rounded-full border border-[#e1dfde] bg-[#f8f8f8] px-[8px] py-[2px] font-[family-name:var(--font-inter)] text-[12px] font-medium text-[#616061]">
+              <span>{reaction.emoji}</span>
+              <span>{reaction.count}</span>
+            </span>
           </div>
         )}
       </div>
     </div>
+  );
+}
+
+function AttachmentChip({ attachment }: { attachment: Attachment }) {
+  if (attachment.kind === "link") {
+    return (
+      <span className="mt-[6px] flex max-w-full items-center gap-[8px] self-start rounded-[10px] border border-[#e1dfde] bg-[#f8f8f8] px-[10px] py-[7px]">
+        <span className="flex size-[22px] shrink-0 items-center justify-center rounded-[6px] bg-[#1264a3] text-white">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="size-[13px]">
+            <path d="M9 15l6-6M10 6h5a3 3 0 0 1 0 6h-1M14 18H9a3 3 0 0 1 0-6h1" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </span>
+        <span className="truncate font-[family-name:var(--font-inter)] text-[13px] font-medium text-[#1264a3]">
+          {attachment.label}
+        </span>
+      </span>
+    );
+  }
+
+  const isPdf = attachment.tile === "pdf";
+  return (
+    <span className="mt-[6px] flex max-w-full items-center gap-[10px] self-start rounded-[10px] border border-[#e1dfde] bg-[#f8f8f8] px-[10px] py-[8px]">
+      <span
+        className={`flex size-[28px] shrink-0 items-center justify-center rounded-[6px] font-[family-name:var(--font-inter)] text-[9px] font-bold text-white ${
+          isPdf ? "bg-[#ff5200]" : "bg-[#ff7a59]"
+        }`}
+      >
+        {isPdf ? "PDF" : "H"}
+      </span>
+      <span className="flex min-w-0 flex-col">
+        <span className="truncate font-[family-name:var(--font-inter)] text-[13px] font-semibold text-[#1d1c1d]">
+          {attachment.name}
+        </span>
+        <span className="truncate font-[family-name:var(--font-inter)] text-[11px] text-[#9a9a9a]">
+          {attachment.meta}
+        </span>
+      </span>
+    </span>
   );
 }
 
@@ -239,69 +272,4 @@ function Mention({ children }: { children: ReactNode }) {
 
 function Channel({ children }: { children: ReactNode }) {
   return <span className="font-medium text-[#1264a3]">{children}</span>;
-}
-
-function ThreadLink({ children }: { children: ReactNode }) {
-  return (
-    <a href="#" className="font-medium text-[#1264a3] hover:underline">
-      {children}
-    </a>
-  );
-}
-
-/* ── artifact peeks (the finished output behind/under the thread) ─────────── */
-
-function CrmArtifact() {
-  return (
-    <div className="absolute bottom-0 left-[8px] right-[8px] z-0 flex items-center gap-[10px] rounded-[12px] border border-[#e1dfde] bg-white px-[12px] py-[10px] shadow-[0px_6px_16px_rgba(0,0,0,0.08)]">
-      <span className="flex size-[26px] shrink-0 items-center justify-center rounded-[6px] bg-[#ff7a59] font-[family-name:var(--font-inter)] text-[12px] font-bold text-white">
-        H
-      </span>
-      <span className="flex min-w-0 flex-col">
-        <span className="truncate font-[family-name:var(--font-inter)] text-[12px] font-semibold text-[#1d1c1d]">
-          Acme Inc · Billing follow-up
-        </span>
-        <span className="font-[family-name:var(--font-inter)] text-[11px] text-[#9a9a9a]">
-          HubSpot · Draft ready to send
-        </span>
-      </span>
-    </div>
-  );
-}
-
-function DocArtifact() {
-  return (
-    <div className="absolute right-0 top-0 z-0 hidden w-[150px] rotate-[3deg] flex-col gap-[6px] rounded-[8px] border border-[#e1dfde] bg-white p-[12px] shadow-[0px_8px_20px_rgba(0,0,0,0.10)] sm:flex">
-      <div className="flex items-center justify-between">
-        <span className="font-[family-name:var(--font-inter)] text-[10px] font-semibold text-[#1d1c1d]">
-          Docs · v2.3
-        </span>
-        <span className="rounded-[3px] bg-[#e6f4ea] px-[4px] py-[1px] font-[family-name:var(--font-inter)] text-[8px] font-semibold uppercase text-[#1a7f37]">
-          Preview
-        </span>
-      </div>
-      <div className="h-[5px] w-full rounded-full bg-[#ececec]" />
-      <div className="h-[5px] w-[80%] rounded-full bg-[#ececec]" />
-      <div className="h-[5px] w-[90%] rounded-full bg-[#ececec]" />
-      <div className="h-[5px] w-[60%] rounded-full bg-[#ececec]" />
-    </div>
-  );
-}
-
-function PdfArtifact() {
-  return (
-    <div className="absolute bottom-0 left-[8px] right-[8px] z-0 flex items-center gap-[10px] rounded-[12px] border border-[#e1dfde] bg-white px-[12px] py-[10px] shadow-[0px_6px_16px_rgba(0,0,0,0.08)]">
-      <span className="flex size-[28px] shrink-0 items-center justify-center rounded-[6px] bg-[#ff5200] font-[family-name:var(--font-inter)] text-[10px] font-bold text-white">
-        PDF
-      </span>
-      <span className="flex min-w-0 flex-col">
-        <span className="truncate font-[family-name:var(--font-inter)] text-[12px] font-semibold text-[#1d1c1d]">
-          competitive-analysis.pdf
-        </span>
-        <span className="font-[family-name:var(--font-inter)] text-[11px] text-[#9a9a9a]">
-          10 pages · feature matrix, pricing, positioning
-        </span>
-      </span>
-    </div>
-  );
 }
