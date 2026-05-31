@@ -8,6 +8,23 @@ import Testimonials from "./Testimonials";
 // layout.tsx and exposed as CSS variables; Graphik (not on Google Fonts) falls
 // back to Inter. Layout reproduces the 1280px Figma frame, centered.
 
+// Integration logos for the infinite marquee (SVGs in /public/landing/logos).
+const INTEGRATIONS = [
+  { name: "HubSpot", file: "hubspot" },
+  { name: "Salesforce", file: "salesforce" },
+  { name: "Gmail", file: "gmail" },
+  { name: "GitHub", file: "github" },
+  { name: "Google Calendar", file: "google-calendar" },
+  { name: "Notion", file: "notion" },
+  { name: "Datadog", file: "datadog" },
+  { name: "Metabase", file: "metabase" },
+  { name: "Meta Ads", file: "meta-ads" },
+  { name: "Google Ads", file: "google-ads" },
+  { name: "TikTok", file: "tiktok" },
+  { name: "Shopify", file: "shopify" },
+  { name: "Stripe", file: "stripe" },
+];
+
 const SlackIcon = () => (
   <svg
     className="size-[20px] shrink-0"
@@ -95,6 +112,26 @@ export default function HomePage() {
 
       {/* fade strip */}
       <div className="relative -mt-[99px] h-[99px] w-full bg-gradient-to-b from-[rgba(250,245,241,0)] to-[#faf5f1]" />
+
+      {/* ===== INTEGRATIONS MARQUEE ===== */}
+      <section className="flex w-full flex-col items-center gap-[28px] bg-[#faf5f1] pt-[24px]">
+        <p className="font-[family-name:var(--font-inter)] text-[18px] font-medium tracking-[-0.5px] text-center text-[#626262]">
+          Connect your current stack
+        </p>
+        <div className="marquee-mask w-full overflow-hidden">
+          <div className="animate-marquee flex w-max items-center gap-[64px] pr-[64px]">
+            {[...INTEGRATIONS, ...INTEGRATIONS].map((logo, i) => (
+              <img
+                key={i}
+                src={`/landing/logos/${logo.file}.svg`}
+                alt={logo.name}
+                title={logo.name}
+                className="h-[34px] w-auto shrink-0 opacity-60 transition-opacity hover:opacity-100"
+              />
+            ))}
+          </div>
+        </div>
+      </section>
 
       {/* ===== FEATURE ROW ===== */}
       <section className="flex w-full flex-col items-center gap-[40px] overflow-clip bg-[#faf5f1] px-[60px] pb-[80px] pt-[40px]">
