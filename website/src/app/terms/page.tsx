@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 export const metadata: Metadata = {
-  title: "Terms of Use — Misterr",
+  title: "Terms of Use | Misterr",
   description: "Website Terms of Use for misterr.ai.",
 };
 

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-// Placeholder testimonials — replace copy/authors with real ones.
+// Placeholder testimonials: replace copy/authors with real ones.
 const ITEMS = [
   { quote: "Misterr handles our disputes end to end. We barely touch them now.", name: "Ana Pérez", role: "COO, Retailco" },
   { quote: "It feels like a teammate that never sleeps. Output ships in Slack.", name: "Liam Carter", role: "Eng Lead, Buildr" },
@@ -23,7 +23,7 @@ export default function Testimonials() {
 
   return (
     <>
-      <div className="w-[1164px] overflow-hidden shrink-0">
+      <div className="w-full max-w-[1164px] overflow-hidden">
         <div
           className="flex items-center gap-[24px] transition-transform duration-300 ease-out"
           style={{ transform: `translateX(-${index * (CARD_W + GAP)}px)` }}
