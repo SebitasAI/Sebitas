@@ -18,7 +18,7 @@ const TIERS = [
     label: "Quick tasks",
     min: CREDITS_PER_TASK * 0.5, // 25
     max: CREDITS_PER_TASK * 2, // 100
-    desc: "Lookups, summaries and quick answers — minutes of work.",
+    desc: "Lookups, summaries and quick answers, in minutes.",
     tint: "bg-[#ddf2ff]",
   },
   {
@@ -87,7 +87,7 @@ export default function CreditsValue() {
             userText={
               <>
                 <Mention>@Misterr</Mention> the changelog says v2.3 but the docs
-                still say v2.1 — update them and have it ready for review
+                still say v2.1, update them and have it ready for review
               </>
             }
             replyTime="2:51 PM"
@@ -109,7 +109,7 @@ export default function CreditsValue() {
             userText={
               <>
                 <Mention>@Misterr</Mention> put together a competitive analysis
-                for the board — us vs the 3 big players, as a shareable PDF
+                for the board, us vs the 3 big players, as a shareable PDF
               </>
             }
             replyTime="11:39 AM"

@@ -20,7 +20,7 @@ const CONFIG = {
     step: 10000,
     initial: 40000,
   },
-  defaultCreditsPerTask: 50, // placeholder — sets the margin, not the rate
+  defaultCreditsPerTask: 50, // placeholder, sets the margin, not the rate
   salesHref: "#enterprise", // contact / sales flow (Enterprise)
 };
 
@@ -119,8 +119,8 @@ export default function PriceCalculator() {
           </span>
         </div>
         <p className="font-[family-name:var(--font-inter)] text-[13px] leading-[1.5] text-[#9a9a9a]">
-          Define this number — it&apos;s what sets your margin, not the
-          per-credit rate.
+          Define this number. It&apos;s what sets your margin, not the per-credit
+          rate.
         </p>
       </div>
     </div>

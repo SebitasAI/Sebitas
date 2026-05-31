@@ -3,12 +3,12 @@
 import { useState } from "react";
 
 // Full FAQ content lives here (not in JSX). Some answers are still tied to
-// unmade product decisions — see the // TODO notes; do not publish those as
+// unmade product decisions (see the // TODO notes); do not publish those as
 // final until the underlying behavior/numbers are confirmed.
 const FAQS: { q: string; a: string }[] = [
   {
     q: "What is a credit?",
-    a: 'A credit is the unit we use to measure the work Misterr does for you. Different tasks use different amounts — a quick summary costs far fewer credits than a full project. See "What can I get done with 20,000 credits?" below for real examples.',
+    a: 'A credit is the unit we use to measure the work Misterr does for you. Different tasks use different amounts. A quick summary costs far fewer credits than a full project. See "What can I get done with 20,000 credits?" below for real examples.',
   },
   {
     q: "What can I get done with 20,000 credits?",
@@ -17,7 +17,7 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: "What happens when I run out of credits?",
-    a: "Misterr pauses new work until you top up — so you never get a surprise bill. You can buy more credits at the same flat rate or upgrade your plan anytime, and Misterr picks right back up.",
+    a: "Misterr pauses new work until you top up, so you never get a surprise bill. You can buy more credits at the same flat rate or upgrade your plan anytime, and Misterr picks right back up.",
     // TODO: confirm the actual end-of-credits UX (hard stop vs. finish-current-task-then-pause). Copy must match real behavior.
   },
   {
@@ -38,7 +38,7 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: "How much does a credit cost?",
-    a: "Every credit costs the same flat rate — no hidden tiers, no pricing games. (Large teams and high-volume customers get custom volume pricing — see Enterprise below.)",
+    a: "Every credit costs the same flat rate, with no hidden tiers and no pricing games. (Large teams and high-volume customers get custom volume pricing. See Enterprise below.)",
   },
   {
     q: "Is there a per-seat charge?",
@@ -46,7 +46,7 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: "Can I add my whole team?",
-    a: "Yes — invite your entire team at no extra cost. You only pay for the work Misterr does, never for seats.",
+    a: "Yes. Invite your entire team at no extra cost. You only pay for the work Misterr does, never for seats.",
   },
   {
     q: "What can Misterr access?",
@@ -54,7 +54,7 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: "Can Misterr take actions without my approval?",
-    a: "Misterr handles routine tasks on its own. For sensitive actions — like sending external emails, publishing, or deleting — it checks with you first. You control which actions require approval.",
+    a: "Misterr handles routine tasks on its own. For sensitive actions like sending external emails, publishing, or deleting, it checks with you first. You control which actions require approval.",
     // TODO: this requires a real, user-configurable approval setting in the product. Don't publish until it exists.
   },
   {
@@ -67,12 +67,12 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: "Is the free trial really free?",
-    a: "Yes — you can get started for free, no credit card required.",
+    a: "Yes. You can get started for free, no credit card required.",
     // TODO: define the exact free offering (how many credits / how long) and update this answer to match.
   },
   {
     q: "Can I cancel anytime?",
-    a: "Yes. No contracts and no lock-in — cancel anytime and you won't be charged for the next cycle.",
+    a: "Yes. No contracts and no lock-in, so cancel anytime and you won't be charged for the next cycle.",
   },
   {
     q: "Do you offer Enterprise pricing?",

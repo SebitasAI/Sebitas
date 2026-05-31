@@ -5,7 +5,7 @@ import CreditsValue from "./CreditsValue";
 import Faq from "./Faq";
 
 export const metadata: Metadata = {
-  title: "Pricing — Misterr",
+  title: "Pricing | Misterr",
   description:
     "Usage-based pricing for Misterr. Estimate your monthly credits and cost with the interactive calculator.",
 };
@@ -21,7 +21,7 @@ export default function PricingPage() {
           Pricing that scales with you
         </h1>
         <p className="max-w-[560px] font-[family-name:var(--font-inter)] text-[18px] font-medium leading-[1.45] tracking-[-0.4px] text-[#626262]">
-          Pay only for what Misterr actually does. $2.50 per 1,000 credits — move
+          Pay only for what Misterr actually does. $2.50 per 1,000 credits. Move
           the slider to estimate your month.
         </p>
       </section>
