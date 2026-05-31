@@ -72,9 +72,9 @@ export default function Header() {
         hidden ? "-translate-y-full" : "translate-y-0"
       }`}
     >
-      <div className="mx-auto flex w-full max-w-[1280px] items-center justify-between px-[64px] py-[12px] backdrop-blur-[3px]">
+      <div className="mx-auto flex w-full max-w-[1280px] items-center justify-between px-[20px] py-[12px] backdrop-blur-[3px] md:px-[64px]">
         <Link href="/" className="relative h-[39px] shrink-0">
-          <div className="flex size-full items-center px-[12px]">
+          <div className="flex size-full items-center px-[4px] md:px-[12px]">
             <img
               className="block h-[28px] w-[131px] max-w-none"
               src="/landing/misterr-logo.svg"
@@ -83,7 +83,7 @@ export default function Header() {
           </div>
         </Link>
 
-        <nav ref={navRef} className="flex items-center gap-[2px] shrink-0">
+        <nav ref={navRef} className="hidden items-center gap-[2px] shrink-0 lg:flex">
           <Link
             href="/pricing"
             className="flex h-[39px] items-center rounded-[12px] px-[16px] hover:bg-[#f3f3f3]"
@@ -137,24 +137,28 @@ export default function Header() {
         </nav>
 
         <div className="flex h-[48px] items-center gap-[8px] shrink-0">
-          <CtaButton
-            href={TALK_TO_SALES}
-            shadow="bg-[#eee]"
-            face="bg-white"
-            hover="hover:bg-[#f1f1f1]"
-            text="text-[#191919]"
-          >
-            Talk to sales
-          </CtaButton>
-          <CtaButton
-            href={LOGIN_HREF}
-            shadow="bg-[#626262]"
-            face="bg-[#191919]"
-            hover="hover:bg-black"
-            text="text-white"
-          >
-            Login
-          </CtaButton>
+          <div className="hidden h-full sm:flex">
+            <CtaButton
+              href={TALK_TO_SALES}
+              shadow="bg-[#eee]"
+              face="bg-white"
+              hover="hover:bg-[#f1f1f1]"
+              text="text-[#191919]"
+            >
+              Talk to sales
+            </CtaButton>
+          </div>
+          <div className="hidden h-full md:flex">
+            <CtaButton
+              href={LOGIN_HREF}
+              shadow="bg-[#626262]"
+              face="bg-[#191919]"
+              hover="hover:bg-black"
+              text="text-white"
+            >
+              Login
+            </CtaButton>
+          </div>
           <CtaButton
             href={GET_STARTED_HREF}
             shadow="bg-[#cc4a00]"

@@ -16,7 +16,7 @@ const TEAMS = [
 export default function TeamTabs() {
   const [active, setActive] = useState("Engineering");
   return (
-    <div className="flex items-center gap-[8px] rounded-[999px] px-[12px] py-[4px] shrink-0">
+    <div className="flex w-full max-w-[900px] flex-wrap items-center justify-center gap-[8px] rounded-[999px] px-[12px] py-[4px]">
       {TEAMS.map((t) => {
         const isActive = t === active;
         return (
