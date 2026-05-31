@@ -28,6 +28,8 @@ export type ScheduledTask = {
   next_run_at: string | null;
   created_at: string;
   created_by_user_id: string | null;
+  fire_once: boolean;
+  prompt_is_literal: boolean;
 };
 
 export type TaskListResponse = {
@@ -36,6 +38,22 @@ export type TaskListResponse = {
 };
 
 export type ListFilter = "all" | "mine" | "system";
+
+export type ScheduledTaskRun = {
+  id: string;
+  task_id: string | null;
+  task_name_snapshot: string;
+  started_at: string;
+  finished_at: string | null;
+  status: "success" | "failed" | "running";
+  output: string | null;
+  error: string | null;
+};
+
+export type TaskRunsResponse = {
+  runs: ScheduledTaskRun[];
+  total_count: number;
+};
 
 function backendBase(): string {
   const url = process.env.NEXT_PUBLIC_BACKEND_URL;
@@ -124,6 +142,22 @@ export const scheduledTasksApi = {
         headers: authHeaders(token, workspaceId),
       },
     );
+    await expectOk(res);
+    return res.json();
+  },
+  runs: async (
+    idOrName: string,
+    token: string,
+    workspaceId?: string | null,
+    limit = 50,
+  ): Promise<TaskRunsResponse> => {
+    const url = new URL(
+      `${backendBase()}/api/scheduled-tasks/${encodeURIComponent(idOrName)}/runs`,
+    );
+    url.searchParams.set("limit", String(limit));
+    const res = await fetch(url.toString(), {
+      headers: authHeaders(token, workspaceId),
+    });
     await expectOk(res);
     return res.json();
   },

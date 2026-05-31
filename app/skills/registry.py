@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import structlog
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 
 from app.db.models import AppUser, Skill, SkillInstall
 from app.db.session import get_session
@@ -106,10 +106,14 @@ async def create_skill(
     size_bytes: int,
     created_by_user_id: uuid.UUID | None,
     source: str = "upload",
+    scope: str = "workspace",
 ) -> Skill:
     """Persist + upload. Two writes, in this order: insert the skill row to
     reserve (workspace_id, name) atomically; if R2 fails, the row is rolled
-    back. Returns the persisted Skill (refreshed)."""
+    back. Returns the persisted Skill (refreshed).
+
+    `scope` defaults to 'workspace' for back-compat with Slack DM uploads.
+    Web upload should pass 'personal' explicitly when the user picks it."""
     async with get_session() as session:
         existing = (
             await session.execute(
@@ -131,6 +135,7 @@ async def create_skill(
             version=1,
             source=source,
             activation_default=activation_default,
+            scope=scope,
             links=links,
             size_bytes=size_bytes,
             created_by_user_id=created_by_user_id,
@@ -312,7 +317,12 @@ async def list_for_user(user_id: uuid.UUID) -> list[SkillWithInstall]:
 async def list_for_workspace(workspace_id: uuid.UUID) -> list[Skill]:
     """All workspace skills regardless of install status. Used by the Slack
     catalogue-style flows (future) and admin tools; the per-user flow uses
-    `list_for_user` instead."""
+    `list_for_user` instead.
+
+    Note: returns every row in the workspace including personal ones. The
+    per-user visibility filter belongs in `list_visible_for_user` (which
+    the web /api/skills uses); callers that want admin-style "show me
+    every skill" still use this function."""
     async with get_session() as session:
         return list(
             (
@@ -323,6 +333,34 @@ async def list_for_workspace(workspace_id: uuid.UUID) -> list[Skill]:
                 )
             ).scalars()
         )
+
+
+async def list_visible_for_user(
+    workspace_id: uuid.UUID, user_id: uuid.UUID
+) -> list[Skill]:
+    """Skills the user is allowed to see: every workspace-scope skill plus
+    the user's own personal skills. Used by the web /api/skills endpoint
+    and the agent's list_workspace_skills tool.
+
+    A personal skill is only visible to its creator (`created_by_user_id`).
+    A workspace skill is visible to all members of that workspace. Cross-
+    workspace isolation is enforced by the `workspace_id` filter."""
+    async with get_session() as session:
+        rows = (
+            await session.execute(
+                select(Skill).where(
+                    Skill.workspace_id == workspace_id,
+                    or_(
+                        Skill.scope == "workspace",
+                        and_(
+                            Skill.scope == "personal",
+                            Skill.created_by_user_id == user_id,
+                        ),
+                    ),
+                ).order_by(Skill.created_at.desc())
+            )
+        ).scalars().all()
+    return list(rows)
 
 
 async def list_installable_for_user(user_id: uuid.UUID) -> list[Skill]:

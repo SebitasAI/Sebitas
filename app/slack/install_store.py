@@ -24,6 +24,7 @@ from slack_sdk.oauth.installation_store.models.bot import Bot
 from slack_sdk.oauth.installation_store.models.installation import Installation
 from sqlalchemy import select
 
+from app.auth.clerk_provisioning import provision_for_installer
 from app.db.models import Workspace
 from app.db.session import get_session
 from app.scheduled_tasks.repository import seed_system_tasks_for_workspace
@@ -106,6 +107,29 @@ class MisterrInstallationStore(AsyncInstallationStore):
                 team_id=team_id,
                 error=str(exc),
             )
+        # Provision the Clerk Organization for this workspace (slice T-5).
+        # Best-effort: if the installer doesn't have a Clerk user yet
+        # (Slack-first onboarding), provision_for_installer returns None and
+        # logs a deferred event. The web app's first-login provision endpoint
+        # picks it up later. Never fail the install over Clerk hiccups.
+        installer_uid = getattr(installation, "user_id", None)
+        if installer_uid:
+            try:
+                org_id = await provision_for_installer(ws_id, installer_uid)
+                if org_id:
+                    log.info(
+                        "workspace_install_clerk_org_ready",
+                        workspace_id=str(ws_id),
+                        team_id=team_id,
+                        clerk_org_id=org_id,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "workspace_install_clerk_org_failed",
+                    workspace_id=str(ws_id),
+                    team_id=team_id,
+                    error=str(exc),
+                )
 
     async def async_save_bot(self, bot: Bot) -> None:
         # Bolt sometimes saves just the bot (e.g. after a token rotation). The

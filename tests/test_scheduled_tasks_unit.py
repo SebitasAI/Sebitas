@@ -234,6 +234,7 @@ class TestBuildSeedText:
             previous_summary=summary,
             fire_once=False,
             prompt_is_literal=False,
+            run_id=uuid.uuid4(),
         )
 
     def test_includes_no_prior_summary_when_first_run(self):

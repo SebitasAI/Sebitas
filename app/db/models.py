@@ -53,6 +53,12 @@ class Workspace(TimestampMixin, Base):
     # Channel where Misterr was installed. System tasks post here by default;
     # null until the installer picks (or admin sets it manually). Migration 0017.
     bot_home_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Clerk Organization id (e.g. "org_2abc...") backing this Slack workspace's
+    # team membership. 1:1 mapping enforced by UNIQUE. Created automatically
+    # on first install (when the installer has a Clerk user); for legacy
+    # workspaces installed before this slice, populated by the backfill
+    # script `app/auth/migrations/backfill_clerk_orgs.py`.
+    clerk_org_id: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)
 
     users: Mapped[list["AppUser"]] = relationship(back_populates="workspace")
     threads: Mapped[list["Thread"]] = relationship(back_populates="workspace")
@@ -60,7 +66,15 @@ class Workspace(TimestampMixin, Base):
 
 class AppUser(TimestampMixin, Base):
     __tablename__ = "app_user"
-    __table_args__ = (UniqueConstraint("workspace_id", "slack_user_id"),)
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "slack_user_id"),
+        # One Clerk user maps to exactly one AppUser per workspace. Cross
+        # workspaces, the same Clerk user can have many AppUser rows (one per
+        # workspace they belong to). Migration 0024.
+        UniqueConstraint(
+            "workspace_id", "clerk_user_id", name="uq_app_user_workspace_clerk_user"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -69,6 +83,10 @@ class AppUser(TimestampMixin, Base):
         ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
     )
     slack_user_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Clerk user id ("user_2..."). Populated by the backfill script for
+    # legacy rows, and on first web login for new users. Once non-null, the
+    # require_app_user Depends uses this instead of email matching.
+    clerk_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     workspace: Mapped["Workspace"] = relationship(back_populates="users")
 
@@ -124,6 +142,7 @@ class Message(TimestampMixin, Base):
 # collisions on replay after a partial failure).
 _SKILL_SOURCES = ("upload", "catalog")
 _SKILL_ACTIVATIONS = ("always_active", "on_demand")
+_SKILL_SCOPES = ("workspace", "personal")
 
 
 class Skill(Base):
@@ -145,6 +164,10 @@ class Skill(Base):
             "activation_default IN ('always_active', 'on_demand')",
             name="ck_skill_activation_default",
         ),
+        CheckConstraint(
+            "scope IN ('workspace', 'personal')",
+            name="ck_skill_scope",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -165,6 +188,13 @@ class Skill(Base):
     )
     activation_default: Mapped[str] = mapped_column(
         String(32), nullable=False, default="on_demand", server_default="on_demand"
+    )
+    # 'workspace': visible to every member (default; preserves pre-0022
+    # behavior). 'personal': only the creator can see / install / use it.
+    # The web API + agent tools both filter on this so the visibility
+    # boundary is consistent.
+    scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="workspace", server_default="workspace"
     )
     # Slugs extracted from `[[name]]` references in the body. Not foreign-key
     # constrained: a body may reference a sibling skill that doesn't exist yet.
@@ -497,6 +527,42 @@ class ScheduledTask(TimestampMixin, Base):
     next_run_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class ScheduledTaskRun(Base):
+    """One row per execution of a scheduled_task. Persists across the parent
+    task's lifecycle (ON DELETE SET NULL) so the UI can render history for
+    deleted / completed one-shot tasks. Created when the scheduler claims
+    the task (status='running') and finalized when the agent run or literal
+    post returns (status='success' or 'failed')."""
+
+    __tablename__ = "scheduled_task_run"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'success', 'failed')",
+            name="ck_scheduled_task_run_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("scheduled_task.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    task_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    output: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class MessageAttachment(Base):

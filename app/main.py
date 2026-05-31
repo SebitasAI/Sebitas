@@ -22,6 +22,9 @@ from app.integrations.connect import (
     resume_pending_polls,
 )
 from app.api.scheduled_tasks import router as scheduled_tasks_router
+from app.api.skills import router as skills_router
+from app.api.team import router as team_router
+from app.auth.clerk_provisioning import provision_and_backfill_all_workspaces
 from app.integrations.webhook import router as pipedream_webhook_router
 from app.logging import configure_logging
 from app.scheduled_tasks.repository import seed_system_tasks_for_all_workspaces
@@ -125,6 +128,19 @@ async def lifespan(_: FastAPI):
             log.warning("scheduled_task_seed_startup_failed", error=str(exc))
         scheduled_task_loop = asyncio.create_task(run_scheduler_loop())
 
+        # Clerk Organizations backfill (slice T-5). Idempotent: for each
+        # installed workspace without a clerk_org_id, provision one and
+        # link existing AppUsers as members. Once all rows are linked this
+        # is a quick no-op (only DB queries, no Clerk API calls). Failure
+        # is logged but never blocks startup -- the web-side endpoint can
+        # re-trigger provisioning on first login.
+        try:
+            counts = await provision_and_backfill_all_workspaces()
+            if counts.get("orgs_created") or counts.get("members_linked"):
+                log.info("clerk_org_backfill_on_startup", **counts)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("clerk_org_backfill_startup_failed", error=str(exc))
+
         try:
             yield
         finally:
@@ -162,6 +178,8 @@ app.include_router(pipedream_webhook_router)
 app.include_router(spaces_internal_router)
 app.include_router(web_api_router)
 app.include_router(scheduled_tasks_router)
+app.include_router(skills_router)
+app.include_router(team_router)
 
 
 @app.get("/health")
