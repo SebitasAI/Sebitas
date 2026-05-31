@@ -1,8 +1,8 @@
 import Link from "next/link";
 import Header from "./Header";
-import TeamTabs from "./TeamTabs";
 import Testimonials from "./Testimonials";
 import WhatMisterrDoes from "./WhatMisterrDoes";
+import UseCases from "./UseCases";
 
 // Landing page imported from Figma (node 3:22).
 // Assets live in /public/landing. Fonts (Lexend / Inter / Geist) are loaded in
@@ -141,33 +141,7 @@ export default function HomePage() {
           Own results for every team
         </p>
 
-        <TeamTabs />
-
-        <div className="flex w-full max-w-[1164px] flex-wrap content-center items-center justify-center gap-[24px]">
-          {[
-            "Intelligent bug triage",
-            "Code contributions",
-            "Code contributions",
-            "Code contributions",
-            "Full-stack internal tools",
-            "Incident + error response",
-          ].map((t, i) => (
-            <div key={i} className="flex w-full max-w-[372px] flex-col items-start gap-[24px] shrink-0">
-              <div className="h-[280px] w-full rounded-[16px] border border-black bg-white shadow-[0px_4px_0px_0px_#626262] sm:h-[351px]" />
-              <div className="flex w-full flex-col items-start">
-                <p className="w-full font-[family-name:var(--font-inter)] text-[20px] font-semibold tracking-[-1px] text-center text-[#191919]">
-                  {t}
-                </p>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="flex h-[40px] items-center justify-center gap-[8px] overflow-clip rounded-[200px] px-[16px] py-[8px] shrink-0">
-          <p className="font-[family-name:var(--font-inter)] text-[18px] font-medium leading-[16px] text-[#222] whitespace-nowrap">
-            And much more!
-          </p>
-        </div>
+        <UseCases />
 
         <div className="flex flex-col items-center gap-[16px] py-[20px] shrink-0 sm:flex-row sm:gap-[20px]">
           <GetStartedFree />

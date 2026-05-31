@@ -105,3 +105,25 @@ a[href] {
     animation: none;
   }
 }
+
+/* Use-case tab panel fade on switch (no layout jump, just a soft cross-in). */
+@keyframes uc-fade {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.uc-fade {
+  animation: uc-fade 220ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .uc-fade {
+    animation: none;
+  }
+}
