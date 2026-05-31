@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Header from "../Header";
 import PriceCalculator from "./PriceCalculator";
+import CreditsValue from "./CreditsValue";
 
 export const metadata: Metadata = {
   title: "Pricing — Misterr",
@@ -25,9 +26,12 @@ export default function PricingPage() {
       </section>
 
       {/* Calculator */}
-      <section className="flex w-full flex-col items-center bg-white px-[24px] pb-[100px] pt-[16px]">
+      <section className="flex w-full flex-col items-center bg-white px-[24px] pb-[60px] pt-[16px]">
         <PriceCalculator />
       </section>
+
+      {/* What your credits get done */}
+      <CreditsValue />
     </main>
   );
 }
