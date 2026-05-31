@@ -88,7 +88,7 @@ export default function Header() {
           className="flex items-center gap-[2px] rounded-[14px] border border-[#ececec] bg-white px-[6px] py-[4px] shadow-[0px_2px_8px_rgba(0,0,0,0.06)] shrink-0"
         >
           <Link
-            href="#pricing"
+            href="/pricing"
             className="flex h-[39px] items-center rounded-[12px] px-[16px] hover:bg-[#f3f3f3]"
           >
             <p className={linkText}>Pricing</p>
