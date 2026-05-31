@@ -2,6 +2,7 @@ import Link from "next/link";
 import Header from "./Header";
 import TeamTabs from "./TeamTabs";
 import Testimonials from "./Testimonials";
+import WhatMisterrDoes from "./WhatMisterrDoes";
 
 // Landing page imported from Figma (node 3:22).
 // Assets live in /public/landing. Fonts (Lexend / Inter / Geist) are loaded in
@@ -131,45 +132,8 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* ===== FEATURE ROW ===== */}
-      <section className="flex w-full flex-col items-center gap-[40px] overflow-clip bg-[#faf5f1] px-[24px] pb-[64px] pt-[40px] sm:px-[60px] sm:pb-[80px]">
-        <p className="min-w-full font-[family-name:var(--font-lexend)] text-[30px] font-semibold tracking-[-1.5px] text-center text-[#191919] [word-break:break-word] sm:text-[48px] sm:tracking-[-2.4px]">
-          Misterr ships real work without leaving Slack
-        </p>
-        <div className="flex w-full max-w-[1164px] flex-col flex-wrap items-center justify-center gap-[24px] sm:flex-row sm:items-stretch">
-          {[
-            {
-              title: "Defense in seconds, not weeks",
-              body: (
-                <>
-                  {`Defense is built and submitted at the moment `}
-                  <br aria-hidden />a dispute comes in. No human action needed.
-                </>
-              ),
-            },
-            {
-              title: "Real output, not just text.",
-              body: "Most merchants recover less than 9%. Our AI wins back the revenue others leave on the table.",
-            },
-            {
-              title: "Recover up to 70% of disputed revenue",
-              body: "Most merchants recover less than 9%. Our AI wins back the revenue others leave on the table.",
-            },
-          ].map((c) => (
-            <div key={c.title} className="flex w-full max-w-[372px] flex-col items-start gap-[24px] shrink-0">
-              <div className="h-[280px] w-full rounded-[12px] border border-[#191919] bg-[#ddf2ff] shadow-[0px_4px_0px_0px_#626262] sm:h-[351px]" />
-              <div className="flex w-full flex-col items-start gap-[12px] text-center text-[#191919]">
-                <p className="w-full font-[family-name:var(--font-inter)] text-[20px] font-semibold tracking-[-1px]">
-                  {c.title}
-                </p>
-                <p className="w-full whitespace-pre-wrap font-[family-name:var(--font-inter)] text-[16px] font-medium tracking-[-0.8px]">
-                  {c.body}
-                </p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
+      {/* ===== WHAT MISTERR DOES ===== */}
+      <WhatMisterrDoes />
 
       {/* ===== OWN RESULTS ===== */}
       <section className="flex w-full flex-col items-center justify-center gap-[40px] overflow-clip rounded-t-[8px] bg-[#faf5f1] px-[24px] py-[64px] sm:px-[40px] sm:py-[80px]">
