@@ -141,6 +141,7 @@ export default function Header() {
             href={TALK_TO_SALES}
             shadow="bg-[#eee]"
             face="bg-white"
+            hover="hover:bg-[#f1f1f1]"
             text="text-[#191919]"
           >
             Talk to sales
@@ -149,6 +150,7 @@ export default function Header() {
             href={LOGIN_HREF}
             shadow="bg-[#626262]"
             face="bg-[#191919]"
+            hover="hover:bg-black"
             text="text-white"
           >
             Login
@@ -157,6 +159,7 @@ export default function Header() {
             href={GET_STARTED_HREF}
             shadow="bg-[#cc4a00]"
             face="bg-[#ff5200]"
+            hover="hover:bg-[#ff6a23]"
             text="text-white"
           >
             Get started
@@ -171,12 +174,14 @@ function CtaButton({
   href,
   shadow,
   face,
+  hover,
   text,
   children,
 }: {
   href: string;
   shadow: string;
   face: string;
+  hover: string;
   text: string;
   children: React.ReactNode;
 }) {
@@ -186,7 +191,7 @@ function CtaButton({
       className={`flex h-full flex-col items-start justify-center rounded-[12px] ${shadow} pb-[4px] transition-transform active:translate-y-[2px]`}
     >
       <div
-        className={`flex flex-[1_0_0] min-h-px min-w-[88px] items-center justify-center rounded-[12px] ${face} px-[17px]`}
+        className={`flex flex-[1_0_0] min-h-px min-w-[88px] items-center justify-center rounded-[12px] ${face} ${hover} px-[17px] transition-colors`}
       >
         <p
           className={`font-[family-name:var(--font-geist)] text-[16px] font-medium leading-[19.2px] tracking-[-0.24px] ${text} whitespace-nowrap`}
