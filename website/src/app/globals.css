@@ -24,39 +24,63 @@ a[href] {
   cursor: pointer;
 }
 
-/* Infinite logo marquee. Track holds two copies of the list; shifting it by
-   -50% lands exactly on the second copy, so the loop is seamless. */
-@keyframes marquee {
-  from {
-    transform: translateX(0);
-  }
-  to {
-    transform: translateX(-50%);
-  }
-}
-
-.animate-marquee {
-  animation: marquee 35s linear infinite;
-}
-
-.animate-marquee:hover {
-  animation-play-state: paused;
-}
-
-.marquee-mask {
+/* Infinite logo marquee. Two identical groups sit side by side; both translate
+   left by exactly one group width plus the inter-group gap, so when the
+   animation loops the second group lands precisely where the first started —
+   the reset is invisible and a group always fills the viewport. */
+.logo-marquee {
+  --gap: 56px;
+  display: flex;
+  gap: var(--gap);
+  width: 100%;
+  overflow: hidden;
   -webkit-mask-image: linear-gradient(
     90deg,
     transparent,
-    #000 8%,
-    #000 92%,
+    #000 6%,
+    #000 94%,
     transparent
   );
   mask-image: linear-gradient(
     90deg,
     transparent,
-    #000 8%,
-    #000 92%,
+    #000 6%,
+    #000 94%,
     transparent
   );
+}
+
+.logo-marquee__group {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--gap);
+  min-width: max-content;
+  animation: logo-scroll 45s linear infinite;
+}
+
+.logo-marquee:hover .logo-marquee__group {
+  animation-play-state: paused;
+}
+
+@keyframes logo-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(calc(-100% - var(--gap)));
+  }
+}
+
+@media (max-width: 640px) {
+  .logo-marquee {
+    --gap: 36px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .logo-marquee__group {
+    animation: none;
+  }
 }
 

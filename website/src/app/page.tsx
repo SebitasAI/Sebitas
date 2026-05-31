@@ -111,25 +111,22 @@ export default function HomePage() {
       </section>
 
       {/* fade strip */}
-      <div className="relative -mt-[99px] h-[99px] w-full bg-gradient-to-b from-[rgba(250,245,241,0)] to-[#faf5f1]" />
+      <div className="relative -mt-[99px] h-[99px] w-full bg-gradient-to-b from-[rgba(250,245,241,0)] to-white" />
 
       {/* ===== INTEGRATIONS MARQUEE ===== */}
-      <section className="flex w-full flex-col items-center gap-[28px] bg-[#faf5f1] pt-[24px]">
-        <p className="font-[family-name:var(--font-inter)] text-[18px] font-medium tracking-[-0.5px] text-center text-[#626262]">
-          Connect your current stack
-        </p>
-        <div className="marquee-mask w-full overflow-hidden">
-          <div className="animate-marquee flex w-max items-center gap-[64px] pr-[64px]">
-            {[...INTEGRATIONS, ...INTEGRATIONS].map((logo, i) => (
-              <img
-                key={i}
-                src={`/landing/logos/${logo.file}.png`}
-                alt={logo.name}
-                title={logo.name}
-                className="h-[34px] w-auto shrink-0 object-contain opacity-80 transition-opacity hover:opacity-100"
-              />
-            ))}
-          </div>
+      <section className="flex w-full flex-col items-center gap-[40px] border-y border-[#ececec] bg-white px-[24px] py-[56px] sm:py-[64px]">
+        <div className="flex flex-col items-center gap-[10px] text-center">
+          <h2 className="font-[family-name:var(--font-lexend)] text-[22px] font-semibold tracking-[-0.8px] text-[#191919] sm:text-[28px] md:text-[32px]">
+            Connect your entire stack
+          </h2>
+          <p className="font-[family-name:var(--font-inter)] text-[16px] tracking-[-0.3px] text-[#626262] md:text-[18px]">
+            <span className="font-semibold text-[#ff5200]">500+</span>{" "}
+            integrations and counting
+          </p>
+        </div>
+        <div className="logo-marquee">
+          <LogoGroup />
+          <LogoGroup ariaHidden />
         </div>
       </section>
 
@@ -343,6 +340,29 @@ export default function HomePage() {
         </div>
       </footer>
     </main>
+  );
+}
+
+function LogoGroup({ ariaHidden = false }: { ariaHidden?: boolean }) {
+  return (
+    <div className="logo-marquee__group" aria-hidden={ariaHidden}>
+      {INTEGRATIONS.map((logo) => (
+        <div
+          key={logo.file}
+          className="flex h-[36px] w-[128px] shrink-0 items-center justify-center"
+        >
+          <img
+            src={`/landing/logos/${logo.file}.png`}
+            alt={ariaHidden ? "" : logo.name}
+            title={logo.name}
+            className="max-h-full max-w-full object-contain opacity-65 grayscale transition duration-300 hover:opacity-100 hover:grayscale-0"
+          />
+        </div>
+      ))}
+      <div className="flex h-[36px] shrink-0 items-center rounded-full border border-[#e2ddd6] bg-[#faf5f1] px-[18px] font-[family-name:var(--font-inter)] text-[14px] font-semibold whitespace-nowrap text-[#191919]">
+        <span className="text-[#ff5200]">+500</span>&nbsp;more
+      </div>
+    </div>
   );
 }
 
