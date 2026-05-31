@@ -359,9 +359,6 @@ function LogoGroup({ ariaHidden = false }: { ariaHidden?: boolean }) {
           />
         </div>
       ))}
-      <div className="flex h-[36px] shrink-0 items-center rounded-full border border-[#e2ddd6] bg-[#faf5f1] px-[18px] font-[family-name:var(--font-inter)] text-[14px] font-semibold whitespace-nowrap text-[#191919]">
-        <span className="text-[#ff5200]">+500</span>&nbsp;more
-      </div>
     </div>
   );
 }
