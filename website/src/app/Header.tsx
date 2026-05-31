@@ -85,7 +85,7 @@ export default function Header() {
 
         <nav ref={navRef} className="flex items-center gap-[2px] shrink-0">
           <Link
-            href="#pricing"
+            href="/pricing"
             className="flex h-[39px] items-center rounded-[12px] px-[16px] hover:bg-[#f3f3f3]"
           >
             <p className={linkText}>Pricing</p>

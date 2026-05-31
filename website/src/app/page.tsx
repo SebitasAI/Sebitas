@@ -273,7 +273,7 @@ export default function HomePage() {
             title="Product"
             items={[
               { label: "Overview", href: "#features" },
-              { label: "Pricing", href: "#pricing" },
+              { label: "Pricing", href: "/pricing" },
               { label: "FAQ", href: "#faq" },
             ]}
           />
