@@ -40,12 +40,18 @@ async def run_cheap(task: str) -> str:
         text = (response.choices[0].message.content or "").strip()
         usage = getattr(response, "usage", None)
         if usage is not None:
+            input_t = getattr(usage, "prompt_tokens", 0) or 0
+            output_t = getattr(usage, "completion_tokens", 0) or 0
             gen.update(
                 output=text,
-                usage_details={
-                    "input": getattr(usage, "prompt_tokens", 0) or 0,
-                    "output": getattr(usage, "completion_tokens", 0) or 0,
-                },
+                usage_details={"input": input_t, "output": output_t},
+            )
+            # Feed the per-run cost accumulator so cheap-model delegations
+            # show up in the final sales_cost score alongside Opus turns.
+            from app.agent import cost as _cost
+
+            _cost.add_usage(
+                model=model, input_tokens=input_t, output_tokens=output_t
             )
         else:
             gen.update(output=text)

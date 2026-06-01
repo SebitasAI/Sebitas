@@ -208,6 +208,19 @@ async def call_claude(messages: list[dict]) -> Any:
                 "cache_write": response.usage.cache_creation_input_tokens or 0,
             },
         )
+        # Local cost accumulator: sums tokens × pricing across every model
+        # call in this run, so the finalizer in `runner.py` can emit a
+        # `sales_cost_usd` score on the trace without a Langfuse API
+        # round-trip. See `app/agent/cost.py`.
+        from app.agent import cost as _cost
+
+        _cost.add_usage(
+            model=settings.claude_model,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            cache_read_tokens=response.usage.cache_read_input_tokens or 0,
+            cache_write_tokens=response.usage.cache_creation_input_tokens or 0,
+        )
     log.info(
         "agent_claude_turn",
         input_tokens=response.usage.input_tokens,

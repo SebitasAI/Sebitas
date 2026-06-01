@@ -1248,6 +1248,11 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
             ctx["langfuse_trace_id"] = _langfuse.get_current_trace_id()
         except Exception:  # noqa: BLE001
             ctx["langfuse_trace_id"] = None
+        # Reset the per-run cost accumulator. Each Claude / cheap-model call
+        # inside the run will add to it; we finalize + emit Langfuse scores
+        # right after the run finishes.
+        from app.agent import cost as _cost
+        _cost.start_run_accumulator()
         hb_task = asyncio.create_task(_heartbeat(
             client, channel=channel, thread_ts=reply_thread_ts or user_ts,
         ))
@@ -1266,6 +1271,31 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
             except asyncio.CancelledError:
                 pass
             _unregister_active_run(team_id, conversation_key)
+        # Emit cost scores ON THE TRACE before exiting the trace context so
+        # the score is bound to the right trace_id even if subsequent code
+        # spawns new spans.
+        try:
+            summary = _cost.finalize_run_accumulator()
+            if summary and summary["total_cost_usd"] > 0:
+                _langfuse.create_score(
+                    trace_id=ctx["langfuse_trace_id"],
+                    name="total_cost_usd",
+                    value=summary["total_cost_usd"],
+                    data_type="NUMERIC",
+                    comment=(
+                        f"in={summary['input_tokens']} out={summary['output_tokens']} "
+                        f"models={list(summary['by_model'].keys())}"
+                    ),
+                )
+                _langfuse.create_score(
+                    trace_id=ctx["langfuse_trace_id"],
+                    name="sales_cost_usd",
+                    value=summary["sales_cost_usd"],
+                    data_type="NUMERIC",
+                    comment=f"x{_cost.SALES_COST_MULTIPLIER} markup over LLM cost",
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("cost_score_emit_failed", error=str(exc)[:200])
         await _drive(client, ctx, result, lock_handle=lock_handle)
 
 
