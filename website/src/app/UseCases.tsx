@@ -229,11 +229,11 @@ export default function UseCases() {
       {/* left column */}
       <div className="flex w-full flex-col gap-[28px] lg:w-[380px] lg:shrink-0">
         <div className="flex flex-col gap-[12px]">
-          <span className="font-[family-name:var(--font-inter)] text-[14px] font-semibold uppercase tracking-[1px] text-[#ff5200]">
+          <span className="font-[family-name:var(--font-lexend)] text-[30px] font-semibold tracking-[-1.5px] text-[#ff5200] sm:text-[48px] sm:tracking-[-2.4px]">
             Use cases
           </span>
           <h2 className="font-[family-name:var(--font-lexend)] text-[34px] font-semibold leading-[1.05] tracking-[-1.6px] text-[#191919] sm:text-[42px] sm:tracking-[-2.1px]">
-            What Misterr can own for your team.
+            What Misterr can do for your team.
           </h2>
         </div>
 
