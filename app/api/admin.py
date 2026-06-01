@@ -40,6 +40,17 @@ log = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
+# Internal AppUser rows the platform creates on demand to drive its own
+# flows (scheduled tasks fire as "SYSTEM_SCHEDULED", future system actors
+# would land here too). Hidden from /admin views + excluded from
+# user_count so the admin sees only real humans/bots from Slack.
+#
+# Why not a column or an `is_system` flag: only one row per workspace and
+# the pattern is well-contained. If we ever ship a third system actor,
+# promote this to a regex or a proper flag.
+_HIDDEN_SLACK_USER_IDS: tuple[str, ...] = ("SYSTEM_SCHEDULED",)
+
+
 # --------------------------------------------------------------------------- #
 # Identity probe
 # --------------------------------------------------------------------------- #
@@ -107,7 +118,10 @@ async def list_workspaces(
             (
                 await session.execute(
                     select(AppUser.workspace_id, func.count())
-                    .where(AppUser.workspace_id.in_(ws_ids))
+                    .where(
+                        AppUser.workspace_id.in_(ws_ids),
+                        AppUser.slack_user_id.notin_(_HIDDEN_SLACK_USER_IDS),
+                    )
                     .group_by(AppUser.workspace_id)
                 )
             ).all()
@@ -216,7 +230,10 @@ async def list_workspace_users(
                     (SlackUser.workspace_id == AppUser.workspace_id)
                     & (SlackUser.slack_user_id == AppUser.slack_user_id),
                 )
-                .where(AppUser.workspace_id == ws_uuid)
+                .where(
+                    AppUser.workspace_id == ws_uuid,
+                    AppUser.slack_user_id.notin_(_HIDDEN_SLACK_USER_IDS),
+                )
                 .order_by(AppUser.created_at.desc())
             )
         ).all()
