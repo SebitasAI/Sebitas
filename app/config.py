@@ -170,6 +170,17 @@ class Settings(BaseSettings):
     # Doppler-configured port 3002.
     frontend_origins: str = "http://localhost:3002,http://localhost:3001"
 
+    # Platform admins for /admin endpoints (slice T-8). Comma-separated
+    # emails. A user authenticates with Clerk like everyone else; admin
+    # status is a separate check against this list (case-insensitive
+    # comparison). Empty disables /admin entirely.
+    #
+    # Why an env var instead of a DB column: 1-2 admins for now, changes
+    # are rare, no migration cost, no risk of accidentally elevating someone
+    # via SQL. If the list grows past ~5 emails or we add per-workspace
+    # admins, promote to a column.
+    platform_admins: str = ""
+
     log_level: str = "INFO"
 
 
