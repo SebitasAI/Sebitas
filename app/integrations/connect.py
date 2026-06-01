@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import structlog
 from sqlalchemy import select
@@ -28,6 +29,28 @@ from app.integrations.routing import decide_provider_for_new_connection
 
 log = structlog.get_logger(__name__)
 _poll_tasks: set[asyncio.Task] = set()
+
+# Pending integration_connection rows are zombies after this window.
+# The poll task gives up after `connect_poll_timeout` (default 180s); we set
+# this generously (10 min) to cover slow OAuth tabs the user may still be
+# completing, while still cleaning up rows abandoned days/weeks ago.
+# Anything older than this on a fresh connect attempt gets deleted so the
+# routing layer re-decides the provider (Composio preferred for catalogued
+# apps; before this guard, a stale 'pending' row with provider='pipedream'
+# would silently pin the app to Pipedream forever).
+_PENDING_ZOMBIE_TTL_SECONDS = 600
+
+
+def _row_is_zombie_pending(row: IntegrationConnection) -> bool:
+    """True when a `pending` row is older than the TTL and should be deleted
+    before re-deciding the provider on a fresh connect attempt."""
+    if row.status != "pending" or row.created_at is None:
+        return False
+    created = row.created_at
+    if created.tzinfo is None:
+        # Legacy rows persisted as naive UTC.
+        created = created.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - created).total_seconds() > _PENDING_ZOMBIE_TTL_SECONDS
 
 
 def _pipedream_webhook_uri() -> str | None:
@@ -178,6 +201,16 @@ async def start_connect(client, ctx: dict, app: str) -> None:
     # — preserving a stale 'pipedream' on a row that should now go through
     # Composio is exactly how the Simetrik metabase reset of 2026-05-29 ended
     # up routing to the wrong catalog and the bot hallucinated missing actions.
+    #
+    # Zombie cleanup: pending rows older than _PENDING_ZOMBIE_TTL_SECONDS
+    # (10 min) are deleted up front so `decide_provider_for_new_connection`
+    # gets to run fresh. The default `connect_poll_timeout` is 180s, so a
+    # row that hasn't transitioned to 'connected' / 'disconnected' inside
+    # 10 minutes is abandoned by definition (user closed the tab, the OAuth
+    # link expired, the webhook never came back). Without this, a single
+    # abandoned attempt pins (workspace, app) to its initial provider
+    # forever -- exactly the salesforce → pipedream zombie Sam hit on
+    # 2026-06-02.
     async with get_session() as session:
         prior = (
             await session.execute(
@@ -187,6 +220,26 @@ async def start_connect(client, ctx: dict, app: str) -> None:
                 )
             )
         ).scalar_one_or_none()
+        if prior is not None and _row_is_zombie_pending(prior):
+            log.info(
+                "connect_zombie_pending_purged",
+                workspace_id=str(workspace_id),
+                app=app,
+                prior_provider=prior.provider,
+                age_seconds=int(
+                    (
+                        datetime.now(timezone.utc)
+                        - (
+                            prior.created_at.replace(tzinfo=timezone.utc)
+                            if prior.created_at.tzinfo is None
+                            else prior.created_at
+                        )
+                    ).total_seconds()
+                ),
+            )
+            await session.delete(prior)
+            await session.commit()
+            prior = None
     # Only preserve the prior provider if the row is mid-flow (pending) AND
     # the provider field is set. Everything else gets a fresh decision so
     # we never end up routed against a provider the user has since moved
