@@ -38,6 +38,10 @@ from app.slack import roster as _roster
 log = structlog.get_logger(__name__)
 _langfuse = get_client()
 
+# Reaction emoji shortname (no surrounding colons). Default fallback when
+# the per-message router can't find a more contextual match. The actual
+# emoji used per run is computed by `pick_reaction(user_text)` and stored
+# on ctx as `reaction_name` so removal at completion uses the same one.
 _THINKING_REACTION = "hourglass_flowing_sand"
 
 
@@ -230,18 +234,29 @@ async def _render_outbound(text: str, ctx: dict) -> str:
     return await _mentions.render_for_slack(text, workspace_id=ws_uuid, channel_id=ctx.get("channel"))
 
 
-async def _add_reaction(client, channel: str, ts: str) -> None:
+async def _add_reaction(
+    client, channel: str, ts: str, name: str = _THINKING_REACTION
+) -> None:
+    """Add a Slack reaction. `name` defaults to the hourglass for callers
+    that don't care; new code paths pass a contextually-picked emoji from
+    `app.slack.reactions.pick_reaction`."""
     try:
-        await client.reactions_add(channel=channel, timestamp=ts, name=_THINKING_REACTION)
+        await client.reactions_add(channel=channel, timestamp=ts, name=name)
     except Exception as exc:  # noqa: BLE001
-        log.warning("reaction_add_failed", error=str(exc))
+        log.warning("reaction_add_failed", emoji=name, error=str(exc))
 
 
-async def _remove_reaction(client, channel: str, ts: str) -> None:
+async def _remove_reaction(
+    client, channel: str, ts: str, name: str = _THINKING_REACTION
+) -> None:
+    """Remove a Slack reaction. The caller MUST pass the same `name` that
+    was added; reactions.remove fails (caught + logged) if no matching
+    reaction exists from this bot. We track the per-run emoji on ctx
+    (`ctx["reaction_name"]`) so completion paths can pass the right one."""
     try:
-        await client.reactions_remove(channel=channel, timestamp=ts, name=_THINKING_REACTION)
+        await client.reactions_remove(channel=channel, timestamp=ts, name=name)
     except Exception as exc:  # noqa: BLE001
-        log.warning("reaction_remove_failed", error=str(exc))
+        log.warning("reaction_remove_failed", emoji=name, error=str(exc))
 
 
 # --------------------------------------------------------------------------- #
@@ -760,6 +775,92 @@ async def _post_approval(client, ctx: dict, payload: dict) -> None:
     )
 
 
+async def _post_feedback_footer(client, ctx: dict) -> None:
+    """Post a tiny "¿te sirvió?" block-kit message with 👍/👎 buttons after
+    a run that touched at least one tool. Clicking either button calls
+    the `agent_feedback_up` / `_down` handler in app/slack/handlers.py
+    which records a score on the Langfuse trace.
+
+    We embed the langfuse trace_id + run_id in the button `value` so the
+    handler can resolve them without any process-local state (Slack
+    button values cap at 2000 chars; ours stay tiny)."""
+    trace_id = ctx.get("langfuse_trace_id")
+    # If we somehow lost the trace_id, still post the buttons so the user
+    # sees the affordance; the click will just be a no-op score.
+    value = json.dumps({"trace_id": trace_id or "", "run_id": ctx.get("run_id") or ""})
+    try:
+        await client.chat_postMessage(
+            channel=ctx["channel"],
+            thread_ts=ctx.get("reply_thread_ts"),
+            text="¿Te sirvió esta respuesta?",
+            blocks=[
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": "_¿Te sirvió esta respuesta?_",
+                        }
+                    ],
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "👍 Sí"},
+                            "style": "primary",
+                            "action_id": "agent_feedback_up",
+                            "value": value,
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "👎 No"},
+                            "action_id": "agent_feedback_down",
+                            "value": value,
+                        },
+                    ],
+                },
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("feedback_footer_post_failed", error=str(exc)[:200])
+
+
+async def record_feedback_score(
+    *, trace_id: str, value: float, slack_user_id: str | None = None
+) -> None:
+    """Public entry point called by the Slack action handler when a user
+    clicks 👍 / 👎. Attaches the score to the Langfuse trace under
+    `user_satisfaction` (BOOLEAN: 1.0 = positive, 0.0 = negative).
+
+    Best-effort: if Langfuse rejects the score (bad trace_id, network),
+    log + swallow. Losing a score is acceptable; corrupting a run is not."""
+    if not trace_id:
+        log.info("feedback_score_skipped_no_trace_id", value=value)
+        return
+    try:
+        _langfuse.create_score(
+            trace_id=trace_id,
+            name="user_satisfaction",
+            value=value,
+            data_type="BOOLEAN",
+            comment=None,
+        )
+        # Flush so the score lands in Langfuse promptly; otherwise it may
+        # sit in the in-memory buffer until the next agent run.
+        _langfuse.flush()
+        log.info(
+            "user_satisfaction_recorded",
+            trace_id=trace_id, value=value, slack_user_id=slack_user_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "user_satisfaction_record_failed",
+            trace_id=trace_id, error=str(exc)[:200],
+        )
+
+
 async def _drive(client, ctx: dict, result: dict, *, lock_handle: ThreadLockHandle | None = None) -> None:
     """Handle a graph result: pause for approval/connect, or finish (persist + reply).
 
@@ -800,7 +901,30 @@ async def _drive(client, ctx: dict, result: dict, *, lock_handle: ThreadLockHand
     await client.chat_postMessage(
         channel=ctx["channel"], thread_ts=ctx.get("reply_thread_ts"), text=rendered_final,
     )
-    await _remove_reaction(client, ctx["channel"], ctx["user_ts"])
+    # Thumbs feedback footer. Only attach to runs that actually did
+    # something interesting -- at least one tool call -- so we don't spam
+    # a "¿quedaste satisfecho?" prompt under a simple "hola" reply. For
+    # scheduler-fired one-shot literal deliveries there's no agent run at
+    # this layer (the scheduler posts directly), so we never reach here
+    # for those. For agentic scheduled runs we DO want the prompt; they
+    # land here normally.
+    try:
+        had_tool_call = any(
+            isinstance(m.get("content"), list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_use"
+                for b in m["content"]
+            )
+            for m in run_messages
+            if m.get("role") == "assistant"
+        )
+        if had_tool_call and final:
+            await _post_feedback_footer(client, ctx)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("feedback_footer_failed", error=str(exc)[:200])
+    await _remove_reaction(
+        client, ctx["channel"], ctx["user_ts"],
+        ctx.get("reaction_name") or _THINKING_REACTION,
+    )
     await close_run_sandbox(ctx["run_id"])  # run finished -> tear down its sandbox
 
     # End of turn: release the mutex and kick off a debounced drain of any
@@ -898,7 +1022,13 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
             if workspace is None or await repo.get_thread(session, workspace.id, channel, conversation_key) is None:
                 return
 
-    await _add_reaction(client, channel, user_ts)
+    # Pick a contextual emoji based on the user's text (👀 for analysis, 🙌
+    # for praise, 🥹 for affection, etc.). Pure regex routing -- zero LLM
+    # tokens. We stash the chosen name on ctx below so completion / failure
+    # paths remove the SAME emoji we added.
+    from app.slack.reactions import pick_reaction as _pick_reaction
+    reaction_name = _pick_reaction(text)
+    await _add_reaction(client, channel, user_ts, reaction_name)
     settings = get_settings()
 
     # Process file attachments before the agent loop. Needs workspace_id first
@@ -961,7 +1091,7 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
         )
         # Nothing usable and no user text: bail out gracefully (no agent run).
         if result_files["supported_count"] == 0 and not text:
-            await _remove_reaction(client, channel, user_ts)
+            await _remove_reaction(client, channel, user_ts, reaction_name)
             return
 
     # YouTube link detection in the user text. Each unique video_id becomes a
@@ -1031,16 +1161,78 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
         "app_user_id": str(app_user_id),
         "channel": channel, "conversation_key": conversation_key,
         "reply_thread_ts": reply_thread_ts, "user_ts": user_ts,
+        # Same emoji we added at message receipt. _drive removes this on
+        # completion + the gate/connect paths drop it via _post_user_facing_error.
+        "reaction_name": reaction_name,
     }
     config = {"configurable": {"thread_id": run_id}}
+
+    # Enrich Langfuse with workspace + user display names + origin so the UI
+    # filters read like "Simetrik" / "Laura" instead of opaque IDs, and so
+    # we can separate scheduler-fired runs from user-typed ones. The lookup
+    # piggybacks on rows the identity block already loaded; an extra tiny
+    # query for workspace.name keeps the cost trivial.
+    from app.scheduled_tasks.scheduler import (
+        SYSTEM_ACTOR_SLACK_USER_ID as _SCHED_SLACK_ID,
+    )
+
+    ws_name = "?"
+    user_display = slack_user_id or "?"
+    try:
+        from app.db.models import SlackUser as _SlackUser, Workspace as _Workspace
+        from sqlalchemy import select as _select
+
+        async with get_session() as session:
+            ws_row = (
+                await session.execute(
+                    _select(_Workspace.name).where(_Workspace.id == workspace_id)
+                )
+            ).scalar_one_or_none()
+            if ws_row:
+                ws_name = ws_row
+            su_row = (
+                await session.execute(
+                    _select(
+                        _SlackUser.display_name, _SlackUser.real_name
+                    ).where(
+                        _SlackUser.workspace_id == workspace_id,
+                        _SlackUser.slack_user_id == slack_user_id,
+                    )
+                )
+            ).first()
+            if su_row:
+                user_display = (
+                    su_row.display_name or su_row.real_name or slack_user_id
+                )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("langfuse_meta_lookup_failed", error=str(exc))
+
+    origin = (
+        "scheduled_task" if slack_user_id == _SCHED_SLACK_ID else "slack_message"
+    )
 
     with _langfuse.start_as_current_observation(
         as_type="span", name="agent-run",
         input={"text": text, "n_files": len(files or [])},
     ), propagate_attributes(
         session_id=f"{team_id}:{channel}:{conversation_key}",
-        user_id=slack_user_id, tags=["slack", "agent"], metadata={"tenant": team_id},
+        user_id=slack_user_id,
+        tags=["slack", "agent", f"origin:{origin}", f"workspace:{ws_name}"],
+        metadata={
+            "tenant": team_id,
+            "workspace_id": str(workspace_id),
+            "workspace_name": ws_name,
+            "user_display_name": user_display,
+            "origin": origin,
+            "n_files": len(files or []),
+        },
     ):
+        # Remember the trace id on ctx so the feedback footer (`_drive`) can
+        # attach a 👍/👎 score to the right Langfuse trace when clicked.
+        try:
+            ctx["langfuse_trace_id"] = _langfuse.get_current_trace_id()
+        except Exception:  # noqa: BLE001
+            ctx["langfuse_trace_id"] = None
         hb_task = asyncio.create_task(_heartbeat(
             client, channel=channel, thread_ts=reply_thread_ts or user_ts,
         ))
