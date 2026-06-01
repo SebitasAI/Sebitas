@@ -1294,6 +1294,17 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
                     data_type="NUMERIC",
                     comment=f"x{_cost.SALES_COST_MULTIPLIER} markup over LLM cost",
                 )
+                # Flush so the score lands in Langfuse's UI promptly. The
+                # SDK otherwise buffers events for ~N seconds; with low
+                # traffic, a score can sit in memory and never surface
+                # until the next agent run pushes the buffer over.
+                _langfuse.flush()
+                log.info(
+                    "cost_scores_emitted",
+                    trace_id=ctx["langfuse_trace_id"],
+                    total_cost_usd=summary["total_cost_usd"],
+                    sales_cost_usd=summary["sales_cost_usd"],
+                )
         except Exception as exc:  # noqa: BLE001
             log.warning("cost_score_emit_failed", error=str(exc)[:200])
         await _drive(client, ctx, result, lock_handle=lock_handle)
