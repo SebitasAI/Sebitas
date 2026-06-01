@@ -1180,6 +1180,7 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
 
     ws_name = "?"
     user_display = slack_user_id or "?"
+    user_email: str | None = None
     try:
         from app.db.models import SlackUser as _SlackUser, Workspace as _Workspace
         from sqlalchemy import select as _select
@@ -1195,7 +1196,9 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
             su_row = (
                 await session.execute(
                     _select(
-                        _SlackUser.display_name, _SlackUser.real_name
+                        _SlackUser.display_name,
+                        _SlackUser.real_name,
+                        _SlackUser.email,
                     ).where(
                         _SlackUser.workspace_id == workspace_id,
                         _SlackUser.slack_user_id == slack_user_id,
@@ -1206,6 +1209,7 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
                 user_display = (
                     su_row.display_name or su_row.real_name or slack_user_id
                 )
+                user_email = su_row.email
     except Exception as exc:  # noqa: BLE001
         log.warning("langfuse_meta_lookup_failed", error=str(exc))
 
@@ -1225,6 +1229,7 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
             "workspace_id": str(workspace_id),
             "workspace_name": ws_name,
             "user_display_name": user_display,
+            "user_email": user_email,
             "origin": origin,
             "n_files": len(files or []),
         },
