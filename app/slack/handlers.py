@@ -207,7 +207,11 @@ async def _handle_feedback(client, body: dict, *, positive: bool) -> None:
         slack_user_id=slack_user_id,
     )
 
-    ack_text = "👍 Anotado, gracias." if positive else "👎 Anotado, voy a revisar."
+    ack_text = (
+        "👍 Bien, anotado."
+        if positive
+        else "👎 Anotado, voy a revisar dónde fallé."
+    )
     try:
         await client.chat_update(
             channel=body["channel"]["id"],

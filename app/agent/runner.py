@@ -792,14 +792,16 @@ async def _post_feedback_footer(client, ctx: dict) -> None:
         await client.chat_postMessage(
             channel=ctx["channel"],
             thread_ts=ctx.get("reply_thread_ts"),
-            text="¿Te sirvió esta respuesta?",
+            # Fallback text for Slack notifications (mobile push etc.) when
+            # the block kit doesn't render. Match the on-screen prompt.
+            text="¿Lo hice bien?",
             blocks=[
                 {
                     "type": "context",
                     "elements": [
                         {
                             "type": "mrkdwn",
-                            "text": "_¿Te sirvió esta respuesta?_",
+                            "text": "_¿Lo hice bien?_",
                         }
                     ],
                 },
