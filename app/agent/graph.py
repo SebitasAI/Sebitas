@@ -157,6 +157,26 @@ async def _tools_node(state: AgentState) -> dict:
             return {**block, "content": f"Error: tool desconocida {tu['name']!r}", "is_error": True}
         if risk[tu["id"]] and decision != "approve":
             return {**block, "content": "Rechazado por el usuario; no se ejecutó."}
+        # Per-tool Langfuse tags. We add a coarse `tool:<name>` for the
+        # run-level trace plus, where it makes sense, a more specific
+        # `app:<app>` (run_action) or `skill:<name>` (load_skill) so the
+        # Langfuse UI can answer "show me every trace that touched
+        # Metabase" or "every trace where the datalake-guide skill was
+        # loaded" with a single filter.
+        extra_tags = [f"tool:{tool.name}"]
+        try:
+            inp = tu.get("input") or {}
+            if tool.name == "run_action" and inp.get("app"):
+                extra_tags.append(f"app:{inp['app']}")
+            elif tool.name == "load_skill" and inp.get("name"):
+                extra_tags.append(f"skill:{inp['name']}")
+            elif tool.name in ("install_skill", "uninstall_skill") and inp.get("name"):
+                extra_tags.append(f"skill:{inp['name']}")
+            elif tool.name == "request_integration" and inp.get("app"):
+                extra_tags.append(f"app:{inp['app']}")
+            _langfuse.update_current_trace(tags=extra_tags)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("langfuse_tool_tag_failed", tool=tool.name, error=str(exc))
         try:
             with _langfuse.start_as_current_observation(
                 as_type="span", name=f"tool:{tool.name}", input=tu["input"]
@@ -166,6 +186,14 @@ async def _tools_node(state: AgentState) -> dict:
             return {**block, "content": result}
         except Exception as exc:  # noqa: BLE001
             log.warning("tool_failed", tool=tu["name"], error=str(exc))
+            # Tag the trace with the failure so it shows up in the Langfuse
+            # error filter without needing to drill into individual spans.
+            try:
+                _langfuse.update_current_trace(
+                    tags=[f"tool_failed:{tool.name}"]
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return {**block, "content": f"Error ejecutando {tu['name']}: {exc}", "is_error": True}
 
     # Independent tool calls in a turn run concurrently.

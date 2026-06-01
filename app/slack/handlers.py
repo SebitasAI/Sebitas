@@ -186,6 +186,43 @@ async def _route_message(
     )
 
 
+async def _handle_feedback(client, body: dict, *, positive: bool) -> None:
+    """Record a 👍 / 👎 user-satisfaction score against the Langfuse trace
+    of the run the buttons were attached to. Then replace the footer with
+    a quiet acknowledgement so the user has visible confirmation and
+    can't double-vote (the replacement has no actions block)."""
+    from app.agent.runner import record_feedback_score
+
+    raw = body["actions"][0].get("value") or "{}"
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = {}
+    trace_id = payload.get("trace_id") or ""
+    slack_user_id = (body.get("user") or {}).get("id")
+
+    await record_feedback_score(
+        trace_id=trace_id,
+        value=1.0 if positive else 0.0,
+        slack_user_id=slack_user_id,
+    )
+
+    ack_text = "👍 Anotado, gracias." if positive else "👎 Anotado, voy a revisar."
+    try:
+        await client.chat_update(
+            channel=body["channel"]["id"],
+            ts=body["message"]["ts"],
+            text=ack_text,
+            blocks=[
+                {"type": "context", "elements": [
+                    {"type": "mrkdwn", "text": f"_{ack_text}_"}
+                ]}
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("feedback_update_failed", error=str(exc))
+
+
 async def _decide(client, body: dict, decision: str) -> None:
     """Replace the approval message (removing the buttons so it can't be clicked
     again), then resume the paused run. The replacement message carries no
@@ -336,6 +373,16 @@ def register_handlers(app: AsyncApp) -> None:
     async def on_deny(ack, body, client):  # noqa: ANN001
         await ack()
         _spawn(_decide(client, body, "deny"))
+
+    @app.action("agent_feedback_up")
+    async def on_feedback_up(ack, body, client):  # noqa: ANN001
+        await ack()
+        _spawn(_handle_feedback(client, body, positive=True))
+
+    @app.action("agent_feedback_down")
+    async def on_feedback_down(ack, body, client):  # noqa: ANN001
+        await ack()
+        _spawn(_handle_feedback(client, body, positive=False))
 
     # --- No-op handlers for URL-style buttons. Slack fires block_actions on
     # every URL button click (for tracking) even though the link is handled
