@@ -9,9 +9,14 @@ import {
   CalendarClock,
   CreditCard,
   Languages,
+  ShieldCheck,
   UserCircle,
   Users,
 } from "lucide-react";
+import { useAuth } from "@clerk/nextjs";
+import { useQuery } from "@tanstack/react-query";
+
+import { adminApi } from "@/lib/api/admin";
 
 import {
   HomeIcon,
@@ -104,6 +109,23 @@ export function DashboardShell({
 }) {
   const [collapsed, setCollapsed] = useCollapsedSidebar();
   const [peeking, setPeeking] = useState(false);
+  // Admin-status probe. Tiny query (cached forever in the session). When
+  // `is_admin` we splice an "Admin" entry into MAIN_NAV; non-admins never
+  // see the link. The /admin page itself enforces backend-side too.
+  const { getToken } = useAuth();
+  const adminQuery = useQuery({
+    queryKey: ["admin", "me"],
+    queryFn: async () => {
+      const token = await getToken({ template: "backend" });
+      if (!token) return { is_admin: false, email: null };
+      try {
+        return await adminApi.me(token);
+      } catch {
+        return { is_admin: false, email: null };
+      }
+    },
+    staleTime: 5 * 60 * 1000,
+  });
 
   // Cmd/Ctrl + . global toggle.
   useEffect(() => {
@@ -154,6 +176,7 @@ export function DashboardShell({
           >
             <SidebarContent
               collapsed={collapsed}
+              isAdmin={adminQuery.data?.is_admin ?? false}
               onToggleCollapse={() => {
                 setCollapsed(!collapsed);
                 setPeeking(false);
@@ -186,14 +209,30 @@ export function DashboardShell({
 
 function SidebarContent({
   collapsed,
+  isAdmin,
   onToggleCollapse,
 }: {
   collapsed: boolean;
+  isAdmin: boolean;
   onToggleCollapse: () => void;
 }) {
   const pathname = usePathname();
   const isSettings = pathname.startsWith("/settings");
-  const nav = isSettings ? SETTINGS_NAV : MAIN_NAV;
+  // Splice the Admin link into MAIN_NAV when the calling user is a
+  // platform admin. The /admin page itself enforces server-side too;
+  // hiding the link is just to keep the sidebar relevant for everyone else.
+  const nav = isSettings
+    ? SETTINGS_NAV
+    : isAdmin
+      ? [
+          ...MAIN_NAV,
+          {
+            href: "/admin",
+            label: "Admin",
+            icon: <ShieldCheck className="size-5" strokeWidth={1.75} />,
+          },
+        ]
+      : MAIN_NAV;
 
   return (
     <div className="flex h-full flex-col px-3 pt-5 pb-3">

@@ -356,6 +356,42 @@ async def _resolve_via_org(
         )
 
 
+def _platform_admin_emails() -> set[str]:
+    raw = (get_settings().platform_admins or "").strip()
+    if not raw:
+        return set()
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+def is_platform_admin_email(email: str | None) -> bool:
+    """Case-insensitive membership check against the PLATFORM_ADMINS env var.
+    Returns False for None/empty emails so an unauthenticated path can use
+    it as a guard without an extra None check."""
+    if not email:
+        return False
+    return email.strip().lower() in _platform_admin_emails()
+
+
+async def require_platform_admin(
+    clerk: ClerkClaims = Depends(require_clerk_user),
+) -> ClerkClaims:
+    """Gate /admin/* endpoints on the PLATFORM_ADMINS env var. The Clerk JWT
+    must verify (require_clerk_user) AND the email must match an entry in
+    the env list. Returns the ClerkClaims so the handler has the admin's
+    identity for logging.
+
+    NO workspace resolution here: an admin operates across workspaces, so
+    we don't shove them through `require_app_user` (which insists on a
+    single workspace binding). Admin endpoints take workspace_id explicitly
+    where they need scope."""
+    if not is_platform_admin_email(clerk.email):
+        # Don't leak whether the email exists in the system; just deny.
+        raise HTTPException(
+            status_code=403, detail="not a platform admin"
+        )
+    return clerk
+
+
 async def require_app_user(
     clerk: ClerkClaims = Depends(require_clerk_user),
     x_misterr_workspace_id: str | None = Header(
@@ -450,5 +486,7 @@ __all__ = [
     "verify_clerk_jwt",
     "require_clerk_user",
     "require_app_user",
+    "require_platform_admin",
+    "is_platform_admin_email",
     "_reset_jwks_cache_for_test",
 ]
