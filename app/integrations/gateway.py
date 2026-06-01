@@ -69,9 +69,28 @@ def _current_workspace() -> uuid.UUID | None:
     return uuid.UUID(ws) if ws else None
 
 
-async def _connection(workspace_id: uuid.UUID, app: str) -> IntegrationConnection | None:
+async def _connection(
+    workspace_id: uuid.UUID,
+    app: str,
+    *,
+    caller_app_user_id: uuid.UUID | None = None,
+    account_label: str | None = None,
+) -> IntegrationConnection | None:
+    """Pick the integration_connection row to use for a tool call (slice
+    T-6 multi-account). Resolution order:
+
+      1. If `account_label` is given, match it exactly (any scope).
+      2. Else if the caller has a Private connection for this app, use it.
+      3. Else use the workspace's Team connection (`scope='team'`,
+         account_label=NULL preferred over labeled Team accounts).
+      4. Else None.
+
+    `caller_app_user_id` is the AppUser id of the user that triggered the
+    agent run. For system / scheduled tasks (no human caller) pass None
+    and step 2 is skipped, falling through to Team.
+    """
     async with get_session() as session:
-        return (
+        rows = (
             await session.execute(
                 select(IntegrationConnection).where(
                     IntegrationConnection.workspace_id == workspace_id,
@@ -79,7 +98,57 @@ async def _connection(workspace_id: uuid.UUID, app: str) -> IntegrationConnectio
                     IntegrationConnection.status == "connected",
                 )
             )
-        ).scalar_one_or_none()
+        ).scalars().all()
+
+    if not rows:
+        return None
+
+    # 1. Explicit label hint wins.
+    if account_label:
+        for r in rows:
+            if (r.account_label or "") == account_label:
+                return r
+        # Label was specified but no row matches -> caller asked for a
+        # specific account that doesn't exist. Surface as "no connection"
+        # so the agent can disambiguate / report.
+        return None
+
+    # 2. Caller's Private for this app.
+    if caller_app_user_id is not None:
+        for r in rows:
+            if r.scope == "private" and r.owner_user_id == caller_app_user_id:
+                return r
+
+    # 3. Team. Prefer the unlabeled default; fall back to any labeled team
+    # account if that's all we have.
+    team_default = next(
+        (r for r in rows if r.scope == "team" and not r.account_label), None
+    )
+    if team_default is not None:
+        return team_default
+    team_any = next((r for r in rows if r.scope == "team"), None)
+    if team_any is not None:
+        return team_any
+
+    return None
+
+
+def _caller_app_user_id_from_ctx() -> uuid.UUID | None:
+    """Best-effort fetch of the calling user's AppUser id from the agent
+    contextvars set by the runner. Returns None for system runs or when
+    the context is empty (in which case multi-account routing falls back
+    to Team-only selection)."""
+    try:
+        from app.agent.context import app_user_id_var
+    except Exception:  # noqa: BLE001
+        return None
+    raw = app_user_id_var.get()
+    if not raw:
+        return None
+    try:
+        return uuid.UUID(raw)
+    except (ValueError, TypeError):
+        return None
 
 
 async def is_connected(workspace_id: uuid.UUID, app: str) -> bool:
@@ -302,7 +371,13 @@ async def run_action_raw(app: str, action_id: str, params: dict | None = None) -
     ws = _current_workspace()
     if not ws:
         raise IntegrationError("network", message="no workspace context")
-    conn = await _connection(ws, app)
+    # Multi-account routing (slice T-6): the agent's calling user, if any,
+    # is resolved from contextvars; their Private connection for this app
+    # takes precedence over the workspace's Team account. For system /
+    # scheduled-task runs there's no caller so we fall through to Team.
+    conn = await _connection(
+        ws, app, caller_app_user_id=_caller_app_user_id_from_ctx()
+    )
     if conn is None:
         raise IntegrationError("not_found", detail=f"{app!r} not connected")
     if not conn.pipedream_account_id:
@@ -336,7 +411,10 @@ async def run_action(app: str, action_id: str, params: dict | None = None) -> st
     ws = _current_workspace()
     if not ws:
         return "Error: sin contexto de workspace."
-    conn = await _connection(ws, app)
+    # Multi-account routing same as run_action_raw above (slice T-6).
+    conn = await _connection(
+        ws, app, caller_app_user_id=_caller_app_user_id_from_ctx()
+    )
     if conn is None:
         return f"La integración {app!r} no está conectada en este workspace."
     if not conn.pipedream_account_id:

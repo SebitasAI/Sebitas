@@ -254,10 +254,24 @@ class IntegrationConnection(Base):
 
     __tablename__ = "integration_connection"
     __table_args__ = (
-        UniqueConstraint("workspace_id", "app"),
+        # Old single-account-per-workspace-app UNIQUE was dropped in
+        # migration 0025; multi-account is enforced by the two partial
+        # indexes the migration creates (uq_integration_connection_team_default
+        # and uq_integration_connection_dedupe). They live at the DB level
+        # only -- declaring them here in __table_args__ is unnecessary for
+        # the ORM and confuses Alembic on re-runs.
         CheckConstraint(
             "provider IN ('pipedream', 'composio')",
             name="ck_integration_connection_provider",
+        ),
+        CheckConstraint(
+            "scope IN ('team', 'private')",
+            name="ck_integration_connection_scope",
+        ),
+        CheckConstraint(
+            "(scope = 'team' AND owner_user_id IS NULL) "
+            "OR (scope = 'private' AND owner_user_id IS NOT NULL)",
+            name="ck_integration_connection_scope_owner",
         ),
     )
 
@@ -288,6 +302,23 @@ class IntegrationConnection(Base):
     # at rest with WORKSPACE_TOKEN_ENCRYPTION_KEY; null for connections that
     # don't need direct access.
     direct_credentials_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Visibility scope (slice T-6 Integrations multi-account):
+    #   - 'team': any member of the workspace can use it; owner_user_id is null.
+    #   - 'private': only the owning AppUser can use it; owner_user_id is set.
+    # Tool routing in app/integrations/gateway.run_action prefers a Private
+    # connection of the calling user over a Team one for the same app.
+    scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="team", server_default="team"
+    )
+    # Set when scope='private', null for 'team'. Enforced by the
+    # ck_integration_connection_scope_owner check constraint.
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )
+    # Human label for disambiguation when a workspace connects multiple
+    # accounts of the same app (e.g. "Team's Drive" vs "Sam's personal").
+    # Null = default unnamed account.
+    account_label: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
 
 
