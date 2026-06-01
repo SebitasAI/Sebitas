@@ -249,10 +249,19 @@ async def _add_reaction(
 async def _remove_reaction(
     client, channel: str, ts: str, name: str = _THINKING_REACTION
 ) -> None:
-    """Remove a Slack reaction. The caller MUST pass the same `name` that
-    was added; reactions.remove fails (caught + logged) if no matching
-    reaction exists from this bot. We track the per-run emoji on ctx
-    (`ctx["reaction_name"]`) so completion paths can pass the right one."""
+    """Remove the run's reaction after the agent finishes.
+
+    Only the hourglass (the default "still working" fallback) is removed.
+    Contextual reactions (👀 for analysis, 🙌 for praise, 🥹 for affection,
+    etc.) are intentionally PERSISTENT -- they're a personality / "I saw
+    + worked on it" badge that survives the response. Erasing them at
+    completion kills the moment (Sam, on 2026-06-01: "creería que no
+    [deberían eliminarse]").
+
+    The caller still passes the per-run name (from ctx) so we can gate
+    cleanly; this function no-ops for anything other than the hourglass."""
+    if name != _THINKING_REACTION:
+        return
     try:
         await client.reactions_remove(channel=channel, timestamp=ts, name=name)
     except Exception as exc:  # noqa: BLE001
