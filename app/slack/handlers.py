@@ -296,9 +296,9 @@ def register_handlers(app: AsyncApp) -> None:
             files=event.get("files"),
         )
 
-        # DMs and group DMs: respond to every message (flat conversation keyed by
-        # channel; reply inline unless already inside a thread).
-        if channel_type in ("im", "mpim"):
+        # 1:1 DM (channel_type='im'): respond to every message. The DM is
+        # the user-to-bot channel by definition, so opt-in is implicit.
+        if channel_type == "im":
             if thread_ts:
                 await _route_message(
                     client=client, team_id=team_id, event_id=event_id, conv_key=thread_ts,
@@ -311,8 +311,13 @@ def register_handlers(app: AsyncApp) -> None:
                 )
             return
 
-        # Channels: only continue a thread Misterr already started.
-        if channel_type in ("channel", "group"):
+        # Group DMs (mpim) AND channels: only continue a thread Misterr
+        # already participates in. @-mentions are handled by the
+        # `app_mention` event above (short-circuited at the top of this
+        # handler). Without this restriction, Misterr used to reply to
+        # every message in an MPIM, which felt intrusive to the other
+        # humans in the group chat.
+        if channel_type in ("mpim", "channel", "group"):
             if not thread_ts:
                 return
             await _route_message(
