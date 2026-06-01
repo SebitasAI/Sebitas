@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 export const metadata: Metadata = {
-  title: "Privacy Policy — Misterr",
+  title: "Privacy Policy | Misterr",
   description: "Privacy Policy describing how Misterr handles your data.",
 };
 
@@ -27,7 +27,7 @@ export default function PrivacyPage() {
         Last updated: {LAST_UPDATED}
       </p>
 
-      <div className="prose prose-neutral mt-10 max-w-none dark:prose-invert">
+      <div className="prose prose-neutral mt-10 max-w-none text-neutral-900">
         <p>
           This Privacy Policy describes how Misterr (&ldquo;we&rdquo;,
           &ldquo;us&rdquo;, or &ldquo;our&rdquo;) collects, uses, and shares

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 export const metadata: Metadata = {
-  title: "Terms of Use — Misterr",
+  title: "Terms of Use | Misterr",
   description: "Website Terms of Use for misterr.ai.",
 };
 
@@ -28,7 +28,7 @@ export default function TermsPage() {
         Version {VERSION} · Last revised on: {LAST_REVISED}
       </p>
 
-      <div className="prose prose-neutral mt-10 max-w-none space-y-4 text-neutral-700 dark:prose-invert dark:text-neutral-300">
+      <div className="prose prose-neutral mt-10 max-w-none space-y-4 text-neutral-900">
         <p>
           The website located at www.misterr.ai (the “Site”) is a copyrighted
           work belonging to Antiff Inc (“Company”, “us”, “our”, and “we”).

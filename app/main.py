@@ -22,6 +22,7 @@ from app.integrations.connect import (
     resume_pending_polls,
 )
 from app.api.integrations import router as integrations_router
+from app.api.admin import router as admin_router
 from app.api.scheduled_tasks import router as scheduled_tasks_router
 from app.api.skills import router as skills_router
 from app.api.team import router as team_router
@@ -180,6 +181,7 @@ app.include_router(spaces_internal_router)
 app.include_router(web_api_router)
 app.include_router(scheduled_tasks_router)
 app.include_router(skills_router)
+app.include_router(admin_router)
 app.include_router(team_router)
 app.include_router(integrations_router)
 

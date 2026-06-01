@@ -1,5 +1,22 @@
 import type { Metadata } from "next";
+import { Lexend, Inter, Geist } from "next/font/google";
 import "./globals.css";
+
+const lexend = Lexend({
+  subsets: ["latin"],
+  variable: "--font-lexend",
+  display: "swap",
+});
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
+  display: "swap",
+});
+const geist = Geist({
+  subsets: ["latin"],
+  variable: "--font-geist",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   title: "Misterr, AI coworker for Slack",
@@ -15,7 +32,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html
+      lang="en"
+      className={`${lexend.variable} ${inter.variable} ${geist.variable}`}
+    >
       <body>{children}</body>
     </html>
   );
