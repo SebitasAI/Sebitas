@@ -1217,12 +1217,19 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
         "scheduled_task" if slack_user_id == _SCHED_SLACK_ID else "slack_message"
     )
 
+    # Langfuse's `user_id` doubles as the display label in the UI. We use
+    # email (stable across slack_user_id changes if someone re-creates a
+    # Slack account) and fall back to display name, then to slack_user_id
+    # for the scheduler sentinel / users whose roster sync hasn't run.
+    # Slack U-id is still preserved in metadata for traceability.
+    langfuse_user_id = user_email or user_display or slack_user_id
+
     with _langfuse.start_as_current_observation(
         as_type="span", name="agent-run",
         input={"text": text, "n_files": len(files or [])},
     ), propagate_attributes(
         session_id=f"{team_id}:{channel}:{conversation_key}",
-        user_id=slack_user_id,
+        user_id=langfuse_user_id,
         tags=["slack", "agent", f"origin:{origin}", f"workspace:{ws_name}"],
         metadata={
             "tenant": team_id,
@@ -1230,6 +1237,7 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
             "workspace_name": ws_name,
             "user_display_name": user_display,
             "user_email": user_email,
+            "slack_user_id": slack_user_id,
             "origin": origin,
             "n_files": len(files or []),
         },
