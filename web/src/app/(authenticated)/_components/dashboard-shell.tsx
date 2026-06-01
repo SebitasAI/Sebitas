@@ -22,7 +22,6 @@ import {
   HomeIcon,
   IntegrationsIcon,
   SkillsIcon,
-  SpacesIcon,
 } from "./nav-icons";
 import { SidebarUserDropdown } from "./sidebar-user-dropdown";
 import { OrganizationSwitcher } from "@clerk/nextjs";
@@ -56,7 +55,6 @@ const MAIN_NAV: NavItem[] = [
   { href: "/dashboard", label: "Inicio", icon: <HomeIcon /> },
   { href: "/skills", label: "Skills", icon: <SkillsIcon /> },
   { href: "/integrations", label: "Integraciones", icon: <IntegrationsIcon /> },
-  { href: "/spaces", label: "Spaces", icon: <SpacesIcon /> },
   // Outline icon (lucide) here is intentional: the filled SVGs in
   // ./nav-icons were ported from Antiff and don't have a calendar variant.
   // strokeWidth tuned to read at the same visual weight as the filled set.
