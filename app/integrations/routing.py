@@ -76,15 +76,24 @@ async def provider_for_existing_connection(
 async def decide_provider_for_new_connection(app: str) -> str:
     """No row yet for this (workspace, app): pick which provider to use
     for the upcoming connect flow. Probes the preference order; first
-    provider whose catalogue has the toolkit wins. Falls back to Pipedream
-    if all checks fail (Composio API down, key missing, etc.) so the user
-    never gets stuck just because Composio is unreachable.
+    provider that can ACTUALLY mint a link wins. Falls back to the
+    alternative if all checks fail.
+
+    Critical: for Composio we use `can_initiate_connection`, NOT just
+    `has_toolkit`. Composio's `initiate_connection` requires an
+    auth_config registered in our project for that toolkit; without
+    one, it returns 412 and the user sees "No pude generar el link".
+    `has_toolkit` checks the GLOBAL catalog (always full for popular
+    apps like Salesforce), `can_initiate_connection` checks our
+    PROJECT (only the apps we've configured). Routing must use the
+    stricter check, otherwise we route to a provider that's
+    catalogued-but-not-set-up and the user gets stuck.
     """
     for name in _PREFERENCE_ORDER:
         if name == _COMPOSIO:
             provider = get_composio_provider()
             try:
-                if await provider.has_toolkit(app):
+                if await provider.can_initiate_connection(app):
                     return _COMPOSIO
             except Exception as exc:  # noqa: BLE001
                 # Don't fail the connect attempt because the catalogue probe

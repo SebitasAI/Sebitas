@@ -76,6 +76,42 @@ class ComposioProvider(IntegrationProvider):
             log.warning("composio_has_toolkit_failed", app=app, status=e.status)
             return False
 
+    async def can_initiate_connection(self, app: str) -> bool:
+        """Stricter check than `has_toolkit`. Composio refuses to mint a
+        connect link unless an `auth_config` is registered for that
+        toolkit in our project (412 'No auth_config found for toolkit X').
+        `has_toolkit` only verifies the GLOBAL catalog; this verifies our
+        PROJECT can actually use it. Routing must prefer this check when
+        deciding whether Composio is the right provider for a new
+        connection, otherwise the user gets a connect-link failure.
+
+        Returns True iff the toolkit exists AND at least one auth_config
+        is registered for it. Defensive: returns False on any fetch error
+        (Composio down, bad key, etc.) so routing falls back to the
+        alternative provider rather than hard-failing the user."""
+        try:
+            if not await cz.toolkit_exists(app):
+                return False
+            configs = await cz.list_auth_configs(toolkit_slug=app)
+            for c in configs:
+                if not isinstance(c, dict):
+                    continue
+                if c.get("id") or c.get("nano_id") or c.get("auth_config_id"):
+                    return True
+            return False
+        except cz.ComposioHTTPError as e:
+            log.warning(
+                "composio_can_initiate_check_failed",
+                app=app, status=e.status,
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "composio_can_initiate_check_errored",
+                app=app, error=str(exc)[:200],
+            )
+            return False
+
     # ----------------- IntegrationProvider impl ---------------------------- #
 
     async def list_accounts(self, external_user_id: str) -> list[dict]:
