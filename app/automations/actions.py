@@ -186,21 +186,32 @@ async def fire_agent_run(
 
     # Local import: runner imports the DB/models layer that imports back
     # here. Defer to break the cycle at module load.
-    from app.agent.runner import run_agent  # noqa: PLC0415
-
-    await run_agent(
-        client=client,
-        team_id=ws.slack_team_id,
-        slack_user_id=SYSTEM_ACTOR_SLACK_USER_ID,
-        channel=channel,
-        user_text=rendered,
-        user_ts=parent_ts,
-        conversation_key=parent_ts,
-        reply_thread_ts=parent_ts,
-        require_existing_thread=False,
-        files=None,
-        lock_handle=None,
+    from app.agent.runner import (  # noqa: PLC0415
+        run_agent,
+        set_agent_parent_ref as _set_ref,
+        reset_agent_parent_ref as _reset_ref,
     )
+
+    # Stamp the run with this automation's (kind, id, name) so the Usage
+    # dashboard can roll up "credits per automation" and the activity
+    # feed shows the right parent label.
+    _ref_token = _set_ref("automation", automation.id, automation.name)
+    try:
+        await run_agent(
+            client=client,
+            team_id=ws.slack_team_id,
+            slack_user_id=SYSTEM_ACTOR_SLACK_USER_ID,
+            channel=channel,
+            user_text=rendered,
+            user_ts=parent_ts,
+            conversation_key=parent_ts,
+            reply_thread_ts=parent_ts,
+            require_existing_thread=False,
+            files=None,
+            lock_handle=None,
+        )
+    finally:
+        _reset_ref(_ref_token)
     return rendered, f"agent_run dispatched: channel={channel} ts={parent_ts}"
 
 
