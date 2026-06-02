@@ -78,26 +78,27 @@ def _format_automation_line(a) -> str:
 
 
 _SOURCE_DESCRIPTION = (
+    "INTERNAL ENUM (never expose these values verbatim to the user). "
     "De dónde viene el evento. Tres opciones:\n"
-    "  - `direct`: Misterr te da una URL única (con secret en el path). "
-    "Cualquier sistema externo (script, cron, Curl) puede POSTear "
-    "JSON a esa URL para disparar la automation. Vos configurás el "
-    "lado externo. Útil para hooks ad-hoc.\n"
-    "  - `pipedream`: usás el catálogo de Pipedream para conectar un "
-    "trigger nativo (Langfuse, Linear, GitHub, etc.). Pasame el "
-    "`pipedream_component_id` (ej. `langfuse-score-created`) y "
-    "`pipedream_configured_props` con los settings del componente.\n"
-    "  - `composio`: igual pero usando el catálogo de Composio. "
-    "Pasame `composio_trigger_slug` + `composio_config`."
+    "  - `direct`: Misterr expone una URL única (con secret en el path). "
+    "Cualquier sistema externo (script, cron, curl) puede hacer POST "
+    "con JSON a esa URL para disparar la automation. Útil para hooks "
+    "ad-hoc cuando el evento no viene de un catálogo conocido.\n"
+    "  - `pipedream`: usa un trigger del catálogo de triggers nativos "
+    "(Langfuse, Linear, GitHub, etc.). Pasa el `pipedream_component_id` "
+    "(ej. `langfuse-score-created`) y `pipedream_configured_props` con "
+    "los settings del componente.\n"
+    "  - `composio`: igual pero usando el catálogo alternativo. Pasa "
+    "`composio_trigger_slug` + `composio_config`."
 )
 
 _PROMPT_TEMPLATE_DESCRIPTION = (
-    "Prompt que va a recibir el agente cuando dispare la automation. "
-    "Podés interpolar variables del payload con `{key}` o `{nested.key}`. "
-    "Ej: para Langfuse `score:created` el payload tiene `data.trace_id` "
-    "y `data.score`, así que `\"Investigá el trace {data.trace_id} que "
-    "sacó score {data.score}\"` funciona. Si la key no existe, queda "
-    "como `{key}` literal -- no rompe la automation."
+    "Prompt que recibe el agente cuando dispara la automation. Puedes "
+    "interpolar variables del payload con `{key}` o `{nested.key}`. "
+    "Ej: para `score:created` el payload tiene `data.trace_id` y "
+    "`data.score`, así que `\"Investiga el trace {data.trace_id} que "
+    "obtuvo score {data.score}\"` funciona. Si la key no existe, queda "
+    "como `{key}` literal: no rompe la automation."
 )
 
 
@@ -119,7 +120,10 @@ async def _create_automation(
         return "Error: no hay contexto de workspace/usuario."
 
     if source not in ("direct", "pipedream", "composio"):
-        return f"Source `{source}` inválido. Usá `direct`, `pipedream` o `composio`."
+        return (
+            f"Source `{source}` no es válido. Los valores admitidos son los "
+            "documentados en la spec del tool."
+        )
 
     # For pipedream/composio: provision the upstream trigger FIRST,
     # then create the row with the upstream id + signing key. If
@@ -154,7 +158,7 @@ async def _create_automation(
                 "configured_props", pipedream_configured_props or {}
             )
         except trig.TriggerProvisioningError as exc:
-            return f"No pude crear el trigger en Pipedream: {exc}"
+            return f"No pude crear el trigger: {exc}"
 
     elif source == "composio":
         if not composio_trigger_slug:
@@ -172,7 +176,7 @@ async def _create_automation(
             metadata.setdefault("trigger_slug", composio_trigger_slug)
             metadata.setdefault("config", composio_config or {})
         except trig.TriggerProvisioningError as exc:
-            return f"No pude crear el trigger en Composio: {exc}"
+            return f"No pude crear el trigger: {exc}"
 
     try:
         automation = await repo.create_automation(

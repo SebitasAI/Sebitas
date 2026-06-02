@@ -136,7 +136,7 @@ def _extract_rows(value) -> tuple[list[dict], list[dict]]:
     """Pull a (rows, schema) pair out of a provider's structured return.
 
     Handles three shapes seen in practice:
-    - Metabase via Pipedream: `{data: {rows: [[...]], results_metadata: {columns: [...]}}}`
+    - Nested data wrapper: `{data: {rows: [[...]], results_metadata: {columns: [...]}}}`
     - Plain list-of-dicts (Airtable etc.).
     - Anything else: wrap as a single `{value: ...}` row.
 
