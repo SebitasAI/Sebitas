@@ -457,6 +457,30 @@ async def run_action(app: str, action_id: str, params: dict | None = None) -> st
             IntegrationError("auth_missing_fields", detail=missing), app
         )
 
+    # Pre-call validation: catch missing required params / unknown
+    # keys / type errors before burning a provider round-trip. Returns
+    # the validation error directly to the LLM (the tool result) so it
+    # self-corrects without re-asking the human. Generic across all
+    # 3,000+ Pipedream apps because it reads the same `configurable_props`
+    # schema the catalog skill renders.
+    from app.integrations import action_guardrail as _ag
+
+    spec_props = await _ag.get_action_props(action_id)
+    if spec_props:
+        validation = _ag.validate_params(spec_props, params or {})
+        if validation is not None:
+            log.info(
+                "integration_action_validation_failed",
+                app=app, action=action_id, **{
+                    k: v for k, v in validation.items()
+                    if k in ("missing_required", "unknown_fields", "type_errors")
+                },
+            )
+            return (
+                "Validation error before calling the action. Fix and retry:\n"
+                f"{validation}"
+            )
+
     with _langfuse.start_as_current_observation(
         as_type="span", name=f"integration:{app}.{action_id}", input={"app": app, "action": action_id}
     ) as span:
@@ -475,7 +499,33 @@ async def run_action(app: str, action_id: str, params: dict | None = None) -> st
             return user_msg
 
         out = result.get("ret", result) if isinstance(result, dict) else result
+
+        # Post-call: if the result looks sparse AND the agent left
+        # "rich-response" flags off, prepend a hint so the next LLM
+        # turn knows exactly what to flip. Generic detector that works
+        # against any Pipedream response that has list-style results.
+        hint = None
+        if spec_props:
+            # Pass the raw provider response: the detector knows how to
+            # unwrap `ret`/`records` envelopes itself, and we want it to
+            # see top-level lists too (Pipedream sometimes returns those).
+            hint = _ag.annotate_sparse_result(
+                result=result if isinstance(result, (dict, list)) else out,
+                action_id=action_id,
+                props=spec_props,
+                params=params or {},
+            )
+
         text = str(out)[:3000]
+        if hint is not None:
+            log.info(
+                "integration_action_sparse_hint",
+                app=app, action=action_id, off_flags=hint["off_flags"],
+            )
+            text = (
+                "[platform hint] " + hint["observation"] + "\n\n"
+                + text
+            )
         span.update(output=text[:500])
     log.info("integration_action_done", app=app, action=action_id)
     return text
