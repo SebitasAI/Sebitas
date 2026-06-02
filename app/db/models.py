@@ -845,3 +845,75 @@ class SkillPreview(Base):
         server_default=func.now(), nullable=False
     )
     expires_at: Mapped[datetime] = mapped_column(nullable=False)
+
+
+class FollowUp(Base):
+    """A deferred reactivation nudge for a thread where Misterr is waiting
+    on user input.
+
+    The agent calls `schedule_follow_up` at end of a turn when the
+    conversation will be blocked until the user responds. The follow-up
+    worker fires the nudge at `scheduled_for` UNLESS the user replied in
+    the thread between creation and fire time -- in which case it
+    auto-cancels.
+
+    Lifecycle:
+      - status='pending' -> agent-created, waiting for scheduled_for.
+      - status='sent'    -> worker fired the nudge.
+      - status='cancelled' -> user replied first (auto) or admin cancelled.
+
+    No TimestampMixin: this is operational state, not a domain entity
+    with mutable fields. created_at is the only timestamp we need;
+    sent_at / cancelled_at are explicit fields for clarity.
+    """
+
+    __tablename__ = "follow_up"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'sent', 'cancelled')",
+            name="ck_follow_up_status",
+        ),
+        CheckConstraint(
+            "nudge_count >= 0 AND nudge_count <= 3",
+            name="ck_follow_up_nudge_count",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    app_user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Where to post the nudge. `conversation_key` matches `thread.conversation_key`
+    # in the agent runner: thread_ts for channel threads, channel id for DMs.
+    channel: Mapped[str] = mapped_column(Text, nullable=False)
+    conversation_key: Mapped[str] = mapped_column(Text, nullable=False)
+    reply_thread_ts: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Agent-written, short, in Spanish. Fed to the fire-time prompt.
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending"
+    )
+    nudge_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # The agent run that opened this follow-up. For traceability +
+    # dedup ("did this same run already schedule one?").
+    created_by_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cancelled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cancelled_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)

@@ -801,3 +801,12 @@ from app.agent import memory_tools as _memory_tools  # noqa: E402, F401
 # entries into the global registry.
 # --------------------------------------------------------------------------- #
 from app.automations import agent_tools as _automation_tools  # noqa: E402, F401
+
+
+# --------------------------------------------------------------------------- #
+# Follow-ups: state-driven reactivation nudges. The `schedule_follow_up` tool
+# lets the agent agenda a ping for the current thread when it's waiting on
+# user input. The worker (lifespan task in app/main.py) fires it after
+# `wait_hours` unless the user replied first.
+# --------------------------------------------------------------------------- #
+from app.agent import follow_up_tools as _follow_up_tools  # noqa: E402, F401

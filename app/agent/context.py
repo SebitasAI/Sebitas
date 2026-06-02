@@ -40,6 +40,19 @@ channel_roster_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 calling_user_identity_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "calling_user_identity", default=""
 )
+# The Slack channel + conversation key + reply_thread_ts for the active
+# turn. Tools that need to schedule something tied to THIS conversation
+# (e.g. follow-up nudges that must post back in this thread) read these
+# instead of asking the model to thread them through.
+calling_channel_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "calling_channel", default=""
+)
+calling_conversation_key_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "calling_conversation_key", default=""
+)
+calling_reply_thread_ts_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "calling_reply_thread_ts", default=""
+)
 
 
 def set_run_context(
@@ -50,6 +63,9 @@ def set_run_context(
     channel_roster: str = "",
     app_user_id: str | None = None,
     calling_user_identity: str = "",
+    calling_channel: str = "",
+    calling_conversation_key: str = "",
+    calling_reply_thread_ts: str = "",
 ) -> None:
     workspace_id_var.set(workspace_id)
     app_user_id_var.set(app_user_id)
@@ -57,3 +73,6 @@ def set_run_context(
     skills_context_var.set(skills_context)
     channel_roster_var.set(channel_roster)
     calling_user_identity_var.set(calling_user_identity)
+    calling_channel_var.set(calling_channel)
+    calling_conversation_key_var.set(calling_conversation_key)
+    calling_reply_thread_ts_var.set(calling_reply_thread_ts)
