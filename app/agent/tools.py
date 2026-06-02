@@ -823,6 +823,17 @@ from app.automations import agent_tools as _automation_tools  # noqa: E402, F401
 
 
 # --------------------------------------------------------------------------- #
+# Native Slack tools (read_slack_channel / _thread / list / find). Misterr is
+# a Slack app and the bot OAuth grants `channels:history` etc. natively, so
+# reading Slack history should go through the bot token, NOT through a
+# Composio/Pipedream "Slack integration" that nobody installed. Without these
+# tools the agent hallucinates a need for that integration and refuses tasks
+# like "summarize today's channel highlights" -- the bug from PR #108.
+# --------------------------------------------------------------------------- #
+from app.slack import agent_tools as _slack_agent_tools  # noqa: E402, F401
+
+
+# --------------------------------------------------------------------------- #
 # Follow-ups: state-driven reactivation nudges. The `schedule_follow_up` tool
 # lets the agent agenda a ping for the current thread when it's waiting on
 # user input. The worker (lifespan task in app/main.py) fires it after
