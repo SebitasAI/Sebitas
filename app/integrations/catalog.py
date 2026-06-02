@@ -136,6 +136,47 @@ async def _list_composio_toolkits() -> list[dict]:
     return out
 
 
+async def _list_configured_composio_slugs() -> set[str] | None:
+    """Set of toolkit slugs that have at least one auth_config in our
+    Composio project. The catalog filters Composio entries through this
+    set so we only surface apps that are ACTUALLY connectable -- the
+    rest fall through to Pipedream via the merge step.
+
+    Returns `None` on fetch failure so the caller can distinguish "API
+    down, fall back to old behavior" from "API said zero configs"
+    (empty set is meaningful: hide all Composio apps).
+
+    Composio's `/auth_configs` returns each config with a `toolkit`
+    nested object containing `slug`. Older API versions used a flat
+    `toolkit_slug` or `app` field; we cover both shapes."""
+    s = get_settings()
+    if not s.composio_api_key:
+        return None
+
+    try:
+        configs = await composio_api.list_auth_configs()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("catalog_composio_auth_configs_failed", error=str(exc))
+        return None
+
+    slugs: set[str] = set()
+    for c in configs:
+        if not isinstance(c, dict):
+            continue
+        tk = c.get("toolkit")
+        slug: str | None = None
+        if isinstance(tk, dict):
+            slug = tk.get("slug")
+        if not slug:
+            slug = c.get("toolkit_slug") or c.get("app") or c.get("app_slug")
+        if not isinstance(slug, str):
+            continue
+        slug = slug.lower().strip()
+        if slug:
+            slugs.add(slug)
+    return slugs
+
+
 async def _list_pipedream_apps() -> list[dict]:
     """Pipedream's /v1/apps endpoint. We send a single OAuth-style request
     with the project API key; pagination via `after` cursor. This is best-
@@ -298,9 +339,10 @@ async def get_catalog(*, force_refresh: bool = False) -> list[CatalogApp]:
         ):
             return _catalog_cache
 
-        composio_raw, pipedream_raw = await asyncio.gather(
+        composio_raw, pipedream_raw, configured_slugs = await asyncio.gather(
             _list_composio_toolkits(),
             _list_pipedream_apps(),
+            _list_configured_composio_slugs(),
             return_exceptions=True,
         )
         # `gather` with return_exceptions wraps failures; replace with empty
@@ -311,10 +353,28 @@ async def get_catalog(*, force_refresh: bool = False) -> list[CatalogApp]:
         if isinstance(pipedream_raw, BaseException):
             log.warning("catalog_pipedream_failed", error=str(pipedream_raw))
             pipedream_raw = []
+        # `configured_slugs` already returns None on its own failure; the
+        # only BaseException here is something exotic, treat it the same.
+        if isinstance(configured_slugs, BaseException):
+            log.warning("catalog_composio_configs_failed", error=str(configured_slugs))
+            configured_slugs = None
 
         composio_apps = [
             a for a in (_normalize_composio(i) for i in composio_raw) if a is not None
         ]
+        # Filter Composio entries to apps that actually have an auth_config
+        # in our Composio project. Without this, the catalog surfaces every
+        # toolkit Composio knows about (Salesforce, HubSpot, etc.), the user
+        # clicks "Connect", and Composio returns 412 "no auth_config found"
+        # because no OAuth client was registered in their dashboard. Apps
+        # without a Composio auth_config fall through to Pipedream via the
+        # merge step. When `configured_slugs is None` (API down), we skip
+        # filtering -- preserves the previous behavior under transient errors.
+        composio_filtered_out = 0
+        if configured_slugs is not None:
+            before = len(composio_apps)
+            composio_apps = [a for a in composio_apps if a.slug in configured_slugs]
+            composio_filtered_out = before - len(composio_apps)
         pipedream_apps = [
             a for a in (_normalize_pipedream(i) for i in pipedream_raw) if a is not None
         ]
@@ -324,6 +384,10 @@ async def get_catalog(*, force_refresh: bool = False) -> list[CatalogApp]:
         log.info(
             "catalog_built",
             composio_count=len(composio_apps),
+            composio_filtered_out=composio_filtered_out,
+            composio_configured_count=(
+                len(configured_slugs) if configured_slugs is not None else None
+            ),
             pipedream_count=len(pipedream_apps),
             merged_count=len(merged),
         )
