@@ -792,3 +792,12 @@ from app.scheduled_tasks import agent_tools as _scheduled_task_tools  # noqa: E4
 # lives in `app.memory`; this just wires the agent tool entry.
 # --------------------------------------------------------------------------- #
 from app.agent import memory_tools as _memory_tools  # noqa: E402, F401
+
+
+# --------------------------------------------------------------------------- #
+# Automations (event-driven hooks). Imported for side effects so the six
+# create/list/update/delete/pause/resume_automation tools register at module
+# load. Domain logic lives in `app.automations.*`; this just wires the tool
+# entries into the global registry.
+# --------------------------------------------------------------------------- #
+from app.automations import agent_tools as _automation_tools  # noqa: E402, F401

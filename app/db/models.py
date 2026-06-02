@@ -596,6 +596,130 @@ class ScheduledTaskRun(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+# Allowed values for automation discriminators. Same VARCHAR + CHECK pattern
+# as everything else in the schema (see `_SKILL_SOURCES` comment for rationale).
+_AUTOMATION_TRIGGER_TYPES = (
+    "agent_error",
+    "tool_failed",
+    "user_satisfaction_low",
+    "scheduled_task_completed",
+)
+_AUTOMATION_ACTION_TYPES = ("slack_notify", "agent_run")
+_AUTOMATION_SCOPES = ("local", "global", "system")
+
+
+class Automation(TimestampMixin, Base):
+    """Event-driven hook. When an event of `trigger_type` is published in
+    this workspace AND the event payload matches `trigger_filter`, fire
+    `action_type` with `action_config`. See `app/automations/` for the
+    runtime pieces (events queue, router, action dispatchers).
+
+    Mirrors ScheduledTask's permission model: local-scope automations are
+    owned by `owner_user_id`; only the owner can edit / delete / pause."""
+
+    __tablename__ = "automation"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "name", name="uq_automation_workspace_name"),
+        CheckConstraint(
+            "trigger_type IN ("
+            "'agent_error', 'tool_failed', 'user_satisfaction_low', "
+            "'scheduled_task_completed')",
+            name="ck_automation_trigger_type",
+        ),
+        CheckConstraint(
+            "action_type IN ('slack_notify', 'agent_run')",
+            name="ck_automation_action_type",
+        ),
+        CheckConstraint(
+            "scope IN ('local', 'global', 'system')",
+            name="ck_automation_scope",
+        ),
+        CheckConstraint(
+            "last_fire_status IS NULL OR last_fire_status IN "
+            "('success', 'failed', 'skipped')",
+            name="ck_automation_last_fire_status",
+        ),
+        CheckConstraint(
+            "(scope = 'local' AND owner_user_id IS NOT NULL) OR "
+            "(scope IN ('global', 'system') AND owner_user_id IS NULL)",
+            name="ck_automation_scope_owner",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_user.id", ondelete="CASCADE"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trigger_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    # JSONB dict matched key-by-key against event["data"]. Empty {} = wildcard.
+    trigger_filter: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    action_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    action_config: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="local", server_default="local"
+    )
+    is_paused: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    last_fired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_fire_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    last_fire_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fire_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
+
+class AutomationRun(Base):
+    """One row per fire. `automation_id` is ON DELETE SET NULL so the audit
+    trail survives even if the user later deletes the automation; the
+    snapshot fields keep the row readable in that case."""
+
+    __tablename__ = "automation_run"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'success', 'failed', 'skipped')",
+            name="ck_automation_run_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    automation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("automation.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    automation_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    trigger_event: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    action_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    action_config_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    output: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class MessageAttachment(Base):
     """A file attached to a user message. The bytes live in R2 (`r2_ref`); this
     row keeps the reference so multi-turn re-attachment works without

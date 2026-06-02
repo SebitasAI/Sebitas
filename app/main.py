@@ -23,12 +23,15 @@ from app.integrations.connect import (
 )
 from app.api.integrations import router as integrations_router
 from app.api.admin import router as admin_router
+from app.api.automations import router as automations_router
 from app.api.scheduled_tasks import router as scheduled_tasks_router
 from app.api.skills import router as skills_router
 from app.api.team import router as team_router
 from app.auth.clerk_provisioning import provision_and_backfill_all_workspaces
 from app.integrations.webhook import router as pipedream_webhook_router
 from app.logging import configure_logging
+from app.automations.events import start_consumer as start_automation_consumer
+from app.automations.events import stop_consumer as stop_automation_consumer
 from app.scheduled_tasks.repository import seed_system_tasks_for_all_workspaces
 from app.scheduled_tasks.scheduler import run_scheduler_loop
 from app.skills.preview_store import cleanup_expired as cleanup_expired_previews
@@ -130,6 +133,13 @@ async def lifespan(_: FastAPI):
             log.warning("scheduled_task_seed_startup_failed", error=str(exc))
         scheduled_task_loop = asyncio.create_task(run_scheduler_loop())
 
+        # Automations consumer (event-driven hooks). Spawns a single task
+        # that pulls events off the in-process queue and routes them. See
+        # app/automations/events.py for the queue + lifecycle. Cancelled
+        # in the shutdown branch below.
+        start_automation_consumer()
+        log.info("automation_consumer_started")
+
         # Clerk Organizations backfill (slice T-5). Idempotent: for each
         # installed workspace without a clerk_org_id, provision one and
         # link existing AppUsers as members. Once all rows are linked this
@@ -151,6 +161,10 @@ async def lifespan(_: FastAPI):
             preview_cleanup_task.cancel()
             integration_resume_task.cancel()
             scheduled_task_loop.cancel()
+            try:
+                await stop_automation_consumer()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("automation_consumer_stop_failed", error=str(exc))
             try:
                 await handler.close_async()
             except Exception as exc:  # noqa: BLE001
@@ -180,6 +194,7 @@ app.include_router(pipedream_webhook_router)
 app.include_router(spaces_internal_router)
 app.include_router(web_api_router)
 app.include_router(scheduled_tasks_router)
+app.include_router(automations_router)
 app.include_router(skills_router)
 app.include_router(admin_router)
 app.include_router(team_router)
