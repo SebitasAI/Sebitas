@@ -551,6 +551,13 @@ class AdminIntegrationRow(BaseModel):
     provider: str
     status: str
     created_at: datetime
+    # Auto-generated catalog skill (`integrations/<app>`) when one exists
+    # for this (workspace, app) pair. Lets the /admin UI surface a "Ver
+    # skill" button that opens the existing Skill CRUD modal in-place,
+    # so admins can inspect the auto-improve usage notes + the rendered
+    # Pipedream action catalog without context-switching to the Skills
+    # tab.
+    linked_skill_id: str | None = None
 
 
 class AdminIntegrationsResponse(BaseModel):
@@ -576,6 +583,26 @@ async def list_all_integrations(
         stmt = stmt.order_by(IntegrationConnection.created_at.desc()).limit(500)
         rows = (await session.execute(stmt)).all()
 
+        # Resolve the auto-generated `integrations/<app>` skill ids for
+        # the rows we're about to return. One query keyed on the set of
+        # (workspace_id, slug) pairs we need. Apps with no skill (yet)
+        # return None and the UI shows a disabled / dimmed action.
+        keys = [(r.workspace_id, f"integrations/{(r.app or '').lower()}") for r, _name in rows]
+        skill_map: dict[tuple, str] = {}
+        if keys:
+            ws_ids = list({k[0] for k in keys})
+            names = list({k[1] for k in keys})
+            skill_rows = (
+                await session.execute(
+                    select(Skill.id, Skill.workspace_id, Skill.name).where(
+                        Skill.workspace_id.in_(ws_ids),
+                        Skill.name.in_(names),
+                        Skill.source == "catalog",
+                    )
+                )
+            ).all()
+            skill_map = {(s.workspace_id, s.name): str(s.id) for s in skill_rows}
+
     integrations = [
         AdminIntegrationRow(
             id=str(r.id),
@@ -585,6 +612,9 @@ async def list_all_integrations(
             provider=r.provider,
             status=r.status,
             created_at=r.created_at,
+            linked_skill_id=skill_map.get(
+                (r.workspace_id, f"integrations/{(r.app or '').lower()}")
+            ),
         )
         for r, ws_name in rows
     ]
