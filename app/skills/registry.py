@@ -433,6 +433,58 @@ async def get_skill_in_workspace(
         ).scalar_one_or_none()
 
 
+async def load_workspace_catalog_skill(
+    workspace_id: uuid.UUID, name: str, *, thread_id: str | None = None
+) -> LoadedSkill:
+    """Workspace-scope catalog skill loader. Bypasses the per-user
+    `SkillInstall` requirement -- catalog skills (`source='catalog'`)
+    are auto-generated for the workspace and intended to be loadable
+    by any user in that workspace without an explicit install step.
+
+    Used by `_load_skill` as a fallback when the per-user lookup
+    misses, so the `integrations/<app>` skills the
+    `catalog_skills.py` sweeper writes are actually reachable by the
+    agent. Raises `SkillNotFound` if no matching workspace-scope
+    catalog skill exists for `(workspace_id, name)`."""
+    async with get_session() as session:
+        skill = (
+            await session.execute(
+                select(Skill).where(
+                    Skill.workspace_id == workspace_id,
+                    Skill.name == name,
+                    Skill.source == "catalog",
+                )
+            )
+        ).scalar_one_or_none()
+    if skill is None:
+        raise SkillNotFound(
+            f"Skill {name!r} no encontrada como catalog en este workspace."
+        )
+    body = await storage.download_skill_body(
+        workspace_id=skill.workspace_id,
+        skill_id=skill.id,
+        version=skill.version,
+        r2_ref=skill.body_r2_ref,
+    )
+    log.info(
+        "skill_loaded",
+        workspace_id=str(workspace_id),
+        skill_id=str(skill.id),
+        skill_name=skill.name,
+        thread_id=thread_id,
+        size_bytes=skill.size_bytes,
+        source="load_skill_tool_workspace_catalog",
+    )
+    return LoadedSkill(
+        name=skill.name,
+        description=skill.description,
+        body=body,
+        links=list(skill.links or []),
+        missing_links=[],
+        warning=None,
+    )
+
+
 async def load_skill_body_for_user(
     user_id: uuid.UUID, name: str, *, thread_id: str | None = None
 ) -> LoadedSkill:
