@@ -42,9 +42,26 @@ _PRICING_PER_MTOK: Final[dict[str, tuple[float, float]]] = {
     "anthropic/claude-haiku-4-5": (1.00, 5.00),
 }
 
-# Markup applied to total LLM cost to arrive at sales/blended cost. See
-# module docstring for the rationale; tweak as the cost mix changes.
-SALES_COST_MULTIPLIER: Final[float] = 4.0
+# Markup applied to total LLM cost to arrive at sales/blended cost.
+#
+# 5x = 80% gross margin, the threshold "venture-grade SaaS" expects.
+# Bumped from 4x (75% margin) on the move to per-user pricing where
+# the credit-burn UI surfaces costs back to the customer. Reasons:
+#   - LLM unit costs trend down over time (caching, batch APIs, cheap
+#     routing) so a healthy starting multiplier protects margin
+#     against future model upgrades.
+#   - Industry peers (Cursor post-optimization, Lindy, Vapi) sit at
+#     5-7x; below 5x reads "cost-plus" rather than "value-priced" to
+#     customers + investors.
+#   - The 25% bump from 4x to 5x is invisible to existing customers
+#     in absolute terms (a $0.04 run becomes $0.05) but compounds
+#     meaningfully at the seat / monthly level.
+#
+# 1 credit = $0.001 sales_cost_usd (3 decimal places of granularity at
+# customer-facing display time). A typical thread that costs $0.04 in
+# raw LLM tokens shows as 200 credits to the customer.
+SALES_COST_MULTIPLIER: Final[float] = 5.0
+CREDITS_PER_USD: Final[float] = 1000.0
 
 
 @dataclass

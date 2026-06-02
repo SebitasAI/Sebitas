@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -917,3 +918,92 @@ class FollowUp(Base):
         DateTime(timezone=True), nullable=True
     )
     cancelled_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+# Allowed values for agent_run.kind. The 4 categories that the Usage UI's
+# stacked bar chart breaks down by. Adding a fifth means adding a write
+# site + extending the CHECK in migration 0030 -- the UI auto-renders
+# any new kind that shows up in the JSON aggregate response.
+_AGENT_RUN_KINDS = ("slack_thread", "scheduled_task", "automation", "media")
+
+
+class AgentRun(Base):
+    """One row per agent invocation. Inserted by `runner.py` at finalize
+    time with the per-run cost + token snapshot from `app/agent/cost.py`.
+
+    This is the Usage dashboard's primary table. Every metric in
+    `/api/usage/*` is a SQL aggregate on this. We don't query Langfuse
+    at request time because:
+      - sub-100ms page loads require local-DB joins
+      - rate limits on Langfuse's API would throttle popular workspaces
+      - dependency on a third-party for customer-facing analytics is
+        operationally fragile
+
+    `app_user_id` is ON DELETE SET NULL so the audit trail survives a
+    user leaving the workspace; the UI shows "Unknown user" for null.
+
+    `parent_ref_id` has NO FK (intentional): scheduled_task /
+    automation rows can be deleted while the agent_run row sticks
+    around for analytics. Mirrors the automation_run snapshot pattern.
+    """
+
+    __tablename__ = "agent_run"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('slack_thread', 'scheduled_task', 'automation', 'media')",
+            name="ck_agent_run_kind",
+        ),
+        CheckConstraint(
+            "status IN ('success', 'failed', 'running')",
+            name="ck_agent_run_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    app_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    parent_ref_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    parent_name_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    slack_channel_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    slack_thread_ts: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    input_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    output_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    cache_read_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    cache_write_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # NUMERIC(12,6) gives 6 digits of cents precision -- enough for a
+    # single run while keeping monthly aggregates well within range.
+    total_cost_usd: Mapped[float] = mapped_column(
+        Numeric(12, 6), nullable=False, default=0, server_default="0"
+    )
+    sales_cost_usd: Mapped[float] = mapped_column(
+        Numeric(12, 6), nullable=False, default=0, server_default="0"
+    )
+    by_model: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    langfuse_trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    finished_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

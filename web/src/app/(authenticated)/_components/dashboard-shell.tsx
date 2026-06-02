@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import {
+  BarChart3,
   Building2,
   CalendarClock,
   CreditCard,
@@ -61,6 +62,7 @@ const MAIN_NAV: NavItem[] = [
   // strokeWidth tuned to read at the same visual weight as the filled set.
   { href: "/scheduled-tasks", label: "Scheduled tasks", icon: <CalendarClock className="size-5" strokeWidth={1.75} /> },
   { href: "/automations", label: "Automations", icon: <Zap className="size-5" strokeWidth={1.75} /> },
+  { href: "/usage", label: "Usage", icon: <BarChart3 className="size-5" strokeWidth={1.75} /> },
 ];
 
 const SETTINGS_NAV: NavItem[] = [

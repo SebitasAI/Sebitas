@@ -38,6 +38,32 @@ from app.slack import roster as _roster
 log = structlog.get_logger(__name__)
 _langfuse = get_client()
 
+
+# Per-run parent-ref contextvar. Set by callers that own a parent row
+# (scheduler -> scheduled_task; automation router -> automation) BEFORE
+# they call run_agent. At finalize time we read this and stamp the
+# agent_run row's parent_ref_id + parent_name_snapshot so the Usage UI
+# can group runs by their owning task/automation. None for ad-hoc
+# Slack-triggered runs.
+import contextvars as _contextvars  # noqa: E402
+
+_agent_parent_ref_var: _contextvars.ContextVar[tuple[str, uuid.UUID, str] | None] = (
+    _contextvars.ContextVar("agent_parent_ref", default=None)
+)
+
+
+def set_agent_parent_ref(
+    kind: str, ref_id: uuid.UUID, name_snapshot: str
+) -> _contextvars.Token:
+    """Push a (kind, id, name) tuple onto the contextvar. Returns the
+    token; caller must `reset_agent_parent_ref(token)` after run_agent
+    completes. Valid kinds: 'scheduled_task', 'automation'."""
+    return _agent_parent_ref_var.set((kind, ref_id, name_snapshot))
+
+
+def reset_agent_parent_ref(token: _contextvars.Token) -> None:
+    _agent_parent_ref_var.reset(token)
+
 # Reaction emoji shortname (no surrounding colons). Default fallback when
 # the per-message router can't find a more contextual match. The actual
 # emoji used per run is computed by `pick_reaction(user_text)` and stored
@@ -275,17 +301,35 @@ async def _remove_reaction(
 async def _load_history(team_id: str, channel: str, conversation_key: str) -> list[dict]:
     """Prior user/assistant turns of the thread, for multi-turn context. User
     messages with persisted attachments are re-hydrated from R2 into Anthropic
-    content blocks (image/document via fresh presigned URL, text inline)."""
+    content blocks (image/document via fresh presigned URL, text inline).
+
+    DM flattening: 1:1 DM channel ids start with 'D'. Slack lets the user
+    "reply in thread" to any message, which would otherwise split the
+    history across multiple Thread rows (one for the channel root, one
+    per threaded sub-conversation). The agent then loses context of
+    everything posted at root. For DMs we flatten -- one continuous
+    conversation regardless of which Thread row the message lives in.
+    Channels + mpims keep per-thread isolation (parallel threads carry
+    real semantic separation there)."""
     from app.slack import files as sf  # lazy: avoid import cycle at module load
+
+    is_dm = bool(channel) and channel[:1].upper() == "D"
 
     async with get_session() as session:
         workspace = await repo.get_workspace(session, team_id)
         if workspace is None:
             return []
-        thread = await repo.get_thread(session, workspace.id, channel, conversation_key)
-        if thread is None:
-            return []
-        rows = await repo.get_thread_messages(session, thread.id, limit=30)
+        if is_dm:
+            rows = await repo.get_dm_channel_messages(
+                session, workspace.id, channel, limit=30
+            )
+            if not rows:
+                return []
+        else:
+            thread = await repo.get_thread(session, workspace.id, channel, conversation_key)
+            if thread is None:
+                return []
+            rows = await repo.get_thread_messages(session, thread.id, limit=30)
         user_msg_ids = [m.id for m in rows if m.role == "user" and m.tool_calls is None]
         attachments_by_msg = await repo.get_attachments_for_messages(session, user_msg_ids)
 
@@ -890,6 +934,108 @@ async def record_feedback_score(
         )
 
 
+async def _persist_agent_run(
+    *,
+    ctx: dict,
+    workspace_id: uuid.UUID,
+    slack_user_id: str | None,
+    channel: str,
+    reply_thread_ts: str | None,
+    started_at,
+    summary: dict | None,
+    status: str,
+    error: str | None = None,
+) -> None:
+    """Insert one row into `agent_run` for the Usage dashboard.
+
+    `kind` is derived from the slack_user_id sentinel that scheduled
+    tasks + automations use for their system-fired runs. The parent
+    ref (scheduled_task id / automation id + name snapshot) is pulled
+    from the contextvar that scheduler.py / automations.router push
+    before calling run_agent.
+
+    Best-effort: any exception is swallowed by the caller. We don't
+    want a stats-write failure to break delivery of the agent's reply."""
+    from datetime import datetime as _dt, timezone as _tz
+    from sqlalchemy import select as _select
+    from app.db.models import AgentRun, AppUser
+    from app.db.session import get_session
+    from app.scheduled_tasks.scheduler import SYSTEM_ACTOR_SLACK_USER_ID as _SCHED
+    from app.automations.actions import (
+        SYSTEM_ACTOR_SLACK_USER_ID as _AUTO,
+    )
+
+    # Resolve kind from the actor. Manual Slack messages go to
+    # 'slack_thread'; scheduler / automation system actors map to
+    # their respective kinds.
+    if slack_user_id == _SCHED:
+        kind = "scheduled_task"
+    elif slack_user_id == _AUTO:
+        kind = "automation"
+    else:
+        kind = "slack_thread"
+
+    parent_ref = _agent_parent_ref_var.get()
+    parent_ref_id = parent_ref[1] if parent_ref else None
+    parent_name = parent_ref[2] if parent_ref else None
+    # For slack_thread runs, parent_ref is always None (no owning row).
+    # For scheduled_task / automation runs WITHOUT a parent_ref set
+    # (older callers, edge cases), we still log the row -- the Usage UI
+    # falls back to kind alone and the row counts in totals.
+
+    # Resolve app_user_id from slack_user_id when it's a real user.
+    # For system actors (SCHED / AUTO) leave it null -- those runs
+    # show as the system "Misterr" entry in Top Users.
+    app_user_id: uuid.UUID | None = None
+    if slack_user_id and slack_user_id not in (_SCHED, _AUTO):
+        try:
+            async with get_session() as session:
+                row = (
+                    await session.execute(
+                        _select(AppUser.id).where(
+                            AppUser.workspace_id == workspace_id,
+                            AppUser.slack_user_id == slack_user_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                app_user_id = row
+        except Exception as exc:  # noqa: BLE001
+            log.warning("agent_run_user_lookup_failed", error=str(exc)[:200])
+
+    input_tokens = int(summary["input_tokens"]) if summary else 0
+    output_tokens = int(summary["output_tokens"]) if summary else 0
+    cache_read = int(summary.get("cache_read_tokens", 0)) if summary else 0
+    cache_write = int(summary.get("cache_write_tokens", 0)) if summary else 0
+    total_cost = float(summary["total_cost_usd"]) if summary else 0.0
+    sales_cost = float(summary["sales_cost_usd"]) if summary else 0.0
+    by_model = dict(summary.get("by_model", {})) if summary else {}
+
+    async with get_session() as session:
+        run = AgentRun(
+            workspace_id=workspace_id,
+            app_user_id=app_user_id,
+            kind=kind,
+            parent_ref_id=parent_ref_id,
+            parent_name_snapshot=parent_name,
+            slack_channel_id=channel,
+            slack_thread_ts=reply_thread_ts,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_write,
+            total_cost_usd=total_cost,
+            sales_cost_usd=sales_cost,
+            by_model=by_model,
+            status=status,
+            langfuse_trace_id=ctx.get("langfuse_trace_id"),
+            error=error,
+            started_at=started_at,
+            finished_at=_dt.now(_tz.utc),
+        )
+        session.add(run)
+        await session.commit()
+
+
 async def _drive(client, ctx: dict, result: dict, *, lock_handle: ThreadLockHandle | None = None) -> None:
     """Handle a graph result: pause for approval/connect, or finish (persist + reply).
 
@@ -1330,6 +1476,10 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
         # right after the run finishes.
         from app.agent import cost as _cost
         _cost.start_run_accumulator()
+        # Captured before the graph runs so the agent_run row's
+        # started_at matches the actual invocation, not the finalize time.
+        from datetime import datetime as _dt, timezone as _tz
+        run_started_at = _dt.now(_tz.utc)
         hb_task = asyncio.create_task(_heartbeat(
             client, channel=channel, thread_ts=reply_thread_ts or user_ts,
         ))
@@ -1384,6 +1534,24 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
                 )
         except Exception as exc:  # noqa: BLE001
             log.warning("cost_score_emit_failed", error=str(exc)[:200])
+
+        # Persist the agent_run row for the Usage dashboard. Best-effort:
+        # a write failure here must not block delivery of the agent's
+        # actual reply (we still call _drive below regardless).
+        try:
+            await _persist_agent_run(
+                ctx=ctx,
+                workspace_id=workspace_id,
+                slack_user_id=slack_user_id,
+                channel=channel,
+                reply_thread_ts=reply_thread_ts,
+                started_at=run_started_at,
+                summary=summary,
+                status="success",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("agent_run_persist_failed", error=str(exc)[:200])
+
         await _drive(client, ctx, result, lock_handle=lock_handle)
 
 

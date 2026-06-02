@@ -363,6 +363,17 @@ async def _execute_fire(fire: _PendingFire) -> tuple[str | None, str | None]:
 
     seed_text = _build_seed_text(fire)
 
+    # Push the (kind, id, name) tuple so the agent_run row written at
+    # finalize time gets parent_ref_id + parent_name_snapshot. Reset
+    # the contextvar after the run regardless of outcome -- if we
+    # don't, a subsequent run in the same asyncio task picks up the
+    # stale ref. Inline import avoids a circular at module load.
+    from app.agent.runner import (
+        set_agent_parent_ref as _set_ref,
+        reset_agent_parent_ref as _reset_ref,
+    )
+
+    _ref_token = _set_ref("scheduled_task", fire.task_id, fire.name)
     try:
         await run_agent(
             client=client,
@@ -379,6 +390,8 @@ async def _execute_fire(fire: _PendingFire) -> tuple[str | None, str | None]:
         )
     except Exception as exc:  # noqa: BLE001
         return None, f"agent run errored: {exc}"[: repo.MAX_LAST_RUN_ERROR_LEN]
+    finally:
+        _reset_ref(_ref_token)
 
     # Don't bother fetching a summary for one-shot agentic rows -- they get
     # deleted on fire so no future run consumes it.
