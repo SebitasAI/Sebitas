@@ -1,16 +1,15 @@
 import type { ReactNode } from "react";
 
-// TODO testimonials: every entry must be a REAL, permissioned customer quote about Misterr,
-// with the customer's real name, role, company, and (if shown) a real metric and LinkedIn profile.
-// Fabricated testimonials are illegal under the FTC's 2024 rule on fake endorsements and are a
-// serious risk during fundraising diligence. If there are no real quotes yet, hide this section.
+// TODO testimonials: every entry must be a REAL, permissioned customer quote with the customer's
+// real name, role, photo, and LinkedIn. Fabricated testimonials (invented names/faces/metrics)
+// are illegal under the FTC's 2024 rule on fake endorsements and a serious fundraising-diligence
+// risk. If there are no real quotes yet, hide this section rather than filling it.
 
 type Testimonial = {
   savedMetric: string;
   quote: string;
   name: string;
   role: string;
-  company: string;
   photoUrl: string;
   linkedinUrl: string;
 };
@@ -20,10 +19,9 @@ type Testimonial = {
 const TESTIMONIALS: Testimonial[] = [
   {
     savedMetric: "[verified metric]",
-    quote: "[Real customer quote about Misterr, in their words]",
+    quote: "[Real customer quote about Misterr]",
     name: "[Full name]",
     role: "[Role]",
-    company: "[Company]",
     photoUrl: "",
     linkedinUrl: "",
   },
@@ -32,7 +30,6 @@ const TESTIMONIALS: Testimonial[] = [
     quote: "[A second real, on-product quote from a Misterr customer]",
     name: "[Full name]",
     role: "[Role]",
-    company: "[Company]",
     photoUrl: "",
     linkedinUrl: "",
   },
@@ -41,7 +38,6 @@ const TESTIMONIALS: Testimonial[] = [
     quote: "[A third permissioned quote about what Misterr shipped]",
     name: "[Full name]",
     role: "[Role]",
-    company: "[Company]",
     photoUrl: "",
     linkedinUrl: "",
   },
@@ -96,7 +92,7 @@ function Card({ t, featured }: { t: Testimonial; featured: boolean }) {
             {t.name}
           </span>
           <span className="truncate font-[family-name:var(--font-inter)] text-[13px] font-medium text-[#626262]">
-            {t.role}, {t.company}
+            {t.role}
           </span>
         </div>
         {t.linkedinUrl && (
