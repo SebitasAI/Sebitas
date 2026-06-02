@@ -305,7 +305,7 @@ def test_extract_integration_calls_finds_run_action():
         {"role": "tool", "content": "result"},
     ]
     out = _extract_integration_calls(run_messages)
-    assert out == [{"app": "gong", "action_id": "gong-list-calls"}]
+    assert out == [{"app": "gong", "action_id": "gong-list-calls", "params": {}}]
 
 
 def test_extract_integration_calls_ignores_other_tools():
@@ -320,7 +320,7 @@ def test_extract_integration_calls_ignores_other_tools():
         }
     ]
     out = _extract_integration_calls(run_messages)
-    assert out == [{"app": "gong", "action_id": "y"}]
+    assert out == [{"app": "gong", "action_id": "y", "params": {}}]
 
 
 def test_extract_integration_calls_empty_when_no_tool_calls():
