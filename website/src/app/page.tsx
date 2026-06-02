@@ -143,10 +143,8 @@ export default function HomePage() {
       {/* ===== TESTIMONIALS ===== */}
       <section className="relative flex w-full flex-col items-center justify-center gap-[40px] overflow-clip bg-gradient-to-b from-[#faf5f1] to-[#ddf2ff] px-[24px] pb-[64px] pt-[20px] sm:px-[40px] sm:pb-[80px]">
         <div className="flex min-h-[140px] flex-col items-center justify-center shrink-0 sm:h-[257px]">
-          <p className="w-full max-w-[1164px] font-[family-name:var(--font-lexend)] text-[36px] font-semibold tracking-[-1.8px] text-[#191919] [word-break:break-word] sm:text-[56px] sm:tracking-[-2.8px] md:text-[72px] md:tracking-[-3.6px]">
-            What our clients
-            <br aria-hidden />
-            {`say about Misterr. `}
+          <p className="w-full max-w-[1164px] font-[family-name:var(--font-lexend)] text-[36px] font-semibold tracking-[-1.8px] text-center text-[#191919] [word-break:break-word] sm:text-[56px] sm:tracking-[-2.8px] md:text-[72px] md:tracking-[-3.6px]">
+            What our customers say.
           </p>
         </div>
         <Testimonials />
