@@ -395,13 +395,13 @@ def _detect_iteration_loop(action_calls: list[dict]) -> str | None:
     # alphabetically for stable dedup; the lesson generalizes anyway.
     aid = sorted(looped)[0]
     return (
-        f"Cuando necesités encontrar un item específico por nombre / "
+        f"Cuando necesites encontrar un item específico por nombre o "
         f"entidad (empresa, persona, email, cuenta) dentro de `{aid}`, "
-        "pasá `filter_substring='<needle>'` en una sola llamada en "
-        "lugar de iterar ventanas de fecha. El gateway hace deep-match "
-        "case-insensitive sobre todos los campos anidados (parties, "
-        "context, CRM objects, metaData) y devuelve solo los matches. "
-        "Cero costo de LLM, una sola tool call. Ejemplo: "
+        "pasa `filter_substring='<needle>'` en una sola llamada en lugar "
+        "de iterar varias veces con ventanas de fecha distintas. El "
+        "filtro hace deep-match case-insensitive sobre todos los campos "
+        "anidados de cada item y devuelve solo los que matchean. Una "
+        "sola tool call. Ejemplo: "
         f"`run_action(app=..., action_id='{aid}', params=..., "
         "filter_substring='MercadoLibre')`."
     )

@@ -346,10 +346,9 @@ async def _disconnect_integration(app: str) -> str:
 register(Tool(
     name="disconnect_integration",
     description=(
-        "Disconnect an integration: deletes the connected account at the provider "
-        "(via Pipedream) and marks it as disconnected for this workspace. "
+        "Disconnect an integration: removes the connection from this workspace. "
         "Idempotent (no-op if not connected). Use when the user says "
-        "'desconectá X / quitá X / sacá la conexión de X / disconnect X'."
+        "'desconecta X / quita X / saca la conexión de X / disconnect X'."
     ),
     input_schema={
         "type": "object",
