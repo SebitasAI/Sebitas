@@ -76,7 +76,14 @@ class Settings(BaseSettings):
     r2_access_key_id: str | None = None
     r2_secret_access_key: str | None = None
     r2_bucket: str | None = None
-    artifact_url_expiry: int = 3600  # signed-URL lifetime (seconds)
+    # Signed-URL lifetime for R2 artifacts. Bumped from 1h -> 7d on
+    # 2026-06-02: the prior value made shareable links die before the
+    # customer's day was over, and Misterr's primary delivery path now
+    # uploads files DIRECTLY to Slack (see app/agent/sandbox.py) so
+    # this URL is only a fallback for re-reading on later agent turns +
+    # the rare case Slack upload fails. 7d covers multi-day threads
+    # without giving non-Slack consumers an indefinite token.
+    artifact_url_expiry: int = 604800  # 7 days
     # Slack file ingest limits. The per-file generic cap covers images / PDFs /
     # text / audio. Video gets a separate, much larger cap because we don't
     # send the raw video anywhere -- we extract audio (typically <10% of the
