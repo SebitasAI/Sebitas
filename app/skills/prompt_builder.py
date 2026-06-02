@@ -51,7 +51,13 @@ from sqlalchemy import select
 
 from app.db.models import Skill
 from app.db.session import get_session
-from app.memory.constants import COMPANY_SLUG, TEAM_SLUG, user_slug
+from app.memory.constants import (
+    COMPANY_SLUG,
+    TEAM_SLUG,
+    channel_slug,
+    is_one_to_one_dm,
+    user_slug,
+)
 from app.skills import registry, storage
 
 log = structlog.get_logger(__name__)
@@ -78,9 +84,15 @@ def _xml_escape_attr(value: str) -> str:
 async def _load_memory_blocks(
     workspace_id: uuid.UUID,
     slack_user_id: str | None,
+    slack_channel_id: str | None = None,
 ) -> list[tuple[str, str]]:
-    """Return [(scope_label, body), ...] for the three reserved memory
-    slugs that exist for this workspace. Order: company, team, user.
+    """Return [(scope_label, body), ...] for the reserved memory slugs
+    that exist for this workspace. Order: company, team, user, channel.
+
+    `slack_channel_id`, when present and NOT a 1:1 DM (channel IDs
+    starting with 'D'), adds the per-channel `channels/<id>` memory to
+    the block. 1:1 DMs skip the channel block because the user skill
+    already covers them.
 
     Best-effort: a missing skill row is skipped (the workspace may not
     have been re-seeded yet, or this is the user's first message and
@@ -93,6 +105,8 @@ async def _load_memory_blocks(
     ]
     if slack_user_id:
         names.append(("user", user_slug(slack_user_id)))
+    if slack_channel_id and not is_one_to_one_dm(slack_channel_id):
+        names.append(("channel", channel_slug(slack_channel_id)))
 
     slugs = [n[1] for n in names]
     async with get_session() as session:
@@ -136,6 +150,7 @@ async def build_skills_context(
     *,
     workspace_id: uuid.UUID | None = None,
     slack_user_id: str | None = None,
+    slack_channel_id: str | None = None,
 ) -> str:
     """Return the full skills system-prompt fragment for the given user.
 
@@ -153,7 +168,9 @@ async def build_skills_context(
     memory_blocks: list[tuple[str, str]] = []
     if workspace_id is not None:
         try:
-            memory_blocks = await _load_memory_blocks(workspace_id, slack_user_id)
+            memory_blocks = await _load_memory_blocks(
+                workspace_id, slack_user_id, slack_channel_id
+            )
         except Exception as exc:  # noqa: BLE001
             # Memory is best-effort: never break the prompt build over it.
             log.warning(

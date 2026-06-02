@@ -398,6 +398,48 @@ def register_handlers(app: AsyncApp) -> None:
                 payload={**base_payload, "reply_thread_ts": thread_ts, "require_existing_thread": True},
             )
 
+    # --- Bot was added to a channel: deep-scan its history so future
+    # responses in this channel have context. Fire-and-forget; the scan
+    # writes observations to a per-channel memory skill (`channels/<id>`)
+    # so the agent picks them up only when responding IN that channel,
+    # not workspace-wide.
+    @app.event("member_joined_channel")
+    async def on_member_joined(event, body, context):  # noqa: ANN001
+        joined_user = event.get("user")
+        bot_user_id = context.get("bot_user_id")
+        # Only fire when WE are the one joining. Other people joining a
+        # channel Misterr is in: no action.
+        if not joined_user or not bot_user_id or joined_user != bot_user_id:
+            return
+        team_id = body.get("team_id") or event.get("team")
+        channel_id = event.get("channel")
+        if not team_id or not channel_id:
+            return
+        try:
+            from app.memory.onboarding import scan_single_channel
+            from app.db import repository as _repo
+            from app.db.session import get_session
+
+            async with get_session() as session:
+                ws = await _repo.get_workspace(session, team_id)
+            if ws is None:
+                log.warning(
+                    "on_join_scan_skipped_no_workspace",
+                    team_id=team_id, channel_id=channel_id,
+                )
+                return
+            log.info(
+                "on_join_scan_spawn",
+                workspace_id=str(ws.id), channel_id=channel_id,
+            )
+            _spawn(scan_single_channel(ws.id, channel_id))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "on_join_scan_spawn_failed",
+                team_id=team_id, channel_id=channel_id,
+                error=str(exc)[:200],
+            )
+
     # --- Approval gate buttons (human-in-the-loop) ---
 
     @app.action("agent_approve")

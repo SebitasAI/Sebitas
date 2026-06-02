@@ -738,33 +738,6 @@ async def _post_user_facing_error(client, ctx: dict, exc: BaseException) -> None
         log.warning("user_facing_error_post_failed", error=str(post_exc)[:200])
     log.error("agent_invoke_failed", error=str(exc)[:500], run_id=ctx.get("run_id"))
 
-    # Publish to automations: any subscriber on `agent_error` fires.
-    # Best-effort -- the error path must not error again.
-    try:
-        from app.automations.events import (
-            Event as _AutoEvent,
-            current_fire_depth as _depth,
-            publish as _publish,
-        )
-
-        ws_id_str = ctx.get("workspace_id")
-        if ws_id_str:
-            await _publish(
-                _AutoEvent(
-                    type="agent_error",
-                    workspace_id=uuid.UUID(ws_id_str) if isinstance(ws_id_str, str) else ws_id_str,
-                    data={
-                        "error": str(exc)[:500],
-                        "error_type": type(exc).__name__,
-                        "trace_id": ctx.get("langfuse_trace_id") or "",
-                        "run_id": ctx.get("run_id") or "",
-                    },
-                    fire_depth=_depth(),
-                )
-            )
-    except Exception as pub_exc:  # noqa: BLE001
-        log.warning("automation_publish_agent_error_failed", error=str(pub_exc)[:200])
-
 
 async def _post_preamble_before_gate(client, ctx: dict, result: dict) -> None:
     """If the model emitted text alongside the risky tool_use blocks, post it
@@ -1215,6 +1188,7 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
         app_user_id,
         workspace_id=workspace_id,
         slack_user_id=slack_user_id,
+        slack_channel_id=channel,
     )
     # Slack roster: ensure the workspace's user list is synced (lazy, cheap on
     # warm cache) then build a compact channel-member block for this run so the
@@ -1441,6 +1415,7 @@ async def resume_run(*, client, ctx: dict, decision: str) -> None:
                     uuid.UUID(app_user_str),
                     workspace_id=workspace.id,
                     slack_user_id=slack_user_id,
+                    slack_channel_id=ctx.get("channel"),
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning(
