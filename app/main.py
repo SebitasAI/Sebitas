@@ -32,6 +32,7 @@ from app.integrations.webhook import router as pipedream_webhook_router
 from app.logging import configure_logging
 from app.automations.events import start_consumer as start_automation_consumer
 from app.automations.events import stop_consumer as stop_automation_consumer
+from app.memory.compaction import run_compaction_loop as run_memory_compaction_loop
 from app.scheduled_tasks.repository import seed_system_tasks_for_all_workspaces
 from app.scheduled_tasks.scheduler import run_scheduler_loop
 from app.skills.preview_store import cleanup_expired as cleanup_expired_previews
@@ -140,6 +141,12 @@ async def lifespan(_: FastAPI):
         start_automation_consumer()
         log.info("automation_consumer_started")
 
+        # Memory compaction (slice T-X Phase C). One background task per
+        # process that walks all workspaces' memory skills every 24h,
+        # rewrites the curated summary integrating new observations, and
+        # clears the log so bodies stay well under the 200KB cap.
+        memory_compaction_task = asyncio.create_task(run_memory_compaction_loop())
+
         # Clerk Organizations backfill (slice T-5). Idempotent: for each
         # installed workspace without a clerk_org_id, provision one and
         # link existing AppUsers as members. Once all rows are linked this
@@ -161,6 +168,7 @@ async def lifespan(_: FastAPI):
             preview_cleanup_task.cancel()
             integration_resume_task.cancel()
             scheduled_task_loop.cancel()
+            memory_compaction_task.cancel()
             try:
                 await stop_automation_consumer()
             except Exception as exc:  # noqa: BLE001
