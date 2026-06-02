@@ -1,23 +1,23 @@
 """CRUD + permission checks for automations.
 
-Mirrors `app/scheduled_tasks/repository.py` deliberately: same error
-class names, same slug shape, same resolver semantics (UUID or slug, both
-workspace-scoped). The differences:
+Mirrors `app/scheduled_tasks/repository.py`: same error class names, same
+slug shape, same workspace-scoped resolver.
 
-- No cron / timezone -- automations are event-driven.
-- `trigger_filter` is a small JSONB dict we validate shape-only (keys are
-  strings, values are primitives).
-- `action_config` shape depends on `action_type`; we enforce that
-  required keys are present and primitive-typed but don't validate
-  Slack channel IDs etc. (the runtime catches those).
+The repository is source-agnostic. Source-specific provisioning (calling
+the Pipedream / Composio APIs to create the upstream trigger) lives in
+`app/automations/triggers.py` and runs from the agent tool before
+calling `create_automation` -- by the time we hit this module, the
+provisioning side effects are done and we just persist the row.
 
-Permission model copies the scheduled-task one: local-scope automations
-can be edited/deleted only by their owner. Global/system scopes exist
-for future use and are gated behind `is_workspace_admin`."""
+That separation keeps this file pure-DB (easy to unit-test) and keeps
+the provisioning code in one place where the HTTP retries and the
+encryption-of-the-returned-key happen together.
+"""
 
 from __future__ import annotations
 
 import re
+import secrets
 import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Automation, AutomationRun
 from app.db.session import get_session
+from app.slack.crypto import encrypt_token
 
 log = structlog.get_logger(__name__)
 
@@ -40,16 +41,15 @@ _UUID_RE = re.compile(
 )
 
 
-VALID_TRIGGER_TYPES: frozenset[str] = frozenset(
-    {
-        "agent_error",
-        "tool_failed",
-        "user_satisfaction_low",
-        "scheduled_task_completed",
-    }
-)
-VALID_ACTION_TYPES: frozenset[str] = frozenset({"slack_notify", "agent_run"})
+VALID_SOURCES: frozenset[str] = frozenset({"direct", "pipedream", "composio"})
 VALID_SCOPES: frozenset[str] = frozenset({"local", "global", "system"})
+
+
+def generate_webhook_secret() -> str:
+    """32 bytes of randomness, base64url-encoded. The URL secret is the
+    credential for source=direct -- treat it like a password (rotate on
+    suspected leak, never log)."""
+    return secrets.token_urlsafe(32)
 
 
 # --------------------------------------------------------------------------- #
@@ -78,71 +78,6 @@ class AutomationNameConflict(AutomationError):
 
 
 # --------------------------------------------------------------------------- #
-# Shape validators
-# --------------------------------------------------------------------------- #
-
-
-def _validate_filter(trigger_filter: dict[str, Any] | None) -> dict[str, Any]:
-    """Filters are key/value dicts where keys are strings and values are
-    JSON primitives (str, int, float, bool, None). We deliberately
-    reject lists / nested dicts in v1 to keep the matching semantics
-    obvious. Returns the normalized dict."""
-    if trigger_filter is None:
-        return {}
-    if not isinstance(trigger_filter, dict):
-        raise AutomationValidationError(
-            "`trigger_filter` debe ser un dict {key: value}."
-        )
-    for k, v in trigger_filter.items():
-        if not isinstance(k, str):
-            raise AutomationValidationError(
-                f"Las keys de `trigger_filter` deben ser strings; vino {type(k).__name__}."
-            )
-        if not isinstance(v, (str, int, float, bool, type(None))):
-            raise AutomationValidationError(
-                f"El valor de `trigger_filter[{k!r}]` debe ser un primitivo "
-                f"(str/int/float/bool/null); vino {type(v).__name__}."
-            )
-    return dict(trigger_filter)
-
-
-def _validate_action_config(
-    action_type: str, action_config: dict[str, Any] | None
-) -> dict[str, Any]:
-    """Per-action-type schema check. Both action types in v1 require a
-    template field (`text` or `prompt`); `channel` is optional."""
-    cfg = action_config or {}
-    if not isinstance(cfg, dict):
-        raise AutomationValidationError("`action_config` debe ser un dict.")
-
-    if action_type == "slack_notify":
-        text = cfg.get("text")
-        if not isinstance(text, str) or not text.strip():
-            raise AutomationValidationError(
-                "Para `slack_notify`, `action_config.text` es obligatorio "
-                "(template del mensaje a postear)."
-            )
-    elif action_type == "agent_run":
-        prompt = cfg.get("prompt")
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise AutomationValidationError(
-                "Para `agent_run`, `action_config.prompt` es obligatorio "
-                "(template del prompt para el agente)."
-            )
-    else:
-        raise AutomationValidationError(
-            f"`action_type` desconocido: `{action_type}`."
-        )
-
-    channel = cfg.get("channel")
-    if channel is not None and not isinstance(channel, str):
-        raise AutomationValidationError(
-            "`action_config.channel` debe ser un string (id de canal/DM) o null."
-        )
-    return dict(cfg)
-
-
-# --------------------------------------------------------------------------- #
 # Resolver
 # --------------------------------------------------------------------------- #
 
@@ -152,9 +87,8 @@ async def resolve_automation(
     workspace_id: uuid.UUID,
     handle: str,
 ) -> Automation:
-    """Workspace-scoped resolver. Looks up by UUID first (when `handle`
-    parses as one), then by slug. Always filters by workspace_id so we
-    can't leak across tenants. Raises AutomationNotFound on miss."""
+    """Workspace-scoped resolver. UUID first, then slug. Always filters
+    by workspace_id so we can't leak across tenants."""
     handle = (handle or "").strip()
     if not handle:
         raise AutomationNotFound("Falta el id o nombre de la automation.")
@@ -191,6 +125,22 @@ async def resolve_automation(
     return row
 
 
+async def resolve_by_webhook_secret(
+    session: AsyncSession, secret: str
+) -> Automation | None:
+    """Used by the direct-webhook endpoint. Looks up by global secret
+    (unique across workspaces, see uq_automation_webhook_secret).
+    Returns None on miss so the endpoint can 404 without distinguishing
+    "wrong secret" from "valid secret on a paused automation"."""
+    if not secret:
+        return None
+    return (
+        await session.execute(
+            select(Automation).where(Automation.webhook_secret == secret)
+        )
+    ).scalar_one_or_none()
+
+
 # --------------------------------------------------------------------------- #
 # Permission helpers
 # --------------------------------------------------------------------------- #
@@ -199,7 +149,7 @@ async def resolve_automation(
 async def is_workspace_admin(
     session: AsyncSession, *, user_id: uuid.UUID, workspace_id: uuid.UUID
 ) -> bool:
-    """Same stub as scheduled_tasks: returns False until we have a real
+    """Same stub as scheduled_tasks. Returns False until we have a real
     role column. Keeps non-local scopes locked down by default."""
     _ = (session, user_id, workspace_id)
     return False
@@ -241,10 +191,20 @@ class CreateAutomationInput:
     created_by_user_id: uuid.UUID
     name: str
     description: str | None
-    trigger_type: str
-    trigger_filter: dict[str, Any] | None
-    action_type: str
-    action_config: dict[str, Any]
+    source: Literal["direct", "pipedream", "composio"]
+    prompt_template: str
+    destination_channel: str | None
+    trigger_metadata: dict[str, Any]
+    # source=direct: leave None; we generate the secret ourselves so the
+    # caller never has to think about cryptographic randomness.
+    # source=pipedream/composio: the provisioner (triggers.py) sets this
+    # with the upstream-returned id.
+    external_trigger_id: str | None = None
+    # source=pipedream: signing key returned by Pipedream once. We
+    # encrypt at-rest with the same Fernet key as bot_token.
+    # source=composio: None (account-wide secret in Doppler).
+    # source=direct: None.
+    external_trigger_key_plaintext: str | None = None
 
 
 async def create_automation(payload: CreateAutomationInput) -> Automation:
@@ -253,18 +213,58 @@ async def create_automation(payload: CreateAutomationInput) -> Automation:
             f"Nombre `{payload.name}` inválido: usá kebab-case (letras minúsculas, "
             "números y guiones; entre 2 y 64 chars, sin guion al inicio/fin)."
         )
-    if payload.trigger_type not in VALID_TRIGGER_TYPES:
+    if payload.source not in VALID_SOURCES:
         raise AutomationValidationError(
-            f"`trigger_type` desconocido: `{payload.trigger_type}`. "
-            f"Válidos: {', '.join(sorted(VALID_TRIGGER_TYPES))}."
+            f"`source` desconocido: `{payload.source}`. "
+            f"Válidos: {', '.join(sorted(VALID_SOURCES))}."
         )
-    if payload.action_type not in VALID_ACTION_TYPES:
+    if not (payload.prompt_template or "").strip():
         raise AutomationValidationError(
-            f"`action_type` desconocido: `{payload.action_type}`. "
-            f"Válidos: {', '.join(sorted(VALID_ACTION_TYPES))}."
+            "`prompt_template` es obligatorio (el prompt que va a recibir el "
+            "agente; podés interpolar variables del payload con `{key}`)."
         )
-    trig_filter = _validate_filter(payload.trigger_filter)
-    action_cfg = _validate_action_config(payload.action_type, payload.action_config)
+
+    # Source-specific column validation. The DB also enforces this via
+    # the check constraint, but we want a friendly error before hitting
+    # the DB.
+    webhook_secret: str | None = None
+    external_trigger_id = payload.external_trigger_id
+    external_trigger_key_encrypted: str | None = None
+
+    if payload.source == "direct":
+        if payload.external_trigger_id is not None:
+            raise AutomationValidationError(
+                "Para `source=direct`, `external_trigger_id` debe ser None."
+            )
+        if payload.external_trigger_key_plaintext is not None:
+            raise AutomationValidationError(
+                "Para `source=direct`, `external_trigger_key_plaintext` debe ser None."
+            )
+        webhook_secret = generate_webhook_secret()
+    elif payload.source == "pipedream":
+        if not payload.external_trigger_id:
+            raise AutomationValidationError(
+                "Para `source=pipedream`, `external_trigger_id` es obligatorio "
+                "(lo devuelve Pipedream al crear el trigger)."
+            )
+        if not payload.external_trigger_key_plaintext:
+            raise AutomationValidationError(
+                "Para `source=pipedream`, `external_trigger_key_plaintext` es "
+                "obligatorio (la signing key per-trigger)."
+            )
+        external_trigger_key_encrypted = encrypt_token(
+            payload.external_trigger_key_plaintext
+        )
+    elif payload.source == "composio":
+        if not payload.external_trigger_id:
+            raise AutomationValidationError(
+                "Para `source=composio`, `external_trigger_id` es obligatorio."
+            )
+        if payload.external_trigger_key_plaintext is not None:
+            raise AutomationValidationError(
+                "Para `source=composio`, `external_trigger_key_plaintext` debe "
+                "ser None (Composio usa el secret de Doppler)."
+            )
 
     async with get_session() as session:
         existing = (
@@ -286,10 +286,13 @@ async def create_automation(payload: CreateAutomationInput) -> Automation:
             owner_user_id=payload.created_by_user_id,
             name=payload.name,
             description=payload.description,
-            trigger_type=payload.trigger_type,
-            trigger_filter=trig_filter,
-            action_type=payload.action_type,
-            action_config=action_cfg,
+            source=payload.source,
+            prompt_template=payload.prompt_template,
+            destination_channel=payload.destination_channel,
+            webhook_secret=webhook_secret,
+            external_trigger_id=external_trigger_id,
+            external_trigger_key_encrypted=external_trigger_key_encrypted,
+            trigger_metadata=dict(payload.trigger_metadata or {}),
             scope="local",
             is_paused=False,
         )
@@ -300,8 +303,7 @@ async def create_automation(payload: CreateAutomationInput) -> Automation:
         "automation_created",
         automation_id=str(automation.id),
         workspace_id=str(automation.workspace_id),
-        trigger_type=automation.trigger_type,
-        action_type=automation.action_type,
+        source=automation.source,
         name=automation.name,
     )
     return automation
@@ -313,16 +315,19 @@ class UpdateAutomationInput:
     current_user_id: uuid.UUID
     handle: str
     description: str | None = None
-    trigger_filter: dict[str, Any] | None = None
-    action_config: dict[str, Any] | None = None
+    prompt_template: str | None = None
+    destination_channel: str | None = None
+    # `destination_channel=None` is ambiguous: keep-current vs clear. We
+    # use a sentinel for "clear back to default DM".
+    clear_destination_channel: bool = False
+    trigger_metadata: dict[str, Any] | None = None
 
 
 async def update_automation(payload: UpdateAutomationInput) -> Automation:
-    """Partial update. `trigger_type` and `action_type` are NOT updatable
-    here -- if the user wants to change those, delete + recreate. That
-    keeps the AutomationRun audit trail consistent (each run's
-    action_type_snapshot matches the action_type that was live when it
-    fired)."""
+    """Partial update. `source`, `external_trigger_*`, and `webhook_secret`
+    cannot be changed here -- those tie to upstream state. If the user
+    wants to change source they delete + recreate (also cleans up the
+    upstream trigger via the delete path)."""
     async with get_session() as session:
         automation = await resolve_automation(
             session, payload.workspace_id, payload.handle
@@ -336,12 +341,18 @@ async def update_automation(payload: UpdateAutomationInput) -> Automation:
 
         if payload.description is not None:
             automation.description = payload.description or None
-        if payload.trigger_filter is not None:
-            automation.trigger_filter = _validate_filter(payload.trigger_filter)
-        if payload.action_config is not None:
-            automation.action_config = _validate_action_config(
-                automation.action_type, payload.action_config
-            )
+        if payload.prompt_template is not None:
+            if not payload.prompt_template.strip():
+                raise AutomationValidationError(
+                    "`prompt_template` no puede ser vacío."
+                )
+            automation.prompt_template = payload.prompt_template
+        if payload.clear_destination_channel:
+            automation.destination_channel = None
+        elif payload.destination_channel is not None:
+            automation.destination_channel = payload.destination_channel
+        if payload.trigger_metadata is not None:
+            automation.trigger_metadata = dict(payload.trigger_metadata)
 
         await session.commit()
         await session.refresh(automation)
@@ -350,6 +361,31 @@ async def update_automation(payload: UpdateAutomationInput) -> Automation:
         automation_id=str(automation.id),
         workspace_id=str(automation.workspace_id),
     )
+    return automation
+
+
+async def rotate_webhook_secret(
+    *, workspace_id: uuid.UUID, current_user_id: uuid.UUID, handle: str
+) -> Automation:
+    """Generate a new webhook_secret (only valid for source=direct).
+    The old secret stops working immediately. Use when the URL has
+    been leaked or the user wants to rotate proactively."""
+    async with get_session() as session:
+        automation = await resolve_automation(session, workspace_id, handle)
+        await _ensure_can_modify(
+            session,
+            automation,
+            current_user_id=current_user_id,
+            workspace_id=workspace_id,
+        )
+        if automation.source != "direct":
+            raise AutomationValidationError(
+                "Solo las automations de `source=direct` tienen webhook_secret "
+                "rotable."
+            )
+        automation.webhook_secret = generate_webhook_secret()
+        await session.commit()
+        await session.refresh(automation)
     return automation
 
 
@@ -389,7 +425,15 @@ async def resume_automation(
 
 async def delete_automation(
     *, workspace_id: uuid.UUID, current_user_id: uuid.UUID, handle: str
-) -> Automation:
+) -> dict[str, Any]:
+    """Delete the row + return its key fields so the caller can clean
+    up the upstream trigger (Pipedream / Composio) using
+    `external_trigger_id`. Deleting our row first is intentional: even
+    if upstream cleanup fails, our side is consistent (no future events
+    match this row's webhook URL because the row is gone).
+
+    Returns a dict (not the ORM object) because the row is gone by the
+    time we return -- SQLAlchemy would error on attribute access."""
     async with get_session() as session:
         automation = await resolve_automation(session, workspace_id, handle)
         await _ensure_can_modify(
@@ -398,9 +442,16 @@ async def delete_automation(
             current_user_id=current_user_id,
             workspace_id=workspace_id,
         )
+        snapshot = {
+            "id": automation.id,
+            "name": automation.name,
+            "source": automation.source,
+            "external_trigger_id": automation.external_trigger_id,
+            "external_trigger_key_encrypted": automation.external_trigger_key_encrypted,
+        }
         await session.delete(automation)
         await session.commit()
-    return automation
+    return snapshot
 
 
 async def list_automations(
@@ -409,9 +460,6 @@ async def list_automations(
     current_user_id: uuid.UUID | None = None,
     only_mine: bool = False,
 ) -> list[Automation]:
-    """List automations visible to the caller. `only_mine` restricts to
-    local-scope automations owned by `current_user_id`; otherwise all
-    workspace-visible automations come back."""
     async with get_session() as session:
         stmt = select(Automation).where(Automation.workspace_id == workspace_id)
         if only_mine and current_user_id is not None:
@@ -447,17 +495,20 @@ __all__ = [
     "AutomationNotFound",
     "AutomationPermissionError",
     "AutomationNameConflict",
-    "VALID_TRIGGER_TYPES",
-    "VALID_ACTION_TYPES",
+    "VALID_SOURCES",
+    "VALID_SCOPES",
     "CreateAutomationInput",
     "UpdateAutomationInput",
     "create_automation",
     "update_automation",
+    "rotate_webhook_secret",
     "pause_automation",
     "resume_automation",
     "delete_automation",
     "list_automations",
     "list_runs_for_automation",
     "resolve_automation",
+    "resolve_by_webhook_secret",
     "is_workspace_admin",
+    "generate_webhook_secret",
 ]

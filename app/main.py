@@ -30,8 +30,7 @@ from app.api.team import router as team_router
 from app.auth.clerk_provisioning import provision_and_backfill_all_workspaces
 from app.integrations.webhook import router as pipedream_webhook_router
 from app.logging import configure_logging
-from app.automations.events import start_consumer as start_automation_consumer
-from app.automations.events import stop_consumer as stop_automation_consumer
+from app.automations.webhooks import router as automation_webhooks_router
 from app.memory.compaction import run_compaction_loop as run_memory_compaction_loop
 from app.scheduled_tasks.repository import seed_system_tasks_for_all_workspaces
 from app.scheduled_tasks.scheduler import run_scheduler_loop
@@ -134,13 +133,6 @@ async def lifespan(_: FastAPI):
             log.warning("scheduled_task_seed_startup_failed", error=str(exc))
         scheduled_task_loop = asyncio.create_task(run_scheduler_loop())
 
-        # Automations consumer (event-driven hooks). Spawns a single task
-        # that pulls events off the in-process queue and routes them. See
-        # app/automations/events.py for the queue + lifecycle. Cancelled
-        # in the shutdown branch below.
-        start_automation_consumer()
-        log.info("automation_consumer_started")
-
         # Memory compaction (slice T-X Phase C). One background task per
         # process that walks all workspaces' memory skills every 24h,
         # rewrites the curated summary integrating new observations, and
@@ -169,10 +161,6 @@ async def lifespan(_: FastAPI):
             integration_resume_task.cancel()
             scheduled_task_loop.cancel()
             memory_compaction_task.cancel()
-            try:
-                await stop_automation_consumer()
-            except Exception as exc:  # noqa: BLE001
-                log.warning("automation_consumer_stop_failed", error=str(exc))
             try:
                 await handler.close_async()
             except Exception as exc:  # noqa: BLE001
@@ -203,6 +191,7 @@ app.include_router(spaces_internal_router)
 app.include_router(web_api_router)
 app.include_router(scheduled_tasks_router)
 app.include_router(automations_router)
+app.include_router(automation_webhooks_router)
 app.include_router(skills_router)
 app.include_router(admin_router)
 app.include_router(team_router)

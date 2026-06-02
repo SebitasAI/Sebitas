@@ -1,13 +1,10 @@
 """REST endpoints for the Misterr web app's Automations page.
 
-Peer to `app/api/scheduled_tasks.py`. The web only reads + pauses/resumes;
-create/update/delete remain chat-only via the agent tools in
-`app/automations/agent_tools.py`. This matches the Scheduled Tasks UX:
-mutation flows through the agent (where the user gets a preview +
-confirmation), while the web is a status console plus quick toggle.
-
-Auth: every endpoint requires a verified Clerk JWT via `require_app_user`,
-which resolves the caller to a single AppUser in a single workspace.
+Peer to `app/api/scheduled_tasks.py`. The web only reads + pauses/resumes
++ rotates the direct-URL secret. Create / update / delete remain
+chat-only via the agent tools in `app/automations/agent_tools.py`
+(where the agent shows a preview and the user confirms before any
+upstream trigger provisioning happens).
 """
 
 from __future__ import annotations
@@ -21,6 +18,7 @@ from pydantic import BaseModel
 
 from app.auth.clerk import ResolvedAppUser, require_app_user
 from app.automations import repository as repo
+from app.automations import triggers as _triggers
 
 log = structlog.get_logger(__name__)
 
@@ -36,10 +34,14 @@ class AutomationOut(BaseModel):
     id: str
     name: str
     description: str | None
-    trigger_type: str
-    trigger_filter: dict[str, Any]
-    action_type: str
-    action_config: dict[str, Any]
+    source: str
+    prompt_template: str
+    destination_channel: str | None
+    # Only populated for source=direct so we can show the URL in the UI.
+    # NEVER returned for other sources (the URL is internal there).
+    webhook_url: str | None
+    external_trigger_id: str | None
+    trigger_metadata: dict[str, Any]
     scope: str
     is_paused: bool
     last_fired_at: datetime | None
@@ -55,9 +57,9 @@ class AutomationRunOut(BaseModel):
     id: str
     automation_id: str | None
     automation_name_snapshot: str
-    trigger_event: dict[str, Any]
-    action_type: str
-    action_config_snapshot: dict[str, Any]
+    trigger_payload: dict[str, Any]
+    prompt_template_snapshot: str
+    rendered_prompt: str | None
     started_at: datetime
     finished_at: datetime | None
     status: str
@@ -76,14 +78,19 @@ class AutomationRunsResponse(BaseModel):
 
 
 def _serialize(a) -> AutomationOut:  # type: ignore[no-untyped-def]
+    webhook_url = None
+    if a.source == "direct" and a.webhook_secret:
+        webhook_url = _triggers.direct_webhook_url(a.webhook_secret)
     return AutomationOut(
         id=str(a.id),
         name=a.name,
         description=a.description,
-        trigger_type=a.trigger_type,
-        trigger_filter=a.trigger_filter or {},
-        action_type=a.action_type,
-        action_config=a.action_config or {},
+        source=a.source,
+        prompt_template=a.prompt_template,
+        destination_channel=a.destination_channel,
+        webhook_url=webhook_url,
+        external_trigger_id=a.external_trigger_id,
+        trigger_metadata=a.trigger_metadata or {},
         scope=a.scope,
         is_paused=a.is_paused,
         last_fired_at=a.last_fired_at,
@@ -101,9 +108,9 @@ def _serialize_run(r) -> AutomationRunOut:  # type: ignore[no-untyped-def]
         id=str(r.id),
         automation_id=str(r.automation_id) if r.automation_id else None,
         automation_name_snapshot=r.automation_name_snapshot,
-        trigger_event=r.trigger_event or {},
-        action_type=r.action_type,
-        action_config_snapshot=r.action_config_snapshot or {},
+        trigger_payload=r.trigger_payload or {},
+        prompt_template_snapshot=r.prompt_template_snapshot,
+        rendered_prompt=r.rendered_prompt,
         started_at=r.started_at,
         finished_at=r.finished_at,
         status=r.status,
@@ -189,6 +196,29 @@ async def resume_automation(
 
 
 # --------------------------------------------------------------------------- #
+# POST /api/automations/{handle}/rotate-url
+# --------------------------------------------------------------------------- #
+
+
+@router.post("/{handle}/rotate-url", response_model=AutomationOut)
+async def rotate_webhook_url(
+    handle: str,
+    user: ResolvedAppUser = Depends(require_app_user),
+) -> AutomationOut:
+    """Generate a new webhook_secret for source=direct. The old URL
+    stops working immediately."""
+    try:
+        a = await repo.rotate_webhook_secret(
+            workspace_id=user.workspace_id,
+            current_user_id=user.app_user_id,
+            handle=handle,
+        )
+    except repo.AutomationError as exc:
+        raise _domain_error_to_http(exc) from exc
+    return _serialize(a)
+
+
+# --------------------------------------------------------------------------- #
 # GET /api/automations/{handle}/runs
 # --------------------------------------------------------------------------- #
 
@@ -199,11 +229,8 @@ async def list_automation_runs(
     limit: int = 50,
     user: ResolvedAppUser = Depends(require_app_user),
 ) -> AutomationRunsResponse:
-    """Newest first. Capped to `limit` rows; no pagination yet."""
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=400, detail="limit must be 1..200")
-    # Resolve the handle first so the API behaves like scheduled-tasks
-    # (404 for unknown automation rather than empty list).
     from app.db.session import get_session
 
     async with get_session() as session:

@@ -1,16 +1,11 @@
 // API client for the Misterr /api/automations endpoints.
 //
 // Same shape as scheduled-tasks.ts: plain fetch + Bearer Clerk JWT.
-// The web only reads + pauses/resumes; create/update/delete remain
-// chat-only (the agent has the preview + confirmation UX).
+// The web reads + pauses/resumes + rotates the direct-URL secret;
+// create/update/delete remain chat-only (the agent has the preview +
+// confirmation UX).
 
-export type AutomationTriggerType =
-  | "agent_error"
-  | "tool_failed"
-  | "user_satisfaction_low"
-  | "scheduled_task_completed";
-
-export type AutomationActionType = "slack_notify" | "agent_run";
+export type AutomationSource = "direct" | "pipedream" | "composio";
 
 export type AutomationScope = "local" | "global" | "system";
 
@@ -18,10 +13,15 @@ export type Automation = {
   id: string;
   name: string;
   description: string | null;
-  trigger_type: AutomationTriggerType;
-  trigger_filter: Record<string, unknown>;
-  action_type: AutomationActionType;
-  action_config: Record<string, unknown>;
+  source: AutomationSource;
+  prompt_template: string;
+  destination_channel: string | null;
+  // Only populated when source === "direct". URL the user pastes
+  // into their external system. Null for pipedream/composio (the
+  // URL is between Misterr and the provider).
+  webhook_url: string | null;
+  external_trigger_id: string | null;
+  trigger_metadata: Record<string, unknown>;
   scope: AutomationScope;
   is_paused: boolean;
   last_fired_at: string | null;
@@ -44,9 +44,9 @@ export type AutomationRun = {
   id: string;
   automation_id: string | null;
   automation_name_snapshot: string;
-  trigger_event: Record<string, unknown>;
-  action_type: AutomationActionType;
-  action_config_snapshot: Record<string, unknown>;
+  trigger_payload: Record<string, unknown>;
+  prompt_template_snapshot: string;
+  rendered_prompt: string | null;
   started_at: string;
   finished_at: string | null;
   status: "running" | "success" | "failed" | "skipped";
@@ -138,6 +138,21 @@ export const automationsApi = {
   ): Promise<Automation> => {
     const res = await fetch(
       `${backendBase()}/api/automations/${encodeURIComponent(handle)}/resume`,
+      {
+        method: "POST",
+        headers: authHeaders(token, workspaceId),
+      },
+    );
+    await expectOk(res);
+    return res.json();
+  },
+  rotateUrl: async (
+    handle: string,
+    token: string,
+    workspaceId?: string | null,
+  ): Promise<Automation> => {
+    const res = await fetch(
+      `${backendBase()}/api/automations/${encodeURIComponent(handle)}/rotate-url`,
       {
         method: "POST",
         headers: authHeaders(token, workspaceId),

@@ -2,9 +2,9 @@
 
 // Automations page. Sibling of /scheduled-tasks: same visual language
 // (card + tabs + search + pause toggle + expandable detail with run
-// history) adapted for event-driven hooks. Create / edit / delete still
-// live in the Slack chat tools -- the web is a status console plus a
-// quick pause toggle.
+// history) adapted for source-driven hooks. Create / edit / delete
+// live in the Slack chat tools; the web reads + pauses/resumes + can
+// rotate the URL secret for source=direct.
 
 import { useMemo, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
@@ -17,6 +17,8 @@ import { formatDistanceToNow } from "date-fns";
 import {
   ChevronDown,
   ChevronUp,
+  Copy,
+  KeyRound,
   Pause,
   Play,
   Search,
@@ -31,6 +33,7 @@ import {
   type AutomationListResponse,
   type AutomationRun,
   type AutomationRunsResponse,
+  type AutomationSource,
 } from "@/lib/api/automations";
 
 const AUTOMATIONS_QUERY_KEY = ["automations", "all"] as const;
@@ -53,9 +56,6 @@ function AutomationsBody() {
   const listQuery = useQuery({
     queryKey: AUTOMATIONS_QUERY_KEY,
     queryFn: async (): Promise<AutomationListResponse> => {
-      // Use the "backend" JWT template (same as scheduled-tasks): the
-      // default Clerk session token lacks `email`, which the API needs to
-      // map the Clerk identity to an internal AppUser.
       const token = await getToken({ template: "backend" });
       if (!token) {
         throw new Error("No Clerk session token available.");
@@ -73,11 +73,6 @@ function AutomationsBody() {
     [all],
   );
 
-  // Default tab is "mine". The auto-snap from scheduled-tasks doesn't
-  // earn its complexity here -- a new user lands on "mine" with the empty
-  // state telling them how to create their first automation (right copy);
-  // a returning user with automations sees their own ones first (also
-  // right). The "All" tab is one click away if they want the system view.
   const [tab, setTab] = useState<AutomationListFilter>("mine");
   const [search, setSearch] = useState("");
 
@@ -88,14 +83,12 @@ function AutomationsBody() {
     return pool.filter(
       (a) =>
         a.name.toLowerCase().includes(needle) ||
-        (a.description ?? "").toLowerCase().includes(needle),
+        (a.description ?? "").toLowerCase().includes(needle) ||
+        a.source.toLowerCase().includes(needle),
     );
   }, [tab, search, all, mine]);
 
-  const counts = {
-    all: all.length,
-    mine: mine.length,
-  } as const;
+  const counts = { all: all.length, mine: mine.length } as const;
 
   const pauseMut = useMutation({
     mutationFn: async (handle: string) => {
@@ -105,10 +98,9 @@ function AutomationsBody() {
     },
     onMutate: async (handle) => {
       await queryClient.cancelQueries({ queryKey: AUTOMATIONS_QUERY_KEY });
-      const prev =
-        queryClient.getQueryData<AutomationListResponse>(
-          AUTOMATIONS_QUERY_KEY,
-        );
+      const prev = queryClient.getQueryData<AutomationListResponse>(
+        AUTOMATIONS_QUERY_KEY,
+      );
       if (prev) {
         queryClient.setQueryData<AutomationListResponse>(
           AUTOMATIONS_QUERY_KEY,
@@ -153,10 +145,9 @@ function AutomationsBody() {
     },
     onMutate: async (handle) => {
       await queryClient.cancelQueries({ queryKey: AUTOMATIONS_QUERY_KEY });
-      const prev =
-        queryClient.getQueryData<AutomationListResponse>(
-          AUTOMATIONS_QUERY_KEY,
-        );
+      const prev = queryClient.getQueryData<AutomationListResponse>(
+        AUTOMATIONS_QUERY_KEY,
+      );
       if (prev) {
         queryClient.setQueryData<AutomationListResponse>(
           AUTOMATIONS_QUERY_KEY,
@@ -193,13 +184,35 @@ function AutomationsBody() {
     },
   });
 
+  const rotateMut = useMutation({
+    mutationFn: async (handle: string) => {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("No Clerk session token available.");
+      return automationsApi.rotateUrl(handle, token);
+    },
+    onSuccess: (updated) => {
+      queryClient.setQueryData<AutomationListResponse>(
+        AUTOMATIONS_QUERY_KEY,
+        (curr) =>
+          curr
+            ? {
+                ...curr,
+                automations: curr.automations.map((a) =>
+                  a.id === updated.id ? updated : a,
+                ),
+              }
+            : curr,
+      );
+    },
+  });
+
   return (
     <div className="flex flex-col gap-5">
       <p className="text-sm text-neutral-500">
-        Las automations reaccionan a eventos: errores del agente, tools que
-        fallan, feedback negativo o tasks que terminan. Se crean y editan
-        hablándole a Misterr por chat. Acá podés verlas y pausarlas o
-        reanudarlas.
+        Las automations disparan al agente cuando llega un evento externo.
+        Tres tipos: URL directa (POSTeá JSON desde donde quieras), o vía
+        Pipedream / Composio para conectar apps con OAuth + filtros.
+        Se crean y editan hablándole a Misterr por chat.
       </p>
 
       <SearchBar value={search} onChange={setSearch} />
@@ -223,6 +236,10 @@ function AutomationsBody() {
               automation={a}
               onPause={() => pauseMut.mutate(a.id)}
               onResume={() => resumeMut.mutate(a.id)}
+              onRotate={() => rotateMut.mutate(a.id)}
+              isRotating={
+                rotateMut.isPending && rotateMut.variables === a.id
+              }
             />
           ))}
         </ul>
@@ -252,7 +269,7 @@ function SearchBar({
         type="search"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="Buscar automations por nombre o descripción"
+        placeholder="Buscar por nombre, descripción o source"
         className="w-full rounded-lg border border-[var(--color-border)] bg-white py-2 pl-9 pr-3 text-sm text-[var(--color-ink-deep)] placeholder:text-neutral-400 focus:border-[#FF5200] focus:outline-none focus:ring-1 focus:ring-[#FF5200]/30"
       />
     </label>
@@ -334,7 +351,7 @@ function EmptyState({
     message = `No hay automations que matcheen "${search}".`;
   } else if (tab === "mine") {
     message =
-      "Todavía no creaste automations. Pedile a Misterr en Slack: \"creá una automation que me avise cuando falle una tool de Salesforce\".";
+      "Todavía no creaste automations. Pedile a Misterr en Slack: \"creá una automation con source direct\" para empezar.";
   } else {
     message = "No hay automations en este workspace todavía.";
   }
@@ -371,10 +388,14 @@ function AutomationCard({
   automation,
   onPause,
   onResume,
+  onRotate,
+  isRotating,
 }: {
   automation: Automation;
   onPause: () => void;
   onResume: () => void;
+  onRotate: () => void;
+  isRotating: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const { getToken } = useAuth();
@@ -400,7 +421,7 @@ function AutomationCard({
     { addSuffix: true },
   );
 
-  const filterEntries = Object.entries(automation.trigger_filter ?? {});
+  const metadataEntries = Object.entries(automation.trigger_metadata ?? {});
 
   return (
     <li className="overflow-hidden rounded-lg border border-[var(--color-border)] bg-white">
@@ -423,21 +444,22 @@ function AutomationCard({
               <span className="text-sm font-medium text-[var(--color-ink-deep)]">
                 {automation.name}
               </span>
-              <ScopeBadge scope={automation.scope} />
+              <SourceBadge source={automation.source} />
               {automation.is_paused ? <PausedBadge /> : null}
               {automation.last_fire_status === "failed" ? (
                 <FailedBadge />
               ) : null}
             </div>
             <div className="mt-0.5 flex flex-wrap items-center gap-1 text-xs text-neutral-500">
-              <TriggerChip trigger={automation.trigger_type} />
-              <span className="text-neutral-400">→</span>
-              <ActionChip action={automation.action_type} />
-              <span className="text-neutral-400">·</span>
               <span>
                 {automation.fire_count}{" "}
                 {automation.fire_count === 1 ? "fire" : "fires"}
               </span>
+              <span className="text-neutral-400">·</span>
+              <span>last: {lastFireRelative}</span>
+              {automation.last_fire_status ? (
+                <FireStatusDot status={automation.last_fire_status} />
+              ) : null}
             </div>
           </div>
         </button>
@@ -456,61 +478,63 @@ function AutomationCard({
             </p>
           ) : null}
 
-          <dl className="grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-3">
-            <Field label="Last fire">
-              {lastFireRelative}
-              {automation.last_fire_status ? (
-                <FireStatusDot status={automation.last_fire_status} />
-              ) : null}
+          {automation.source === "direct" && automation.webhook_url ? (
+            <DirectWebhookPanel
+              url={automation.webhook_url}
+              onRotate={onRotate}
+              isRotating={isRotating}
+            />
+          ) : null}
+
+          {automation.source !== "direct" && automation.external_trigger_id ? (
+            <Field label="Upstream trigger id">
+              <span className="font-mono text-[11px]">
+                {automation.external_trigger_id}
+              </span>
             </Field>
+          ) : null}
+
+          <dl className="mt-3 grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-3">
             <Field label="Created">{createdRelative}</Field>
-            <Field label="Action">{automation.action_type}</Field>
+            <Field label="Destination">
+              {automation.destination_channel ? (
+                <span className="font-mono">
+                  {automation.destination_channel}
+                </span>
+              ) : (
+                <span className="italic">DM al creador (default)</span>
+              )}
+            </Field>
+            <Field label="Source">{automation.source}</Field>
           </dl>
 
-          {filterEntries.length > 0 ? (
+          <div className="mt-3 border-t border-[var(--color-border)] pt-3">
+            <div className="text-[10px] font-medium uppercase tracking-wide text-neutral-500">
+              Prompt template
+            </div>
+            <p className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-neutral-700">
+              {automation.prompt_template}
+            </p>
+          </div>
+
+          {metadataEntries.length > 0 ? (
             <div className="mt-3 border-t border-[var(--color-border)] pt-3">
               <div className="text-[10px] font-medium uppercase tracking-wide text-neutral-500">
-                Filter
+                Trigger metadata
               </div>
               <ul className="mt-1 flex flex-wrap gap-1.5">
-                {filterEntries.map(([k, v]) => (
+                {metadataEntries.map(([k, v]) => (
                   <li
                     key={k}
                     className="rounded bg-white px-1.5 py-0.5 font-mono text-[11px] text-neutral-700"
                   >
-                    {k} = {JSON.stringify(v)}
+                    {k}={" "}
+                    {typeof v === "string" ? v : JSON.stringify(v)}
                   </li>
                 ))}
               </ul>
             </div>
           ) : null}
-
-          <div className="mt-3 border-t border-[var(--color-border)] pt-3">
-            <div className="text-[10px] font-medium uppercase tracking-wide text-neutral-500">
-              {automation.action_type === "slack_notify"
-                ? "Mensaje (template)"
-                : "Prompt del agente (template)"}
-            </div>
-            <p className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-neutral-700">
-              {String(
-                automation.action_config?.text ??
-                  automation.action_config?.prompt ??
-                  "(sin template)",
-              )}
-            </p>
-            {typeof automation.action_config?.channel === "string" ? (
-              <div className="mt-1 text-[11px] text-neutral-500">
-                Channel:{" "}
-                <span className="font-mono">
-                  {automation.action_config.channel}
-                </span>
-              </div>
-            ) : (
-              <div className="mt-1 text-[11px] text-neutral-500">
-                Channel: <span className="italic">DM al creador (default)</span>
-              </div>
-            )}
-          </div>
 
           {automation.last_fire_error ? (
             <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-2 text-[11px] text-red-700">
@@ -527,6 +551,62 @@ function AutomationCard({
         </div>
       ) : null}
     </li>
+  );
+}
+
+function DirectWebhookPanel({
+  url,
+  onRotate,
+  isRotating,
+}: {
+  url: string;
+  onRotate: () => void;
+  isRotating: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Some browsers disallow clipboard write without focus; ignore.
+    }
+  };
+  return (
+    <div className="rounded-md border border-[#FF5200]/20 bg-[#FF5200]/5 p-3">
+      <div className="text-[10px] font-medium uppercase tracking-wide text-[#FF5200]">
+        Webhook URL (mantenelo secreto)
+      </div>
+      <div className="mt-1 flex items-center gap-2">
+        <code className="flex-1 break-all rounded bg-white px-2 py-1 font-mono text-[11px] text-neutral-800">
+          {url}
+        </code>
+        <button
+          type="button"
+          onClick={onCopy}
+          className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-white px-2 py-1 text-[11px] text-neutral-700 hover:bg-[var(--color-surface-fog)]"
+          title="Copiar al portapapeles"
+        >
+          <Copy className="size-3" strokeWidth={1.75} />
+          {copied ? "copiado" : "copiar"}
+        </button>
+        <button
+          type="button"
+          onClick={onRotate}
+          disabled={isRotating}
+          className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-white px-2 py-1 text-[11px] text-neutral-700 hover:bg-[var(--color-surface-fog)] disabled:opacity-50"
+          title="Regenerar URL (la anterior deja de funcionar)"
+        >
+          <KeyRound className="size-3" strokeWidth={1.75} />
+          {isRotating ? "rotando…" : "rotar"}
+        </button>
+      </div>
+      <p className="mt-1 text-[10px] text-neutral-500">
+        Cualquiera con esta URL puede disparar la automation. Si se filtra,
+        rotala.
+      </p>
+    </div>
   );
 }
 
@@ -604,6 +684,16 @@ function RunItem({ run }: { run: AutomationRun }) {
       </button>
       {open ? (
         <div className="border-t border-[var(--color-border)] px-2 py-2 text-[11px] text-neutral-700">
+          {run.rendered_prompt ? (
+            <details className="mb-1" open>
+              <summary className="cursor-pointer text-neutral-500">
+                rendered prompt
+              </summary>
+              <pre className="mt-1 whitespace-pre-wrap font-sans text-[11px] text-neutral-700">
+                {run.rendered_prompt}
+              </pre>
+            </details>
+          ) : null}
           {run.output ? (
             <pre className="whitespace-pre-wrap font-sans leading-relaxed">
               {run.output}
@@ -612,13 +702,11 @@ function RunItem({ run }: { run: AutomationRun }) {
             <pre className="whitespace-pre-wrap font-sans leading-relaxed text-red-700">
               {run.error}
             </pre>
-          ) : (
-            <span className="text-neutral-400">(sin output)</span>
-          )}
+          ) : null}
           <details className="mt-2 text-[10px] text-neutral-500">
-            <summary className="cursor-pointer">trigger event</summary>
-            <pre className="mt-1 whitespace-pre-wrap font-mono text-[10px] text-neutral-600">
-              {JSON.stringify(run.trigger_event, null, 2)}
+            <summary className="cursor-pointer">trigger payload</summary>
+            <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap font-mono text-[10px] text-neutral-600">
+              {JSON.stringify(run.trigger_payload, null, 2)}
             </pre>
           </details>
         </div>
@@ -646,24 +734,18 @@ function Field({
   );
 }
 
-function ScopeBadge({ scope }: { scope: Automation["scope"] }) {
-  const label =
-    scope === "system"
-      ? "System"
-      : scope === "global"
-        ? "Global"
-        : "Mine";
+function SourceBadge({ source }: { source: AutomationSource }) {
   const cls =
-    scope === "system"
-      ? "bg-neutral-100 text-neutral-600"
-      : scope === "global"
-        ? "bg-amber-100 text-amber-700"
-        : "bg-[#FF5200]/10 text-[#FF5200]";
+    source === "direct"
+      ? "bg-[#FF5200]/10 text-[#FF5200]"
+      : source === "pipedream"
+        ? "bg-sky-100 text-sky-700"
+        : "bg-violet-100 text-violet-700";
   return (
     <span
       className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${cls}`}
     >
-      {label}
+      {source}
     </span>
   );
 }
@@ -680,26 +762,6 @@ function FailedBadge() {
   return (
     <span className="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-medium text-red-700">
       Last fire failed
-    </span>
-  );
-}
-
-function TriggerChip({
-  trigger,
-}: {
-  trigger: Automation["trigger_type"];
-}) {
-  return (
-    <span className="inline-flex items-center rounded-md bg-white px-1.5 py-0.5 font-mono text-[10px] text-neutral-700 border border-[var(--color-border)]">
-      {trigger}
-    </span>
-  );
-}
-
-function ActionChip({ action }: { action: Automation["action_type"] }) {
-  return (
-    <span className="inline-flex items-center rounded-md bg-[#FF5200]/10 px-1.5 py-0.5 font-mono text-[10px] text-[#FF5200]">
-      {action}
     </span>
   );
 }
