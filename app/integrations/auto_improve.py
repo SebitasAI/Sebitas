@@ -357,6 +357,56 @@ async def _append_usage_note(workspace_id: uuid.UUID, app: str, insight: str) ->
     return True
 
 
+# Deterministic iteration-loop detector. When the agent calls the
+# same (app, action_id) >= this threshold within one turn AND never
+# passes `filter_substring`, the auto-improve appends a fixed note
+# pointing the agent at `filter_substring` for needle searches. This
+# bypasses the haiku call entirely (no LLM cost, deterministic),
+# fires same-day even if the haiku declines to emit an insight, and
+# self-reinforces because the note lives in the skill body that
+# future runs reload via `load_skill`.
+_ITERATION_LOOP_THRESHOLD: int = 3
+
+
+def _detect_iteration_loop(action_calls: list[dict]) -> str | None:
+    """Return a deterministic insight when the agent iterated the
+    same action >= threshold in one turn without using
+    `filter_substring`. None otherwise. The insight names the
+    specific action and the right alternative."""
+    if not action_calls:
+        return None
+    by_action: dict[str, int] = {}
+    used_filter: set[str] = set()
+    for c in action_calls:
+        aid = c.get("action_id")
+        if not isinstance(aid, str) or not aid:
+            continue
+        by_action[aid] = by_action.get(aid, 0) + 1
+        fs = c.get("filter_substring")
+        if isinstance(fs, str) and fs.strip():
+            used_filter.add(aid)
+    looped = [
+        aid for aid, n in by_action.items()
+        if n >= _ITERATION_LOOP_THRESHOLD and aid not in used_filter
+    ]
+    if not looped:
+        return None
+    # If multiple actions looped, the note names the first
+    # alphabetically for stable dedup; the lesson generalizes anyway.
+    aid = sorted(looped)[0]
+    return (
+        f"Cuando necesités encontrar un item específico por nombre / "
+        f"entidad (empresa, persona, email, cuenta) dentro de `{aid}`, "
+        "pasá `filter_substring='<needle>'` en una sola llamada en "
+        "lugar de iterar ventanas de fecha. El gateway hace deep-match "
+        "case-insensitive sobre todos los campos anidados (parties, "
+        "context, CRM objects, metaData) y devuelve solo los matches. "
+        "Cero costo de LLM, una sola tool call. Ejemplo: "
+        f"`run_action(app=..., action_id='{aid}', params=..., "
+        "filter_substring='MercadoLibre')`."
+    )
+
+
 async def maybe_improve_skill(
     *,
     workspace_id: uuid.UUID,
@@ -368,10 +418,11 @@ async def maybe_improve_skill(
     returns the number of insights appended (often 0)."""
     if not integration_calls:
         return 0
-    # Group calls (action_id + params) by app so we make ONE haiku
-    # call per app touched in this turn. Passing params lets haiku see
-    # param-level mistakes like `includeParties=false` when filtering
-    # by company.
+    # Group calls (action_id + params + filter_substring) by app so
+    # we make ONE haiku call per app touched in this turn. Passing
+    # params lets haiku see param-level mistakes like
+    # `includeParties=false`; passing filter_substring lets the
+    # deterministic detector check for iteration loops.
     by_app: dict[str, list[dict]] = {}
     for call in integration_calls:
         app = (call.get("app") or "").lower().strip()
@@ -383,10 +434,31 @@ async def maybe_improve_skill(
         by_app.setdefault(app, []).append({
             "action_id": aid,
             "params": call.get("params") or {},
+            "filter_substring": call.get("filter_substring"),
         })
 
     written = 0
     for app, action_calls in by_app.items():
+        # 1. Deterministic check: iteration loop without filter_substring.
+        # This is free, immediate, and reinforces the right pattern
+        # even when haiku declines to emit anything.
+        loop_insight = _detect_iteration_loop(action_calls)
+        if loop_insight:
+            try:
+                if await _append_usage_note(workspace_id, app, loop_insight):
+                    log.info(
+                        "auto_improve_iteration_loop_note",
+                        app=app,
+                        action_calls=len(action_calls),
+                    )
+                    written += 1
+            except Exception as exc:  # noqa: BLE001
+                log.info(
+                    "auto_improve_iteration_loop_failed",
+                    app=app, error=str(exc)[:200],
+                )
+
+        # 2. LLM-driven check: param errors / wrong action.
         try:
             insight = await _extract_insight(
                 user_text, agent_response, app, action_calls

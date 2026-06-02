@@ -433,14 +433,16 @@ def _text_of(content: Any) -> str:
 
 def _extract_integration_calls(run_messages: list[dict]) -> list[dict]:
     """Scan a run's messages for `run_action` tool calls and pull
-    `(app, action_id, params)` for each. The post-pass auto-improve
-    uses the params to detect PARAM-level mistakes (e.g.
-    `includeParties=false` when filtering by company), not just the
-    fact that an action was chosen.
+    `(app, action_id, params, filter_substring)` for each. The
+    post-pass auto-improve uses these to detect PARAM-level mistakes
+    (e.g. `includeParties=false` when filtering by company) and
+    iteration-loop patterns (same action 3+ times without
+    `filter_substring`).
 
-    Returns a list of `{"app": str, "action_id": str, "params": dict}`
-    dicts, one per `run_action` invocation in chronological order.
-    Empty when the turn didn't touch any integration."""
+    Returns a list of `{"app": str, "action_id": str, "params": dict,
+    "filter_substring": str | None}` dicts, one per `run_action`
+    invocation in chronological order. Empty when the turn didn't
+    touch any integration."""
     out: list[dict] = []
     for m in run_messages:
         if m.get("role") != "assistant":
@@ -466,11 +468,13 @@ def _extract_integration_calls(run_messages: list[dict]) -> list[dict]:
             params = args.get("params") or args.get("configured") or {}
             if not isinstance(params, dict):
                 params = {}
+            fs = args.get("filter_substring")
             if isinstance(app, str) and isinstance(action_id, str):
                 out.append({
                     "app": app.lower().strip(),
                     "action_id": action_id,
                     "params": params,
+                    "filter_substring": fs if isinstance(fs, str) and fs else None,
                 })
     return out
 
