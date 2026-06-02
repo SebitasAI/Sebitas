@@ -46,6 +46,100 @@ _DESTRUCTIVE_VERBS = {
 }
 
 
+# Caps for `_render_truncated`. Tuned for the agent's context budget:
+# 20K chars (~5K tokens) is enough to scan a representative sample of
+# rich-flag-enabled rows (Gong Extended responses are ~2KB / call), and
+# 40 items is enough to find a needle in a typical week of calls.
+_RESULT_MAX_BYTES = 20_000
+_RESULT_MAX_ITEMS = 40
+# For non-list responses we keep the original 3K cap (most write-style
+# actions return a single small dict; raising the cap helps nothing).
+_RESULT_NONLIST_MAX_BYTES = 3_000
+
+
+def _extract_cursor_hint(result: object) -> str:
+    """Best-effort: find a cursor in the response so the agent can
+    paginate the truncated remainder. Returns "" when none found.
+    Cursors are capped at 80 chars to avoid embedding huge JWTs in the
+    LLM-visible footer."""
+    if not isinstance(result, dict):
+        return ""
+    # Common: `result['records']['cursor']` (Gong, HubSpot list shapes).
+    # Also `result['ret']['records']['cursor']` when Pipedream's Code-step
+    # wrapper sits on top.
+    candidates: list[dict] = []
+    if isinstance(result.get("records"), dict):
+        candidates.append(result["records"])
+    inner_ret = result.get("ret")
+    if isinstance(inner_ret, dict):
+        candidates.append(inner_ret)
+        if isinstance(inner_ret.get("records"), dict):
+            candidates.append(inner_ret["records"])
+    candidates.append(result)
+    for c in candidates:
+        for k in ("cursor", "nextCursor", "next_cursor", "next", "pageToken"):
+            v = c.get(k)
+            if isinstance(v, str) and v:
+                return f" cursor='{v[:80]}...'" if len(v) > 80 else f" cursor='{v}'"
+    return ""
+
+
+def _render_truncated(result: object, fallback_out: object) -> str:
+    """Pack a provider response into LLM-visible text without breaking
+    JSON parseability when truncation kicks in.
+
+    For list-style responses (extracted via `_extract_items` which
+    knows Pipedream's `ret`/`records` wrappers), keep WHOLE items
+    until we hit either `_RESULT_MAX_BYTES` or `_RESULT_MAX_ITEMS`,
+    then append a footer naming the count dropped + cursor (if any)
+    so the agent can paginate the rest.
+
+    For everything else (single-dict responses from write actions,
+    raw strings, etc.) fall back to byte truncation of `fallback_out`
+    (the `ret`-unwrapped value) using the smaller non-list cap.
+    """
+    # Lazy import to avoid a circular dep -- action_guardrail also
+    # imports from `app.integrations.pipedream`, not from gateway.
+    from app.integrations import action_guardrail as _ag
+
+    items = _ag._extract_items(result)
+    if items is None or not isinstance(items, list):
+        text = str(fallback_out)
+        if len(text) > _RESULT_NONLIST_MAX_BYTES:
+            return text[:_RESULT_NONLIST_MAX_BYTES] + (
+                f"\n[truncated to {_RESULT_NONLIST_MAX_BYTES} chars]"
+            )
+        return text
+    if not items:
+        return str(fallback_out)
+
+    rendered: list[str] = []
+    used = 0
+    kept = 0
+    for item in items:
+        s = str(item)
+        # Always keep at least one item so the agent sees the row
+        # shape, even if it's larger than the byte cap.
+        if kept > 0 and used + len(s) + 2 > _RESULT_MAX_BYTES:
+            break
+        rendered.append(s)
+        used += len(s) + 2  # +2 accounts for the ", " separator.
+        kept += 1
+        if kept >= _RESULT_MAX_ITEMS:
+            break
+
+    body = "[" + ", ".join(rendered) + "]"
+    dropped = len(items) - kept
+    if dropped <= 0:
+        return body
+    cursor_hint = _extract_cursor_hint(result)
+    return body + (
+        f"\n\n[truncated: showing {kept} of {len(items)} items.{cursor_hint} "
+        "Paginate with the cursor or narrow filters (date window, IDs, "
+        "user/account filter) for the remaining rows.]"
+    )
+
+
 def _classify(action_id: str) -> bool:
     """Return True if the action should be gated (destructive/irreversible)."""
     tokens = re.split(r"[-_.\s]+", (action_id or "").lower())
@@ -516,7 +610,7 @@ async def run_action(app: str, action_id: str, params: dict | None = None) -> st
                 params=params or {},
             )
 
-        text = str(out)[:3000]
+        text = _render_truncated(result, out)
         if hint is not None:
             log.info(
                 "integration_action_sparse_hint",
@@ -527,5 +621,8 @@ async def run_action(app: str, action_id: str, params: dict | None = None) -> st
                 + text
             )
         span.update(output=text[:500])
-    log.info("integration_action_done", app=app, action=action_id)
+    log.info(
+        "integration_action_done",
+        app=app, action=action_id, response_chars=len(text),
+    )
     return text
