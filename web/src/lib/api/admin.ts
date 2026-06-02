@@ -86,6 +86,10 @@ export type AdminSkillsResponse = {
   total_count: number;
 };
 
+export type AdminSkillDetail = AdminSkillRow & {
+  body: string;
+};
+
 export type AdminIntegrationRow = {
   id: string;
   workspace_id: string;
@@ -192,5 +196,39 @@ export const adminApi = {
     const res = await fetch(url.toString(), { headers: authHeaders(token) });
     await expectOk(res);
     return res.json();
+  },
+  skillDetail: async (
+    skillId: string,
+    token: string,
+  ): Promise<AdminSkillDetail> => {
+    const res = await fetch(
+      `${backendBase()}/api/admin/skills/${encodeURIComponent(skillId)}`,
+      { headers: authHeaders(token) },
+    );
+    await expectOk(res);
+    return res.json();
+  },
+  updateSkillBody: async (
+    skillId: string,
+    body: string,
+    token: string,
+  ): Promise<AdminSkillDetail> => {
+    const res = await fetch(
+      `${backendBase()}/api/admin/skills/${encodeURIComponent(skillId)}`,
+      {
+        method: "PATCH",
+        headers: authHeaders(token),
+        body: JSON.stringify({ body }),
+      },
+    );
+    await expectOk(res);
+    return res.json();
+  },
+  deleteSkill: async (skillId: string, token: string): Promise<void> => {
+    const res = await fetch(
+      `${backendBase()}/api/admin/skills/${encodeURIComponent(skillId)}`,
+      { method: "DELETE", headers: authHeaders(token) },
+    );
+    if (!res.ok) await expectOk(res);
   },
 };
