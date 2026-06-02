@@ -591,4 +591,112 @@ async def list_all_integrations(
     return AdminIntegrationsResponse(integrations=integrations, total_count=len(integrations))
 
 
+# --------------------------------------------------------------------------- #
+# Follow-ups across workspaces
+# --------------------------------------------------------------------------- #
+
+
+class AdminFollowUpRow(BaseModel):
+    id: str
+    workspace_id: str
+    workspace_name: str | None
+    app_user_id: str
+    slack_user_id: str | None
+    channel: str
+    conversation_key: str
+    reason: str
+    scheduled_for: datetime
+    status: str
+    nudge_count: int
+    created_at: datetime
+    sent_at: datetime | None
+    cancelled_at: datetime | None
+    cancelled_reason: str | None
+
+
+class AdminFollowUpsResponse(BaseModel):
+    follow_ups: list[AdminFollowUpRow]
+    total_count: int
+
+
+@router.get("/follow-ups", response_model=AdminFollowUpsResponse)
+async def list_all_follow_ups(
+    workspace_id: str | None = None,
+    status_filter: str | None = None,
+    _: ClerkClaims = Depends(require_platform_admin),
+) -> AdminFollowUpsResponse:
+    """Cross-workspace list of follow-ups. Joins to workspace.name +
+    app_user.slack_user_id so the admin can scan rows without
+    cross-referencing UUIDs. Capped at 500 most-recent rows; if we
+    grow past that, add a date filter."""
+    from app.db.models import FollowUp
+
+    import uuid as _uuid
+
+    async with get_session() as session:
+        stmt = (
+            select(FollowUp, Workspace.name, AppUser.slack_user_id)
+            .join(Workspace, Workspace.id == FollowUp.workspace_id)
+            .join(AppUser, AppUser.id == FollowUp.app_user_id)
+        )
+        if workspace_id:
+            try:
+                stmt = stmt.where(FollowUp.workspace_id == _uuid.UUID(workspace_id))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="invalid workspace_id") from exc
+        if status_filter:
+            if status_filter not in ("pending", "sent", "cancelled"):
+                raise HTTPException(status_code=400, detail="invalid status")
+            stmt = stmt.where(FollowUp.status == status_filter)
+        stmt = stmt.order_by(FollowUp.created_at.desc()).limit(500)
+        rows = (await session.execute(stmt)).all()
+
+    out = [
+        AdminFollowUpRow(
+            id=str(fu.id),
+            workspace_id=str(fu.workspace_id),
+            workspace_name=ws_name,
+            app_user_id=str(fu.app_user_id),
+            slack_user_id=slack_uid,
+            channel=fu.channel,
+            conversation_key=fu.conversation_key,
+            reason=fu.reason,
+            scheduled_for=fu.scheduled_for,
+            status=fu.status,
+            nudge_count=fu.nudge_count,
+            created_at=fu.created_at,
+            sent_at=fu.sent_at,
+            cancelled_at=fu.cancelled_at,
+            cancelled_reason=fu.cancelled_reason,
+        )
+        for fu, ws_name, slack_uid in rows
+    ]
+    return AdminFollowUpsResponse(follow_ups=out, total_count=len(out))
+
+
+@router.post("/follow-ups/{follow_up_id}/cancel", status_code=204)
+async def cancel_follow_up_endpoint(
+    follow_up_id: str,
+    _: ClerkClaims = Depends(require_platform_admin),
+) -> None:
+    """Manually cancel a pending follow-up. POST not DELETE because
+    the row stays in the table (status -> 'cancelled') for audit."""
+    import uuid as _uuid
+
+    try:
+        fid = _uuid.UUID(follow_up_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid id") from exc
+
+    from app.follow_ups import repository as fu_repo
+
+    ok = await fu_repo.admin_cancel(fid)
+    if not ok:
+        raise HTTPException(
+            status_code=409,
+            detail="follow-up not found or already terminal",
+        )
+    log.info("admin_follow_up_cancelled", follow_up_id=follow_up_id)
+
+
 __all__ = ["router"]

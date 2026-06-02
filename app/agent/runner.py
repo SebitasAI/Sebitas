@@ -943,12 +943,25 @@ async def _drive(client, ctx: dict, result: dict, *, lock_handle: ThreadLockHand
         if ws_str and slack_uid and not slack_uid.startswith("SYSTEM_"):
             from app.memory.post_pass import extract_and_persist as _pp_extract
 
+            # The post-pass now also extracts promises from the user
+            # turn. When it finds one, it creates a follow-up so
+            # Misterr pings if the user doesn't deliver. We pass
+            # channel + conversation_key + app_user_id so the
+            # post-pass can address the nudge back into THIS thread.
             asyncio.create_task(
                 _pp_extract(
                     workspace_id=uuid.UUID(ws_str),
                     slack_user_id=slack_uid,
                     user_text=user_text_for_pass,
                     agent_response=final or "",
+                    app_user_id=(
+                        uuid.UUID(ctx["app_user_id"])
+                        if ctx.get("app_user_id") else None
+                    ),
+                    channel=ctx.get("channel"),
+                    conversation_key=ctx.get("conversation_key"),
+                    reply_thread_ts=ctx.get("reply_thread_ts"),
+                    run_id=ctx.get("run_id"),
                 )
             )
     except Exception as exc:  # noqa: BLE001

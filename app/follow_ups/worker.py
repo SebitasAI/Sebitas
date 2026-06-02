@@ -147,12 +147,14 @@ async def _fire_one(fu) -> None:
         )
         return  # leave pending; next tick will retry
 
-    await repo.mark_sent(fu.id)
+    rescheduled = await repo.mark_nudge_fired_and_reschedule(fu.id)
     log.info(
         "follow_up_sent",
         follow_up_id=str(fu.id),
         workspace_id=str(fu.workspace_id),
         reason=fu.reason[:80],
+        nudge_count=(fu.nudge_count or 0) + 1,
+        rescheduled=rescheduled,
     )
 
 
