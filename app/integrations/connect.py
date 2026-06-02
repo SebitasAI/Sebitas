@@ -486,6 +486,22 @@ async def complete(external_user_id: str, app: str, account_id: str | None) -> N
         provider=(row.provider if row else None),
     )
 
+    # Auto-generate the `integrations/<app>` skill so the agent has the
+    # full Pipedream action catalog for this app from day 0. Fire-and-
+    # forget: a failure here doesn't block the connect path. Only run
+    # for Pipedream-backed connections (Composio uses a different
+    # discovery mechanism).
+    if row is not None and row.provider == "pipedream":
+        try:
+            from app.integrations.catalog_skills import upsert_integration_skill
+
+            asyncio.create_task(upsert_integration_skill(workspace_id, app))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "catalog_skill_upsert_spawn_failed",
+                app=app, error=str(exc)[:200],
+            )
+
     # Deactivate every Connect-X button we posted for this app. Each was a
     # separate chat_postMessage (one per request_integration). On success we
     # chat_update them to a passive "connected" line, no buttons.

@@ -16,6 +16,7 @@ are a small, enumerable set."""
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 
@@ -309,6 +310,20 @@ async def disconnect_integration(app: str) -> str:
             row.pending_run_id = None
             row.pending_ctx = None
             await session.commit()
+
+        # Drop the auto-generated `integrations/<app>` skill so it
+        # stops appearing in the agent's available_skills list. Fire-
+        # and-forget; failure logs but doesn't block the disconnect.
+        try:
+            from app.integrations.catalog_skills import delete_integration_skill
+
+            asyncio.create_task(delete_integration_skill(ws, app))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "catalog_skill_delete_spawn_failed",
+                app=app, error=str(exc)[:200],
+            )
+
         msg = (
             f"Desconectada *{app}*."
             if existed

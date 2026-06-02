@@ -431,6 +431,39 @@ def _text_of(content: Any) -> str:
     return ""
 
 
+def _extract_integration_calls(run_messages: list[dict]) -> list[dict]:
+    """Scan a run's messages for `run_action` tool calls and pull the
+    (app, action_id) for each. Used by the integration-skill auto-
+    improve post-pass; we feed it the action ids the agent actually
+    chose so haiku can judge if a better action existed.
+
+    Returns a list of `{"app": str, "action_id": str}` dicts, one
+    per `run_action` invocation in chronological order. Empty when the
+    turn didn't touch any integration."""
+    out: list[dict] = []
+    for m in run_messages:
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_use":
+                continue
+            if block.get("name") != "run_action":
+                continue
+            args = block.get("input") or {}
+            if not isinstance(args, dict):
+                continue
+            app = args.get("app")
+            action_id = args.get("action_id") or args.get("component_id")
+            if isinstance(app, str) and isinstance(action_id, str):
+                out.append({"app": app.lower().strip(), "action_id": action_id})
+    return out
+
+
 async def _persist_run_messages(team_id: str, channel: str, conversation_key: str, run_messages: list[dict]) -> None:
     """Persist assistant turns (with tool_calls) and tool results from a run."""
     try:
@@ -1110,6 +1143,30 @@ async def _drive(client, ctx: dict, result: dict, *, lock_handle: ThreadLockHand
             )
     except Exception as exc:  # noqa: BLE001
         log.warning("post_pass_spawn_failed", error=str(exc)[:200])
+
+    # Integration skill auto-improve. After every turn that included one
+    # or more `run_action` tool calls, ask haiku if there's a generalizable
+    # lesson worth appending to the `integrations/<app>` skill's
+    # `## Usage notes`. Heavy guards inside (precision-biased prompt,
+    # append-only, cap 20 notes per skill, same-line dedup). Fire-and-
+    # forget; never blocks the user-visible reply.
+    try:
+        ws_str = ctx.get("workspace_id")
+        if ws_str:
+            integration_calls = _extract_integration_calls(run_messages)
+            if integration_calls:
+                from app.integrations.auto_improve import maybe_improve_skill
+
+                asyncio.create_task(
+                    maybe_improve_skill(
+                        workspace_id=uuid.UUID(ws_str),
+                        user_text=ctx.get("user_text") or "",
+                        agent_response=final or "",
+                        integration_calls=integration_calls,
+                    )
+                )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("auto_improve_spawn_failed", error=str(exc)[:200])
     # Thumbs feedback footer. Only attach to runs that actually did
     # something interesting -- at least one tool call -- so we don't spam
     # a "¿quedaste satisfecho?" prompt under a simple "hola" reply. For
