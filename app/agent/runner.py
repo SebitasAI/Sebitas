@@ -275,17 +275,33 @@ async def _remove_reaction(
 async def _load_history(team_id: str, channel: str, conversation_key: str) -> list[dict]:
     """Prior user/assistant turns of the thread, for multi-turn context. User
     messages with persisted attachments are re-hydrated from R2 into Anthropic
-    content blocks (image/document via fresh presigned URL, text inline)."""
+    content blocks (image/document via fresh presigned URL, text inline).
+
+    DM flattening: 1:1 DM channel ids start with 'D'. Slack lets the user
+    reply "in thread" to any message, which splits history across multiple
+    Thread rows (channel root + one per threaded sub-conversation). The
+    agent then loses context of everything posted at root. For DMs we
+    flatten -- one continuous conversation regardless of which Thread row
+    a message lives in. Channels + mpims keep per-thread isolation."""
     from app.slack import files as sf  # lazy: avoid import cycle at module load
+
+    is_dm = bool(channel) and channel[:1].upper() == "D"
 
     async with get_session() as session:
         workspace = await repo.get_workspace(session, team_id)
         if workspace is None:
             return []
-        thread = await repo.get_thread(session, workspace.id, channel, conversation_key)
-        if thread is None:
-            return []
-        rows = await repo.get_thread_messages(session, thread.id, limit=30)
+        if is_dm:
+            rows = await repo.get_dm_channel_messages(
+                session, workspace.id, channel, limit=30
+            )
+            if not rows:
+                return []
+        else:
+            thread = await repo.get_thread(session, workspace.id, channel, conversation_key)
+            if thread is None:
+                return []
+            rows = await repo.get_thread_messages(session, thread.id, limit=30)
         user_msg_ids = [m.id for m in rows if m.role == "user" and m.tool_calls is None]
         attachments_by_msg = await repo.get_attachments_for_messages(session, user_msg_ids)
 
