@@ -247,9 +247,17 @@ async def _list_pipedream_apps() -> list[dict]:
             if not items:
                 break
             out.extend(items)
+            # Pipedream's `/v1/apps` paginates via `page_info.end_cursor`
+            # only -- the response does NOT include a `has_more` field, so
+            # the previous guard (`if not has_more`) tripped on every page
+            # and broke iteration after page 1. We stop only when:
+            #   - end_cursor is empty (caller's docs: cursor reached end), OR
+            #   - this page returned fewer items than requested (partial page
+            #     => last page, even if a cursor was echoed back).
             page_info = body.get("page_info") or {}
             after = page_info.get("end_cursor")
-            if not page_info.get("has_more") or not after:
+            page_count = int(page_info.get("count") or len(items))
+            if not after or page_count < int(params.get("limit", "100")):
                 break
     return out
 
