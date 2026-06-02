@@ -156,3 +156,124 @@ async def create_connect_token(external_user_id: str, webhook_uri: str | None = 
             data = await resp.json()
             await _check(resp, data)
     return data
+
+
+# --------------------------------------------------------------------------- #
+# App-slug resolution (user-friendly slug -> Pipedream's `name_slug`)
+# --------------------------------------------------------------------------- #
+
+
+# In-process cache of resolved slugs. Pipedream's `name_slug` rarely
+# changes once an app exists in their catalog, so a 6h TTL is safe and
+# saves a /v1/apps query per connect attempt.
+_slug_cache: dict[str, tuple[str, float]] = {}
+_SLUG_TTL_S: float = 6 * 60 * 60
+
+
+async def resolve_app_slug(user_slug: str) -> str:
+    """Resolve a user-friendly app slug (the one our agent / catalog
+    uses, e.g. `salesforce`) to the `name_slug` Pipedream's Connect
+    UI expects (e.g. `salesforce_rest_api`).
+
+    Why this exists: Pipedream's connector slugs don't always match
+    the user-friendly app name. `gong` matches `gong`, but
+    `salesforce` is actually `salesforce_rest_api` in their catalog,
+    `notion` may be `notion_api`, etc. Passing the wrong slug as
+    `&app=...` on the connect link makes Pipedream show "App not
+    found". This function bridges the gap GENERICALLY: search the
+    catalog by query and pick the closest match.
+
+    Strategy (in order):
+      1. Exact match: if `/v1/apps?q=<user_slug>` returns an app
+         whose `name_slug` equals `user_slug`, use it.
+      2. Substring/prefix match: pick the first result whose
+         `name_slug` starts with the user_slug + `_`, OR whose
+         `name_slug` contains the user_slug as a token. This covers
+         `salesforce` -> `salesforce_rest_api`, `quickbooks` ->
+         `quickbooks_online`, etc.
+      3. Top-1 fallback: if no fuzzy match, use the first result's
+         `name_slug`. Pipedream's `q` already ranks by relevance.
+      4. Last resort: return the original `user_slug`. Lets the
+         connect link fail downstream with a clear "App not found"
+         instead of silently routing to the wrong app.
+
+    Cached for 6h in-process. Safe for concurrent callers; first one
+    populates the cache, the rest read it.
+    """
+    if not user_slug:
+        return user_slug
+    key = user_slug.lower().strip()
+    now = time.time()
+    cached = _slug_cache.get(key)
+    if cached and (now - cached[1]) < _SLUG_TTL_S:
+        return cached[0]
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{_BASE}/apps",
+                headers=await _headers(),
+                params={"q": key, "limit": "10"},
+            ) as resp:
+                if resp.status != 200:
+                    log.info(
+                        "pipedream_resolve_slug_query_failed",
+                        slug=key, status=resp.status,
+                    )
+                    return user_slug
+                data = await resp.json()
+    except Exception as exc:  # noqa: BLE001
+        log.info("pipedream_resolve_slug_errored", slug=key, error=str(exc)[:200])
+        return user_slug
+
+    items = data.get("data") or []
+    if not isinstance(items, list) or not items:
+        log.info("pipedream_resolve_slug_no_results", slug=key)
+        return user_slug
+
+    # Pass 1: exact name_slug match.
+    for app in items:
+        if not isinstance(app, dict):
+            continue
+        ns = (app.get("name_slug") or "").lower()
+        if ns == key:
+            _slug_cache[key] = (ns, now)
+            return ns
+
+    # Pass 2: substring / token match. Prefer slugs that START with
+    # `<user_slug>_` (i.e. user_slug is the leading token of a
+    # compound slug like `salesforce_rest_api`). Then any slug
+    # containing the user_slug as a token.
+    for app in items:
+        if not isinstance(app, dict):
+            continue
+        ns = (app.get("name_slug") or "").lower()
+        if ns.startswith(key + "_"):
+            log.info("pipedream_resolve_slug_prefix_match", input=key, resolved=ns)
+            _slug_cache[key] = (ns, now)
+            return ns
+
+    for app in items:
+        if not isinstance(app, dict):
+            continue
+        ns = (app.get("name_slug") or "").lower()
+        tokens = ns.split("_")
+        if key in tokens:
+            log.info("pipedream_resolve_slug_token_match", input=key, resolved=ns)
+            _slug_cache[key] = (ns, now)
+            return ns
+
+    # Pass 3: top-1 by relevance. Pipedream's q-search already orders
+    # results by name match; trust the first one if it has a slug.
+    top = items[0]
+    if isinstance(top, dict):
+        ns = (top.get("name_slug") or "").lower()
+        if ns:
+            log.info("pipedream_resolve_slug_top1_match", input=key, resolved=ns)
+            _slug_cache[key] = (ns, now)
+            return ns
+
+    # Last resort: pass through. The connect link will fail with "App
+    # not found" but at least the failure mode is explicit.
+    log.info("pipedream_resolve_slug_no_match", slug=key)
+    return user_slug

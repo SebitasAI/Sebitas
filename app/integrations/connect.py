@@ -136,7 +136,13 @@ async def _mint_connect_link(provider_name: str, workspace_id: str, app: str) ->
         return None
     url = token.get("connect_link_url")
     if url:
-        url += ("&" if "?" in url else "?") + f"app={app}"
+        # Resolve our user-friendly slug to Pipedream's actual `name_slug`
+        # before appending. Salesforce is `salesforce_rest_api`, Quickbooks
+        # is `quickbooks_online`, etc. Without this, the connect page
+        # renders "App not found. Please check your app id."
+        from app.integrations import pipedream as _pd_api
+        resolved = await _pd_api.resolve_app_slug(app)
+        url += ("&" if "?" in url else "?") + f"app={resolved}"
     return url
 
 
