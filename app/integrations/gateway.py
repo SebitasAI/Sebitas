@@ -140,6 +140,35 @@ def _render_truncated(result: object, fallback_out: object) -> str:
     )
 
 
+def _deep_string_match(value: object, needle_lower: str) -> bool:
+    """Recursively walk `value` and return True iff `needle_lower` is a
+    substring of any string-typed field, key, or scalar coerced to str.
+
+    Why this exists: integration responses bury the search target deep
+    (e.g. Gong puts the CRM account name 4 levels in:
+    `parties[].context[].objects[].fields[{name='Name', value='...'}]`).
+    Asking the LLM to navigate that structure across 100s of rows is
+    expensive and brittle. The substring match runs server-side, cheap,
+    no LLM tokens involved, and works generically across providers.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return needle_lower in value.lower()
+    if isinstance(value, (int, float, bool)):
+        return needle_lower in str(value).lower()
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(k, str) and needle_lower in k.lower():
+                return True
+            if _deep_string_match(v, needle_lower):
+                return True
+        return False
+    if isinstance(value, (list, tuple, set)):
+        return any(_deep_string_match(v, needle_lower) for v in value)
+    return False
+
+
 def _classify(action_id: str) -> bool:
     """Return True if the action should be gated (destructive/irreversible)."""
     tokens = re.split(r"[-_.\s]+", (action_id or "").lower())
@@ -513,10 +542,25 @@ async def run_action_raw(app: str, action_id: str, params: dict | None = None) -
     )
 
 
-async def run_action(app: str, action_id: str, params: dict | None = None) -> str:
+async def run_action(
+    app: str,
+    action_id: str,
+    params: dict | None = None,
+    *,
+    filter_substring: str | None = None,
+) -> str:
     """Pre-validate the connection (auth fields present, OAuth not expired),
     then invoke through the provider. Any provider error is mapped to an
-    actionable user-facing message."""
+    actionable user-facing message.
+
+    `filter_substring`, when set, applies a server-side deep substring
+    match across each response item BEFORE truncation: only items whose
+    nested structure contains the substring (case-insensitive) are kept.
+    Use when the user is asking for a needle and only a handful of rows
+    in a list-style response actually match (e.g. "calls with
+    MercadoLibre" across 1391 Gong rows). Cheap, no LLM tokens, works
+    generically across providers because it walks any nested shape.
+    """
     ws = _current_workspace()
     if not ws:
         return "Error: sin contexto de workspace."
@@ -594,6 +638,38 @@ async def run_action(app: str, action_id: str, params: dict | None = None) -> st
 
         out = result.get("ret", result) if isinstance(result, dict) else result
 
+        # Server-side substring filter: when the caller knows what
+        # they're looking for, we filter items BEFORE annotation and
+        # truncation. This collapses needle-in-haystack searches (e.g.
+        # "calls with MercadoLibre" across 1391 Gong rows) from many
+        # iterative LLM-driven sweeps into a single round-trip whose
+        # response only carries matches. Provider response is left
+        # intact for the guardrail; the filter only reshapes the
+        # rendered text.
+        filter_summary = None
+        if filter_substring:
+            needle = filter_substring.strip().lower()
+            if needle:
+                items = _ag._extract_items(result)
+                if items is not None and isinstance(items, list):
+                    matched = [it for it in items if _deep_string_match(it, needle)]
+                    filter_summary = {
+                        "needle": filter_substring,
+                        "total": len(items),
+                        "matched": len(matched),
+                    }
+                    log.info(
+                        "integration_action_filter",
+                        app=app, action=action_id,
+                        needle=filter_substring,
+                        total=len(items), matched=len(matched),
+                    )
+                    # Re-wrap the matches in the same envelope shape
+                    # the renderer + guardrail expect (`ret` is the
+                    # canonical Pipedream wrapper).
+                    result = {"ret": matched}
+                    out = matched
+
         # Post-call: if the result looks sparse AND the agent left
         # "rich-response" flags off, prepend a hint so the next LLM
         # turn knows exactly what to flip. Generic detector that works
@@ -611,6 +687,13 @@ async def run_action(app: str, action_id: str, params: dict | None = None) -> st
             )
 
         text = _render_truncated(result, out)
+        if filter_summary is not None:
+            text = (
+                f"[filter] needle={filter_summary['needle']!r}: "
+                f"{filter_summary['matched']} of {filter_summary['total']} "
+                "items matched (rest dropped before display).\n\n"
+                + text
+            )
         if hint is not None:
             log.info(
                 "integration_action_sparse_hint",

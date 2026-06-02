@@ -273,8 +273,15 @@ async def _find_actions(app: str, query: str | None = None) -> str:
     return await _gateway.find_actions(app, query)
 
 
-async def _run_integration_action(app: str, action_id: str, params: dict | None = None) -> str:
-    return await _gateway.run_action(app, action_id, params or {})
+async def _run_integration_action(
+    app: str,
+    action_id: str,
+    params: dict | None = None,
+    filter_substring: str | None = None,
+) -> str:
+    return await _gateway.run_action(
+        app, action_id, params or {}, filter_substring=filter_substring or None,
+    )
 
 
 async def _run_action_gate(inp: dict) -> bool:
@@ -359,7 +366,16 @@ register(Tool(
     description=(
         "Run an action of a connected integration. Credentials are injected "
         "server-side; you never provide or see them. Give the app, the action_id "
-        "(from find_actions), and the action's params."
+        "(from find_actions), and the action's params.\n\n"
+        "OPTIONAL: pass `filter_substring` when the user is looking for a "
+        "specific entity (company name, person, email, account id) inside a "
+        "list-style response. The gateway runs the action, then keeps only "
+        "items whose nested data contains the substring (case-insensitive, "
+        "any field at any depth: parties[].emailAddress, "
+        "context[].objects[].fields[].value, metaData.title, etc.) and drops "
+        "the rest BEFORE the LLM sees them. Use this for needle-in-haystack "
+        "queries like 'last call with MercadoLibre' to avoid iterating the "
+        "same action with different date windows."
     ),
     input_schema={
         "type": "object",
@@ -367,6 +383,15 @@ register(Tool(
             "app": {"type": "string", "description": "Connected app slug"},
             "action_id": {"type": "string", "description": "Action id from find_actions"},
             "params": {"type": "object", "description": "Action parameters"},
+            "filter_substring": {
+                "type": "string",
+                "description": (
+                    "Optional. Case-insensitive substring that response items "
+                    "must contain in any nested field to be kept. Use for "
+                    "needle searches (company/person/email). Leave empty for "
+                    "the unfiltered response."
+                ),
+            },
         },
         "required": ["app", "action_id"],
     },
