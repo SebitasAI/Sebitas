@@ -596,39 +596,44 @@ class ScheduledTaskRun(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-# Allowed values for automation discriminators. Same VARCHAR + CHECK pattern
-# as everything else in the schema (see `_SKILL_SOURCES` comment for rationale).
-_AUTOMATION_TRIGGER_TYPES = (
-    "agent_error",
-    "tool_failed",
-    "user_satisfaction_low",
-    "scheduled_task_completed",
-)
-_AUTOMATION_ACTION_TYPES = ("slack_notify", "agent_run")
+# Allowed values for automation discriminators. The set of `source` values
+# matches the set of inbound webhook endpoints we expose (direct +
+# Pipedream + Composio); see migration 0028 + app/automations/webhooks.py.
+_AUTOMATION_SOURCES = ("direct", "pipedream", "composio")
 _AUTOMATION_SCOPES = ("local", "global", "system")
 
 
 class Automation(TimestampMixin, Base):
-    """Event-driven hook. When an event of `trigger_type` is published in
-    this workspace AND the event payload matches `trigger_filter`, fire
-    `action_type` with `action_config`. See `app/automations/` for the
-    runtime pieces (events queue, router, action dispatchers).
+    """A user-defined hook from an external event to an agent run.
 
-    Mirrors ScheduledTask's permission model: local-scope automations are
-    owned by `owner_user_id`; only the owner can edit / delete / pause."""
+    Three sources:
+      - `direct`: Misterr exposes a URL containing `webhook_secret`. Anyone
+        with the URL can POST a JSON body to trigger the agent. Suited
+        for ad-hoc scripts / crons / custom systems.
+      - `pipedream`: a Pipedream trigger (from their catalog) is
+        provisioned at create-time and points back at us. Pipedream
+        signs requests with a per-trigger HMAC key we store encrypted.
+      - `composio`: same shape but via Composio's trigger catalog.
+        Composio signs with an account-wide secret (Doppler) rather
+        than a per-trigger key.
+
+    At fire time we render `prompt_template` against the webhook
+    payload and invoke `run_agent` in `destination_channel` (DM to
+    creator if NULL). See app/automations/actions.py.
+
+    Mirrors ScheduledTask's permission model: local-scope automations
+    are owned by `owner_user_id`; only the owner can edit / delete /
+    pause."""
 
     __tablename__ = "automation"
     __table_args__ = (
         UniqueConstraint("workspace_id", "name", name="uq_automation_workspace_name"),
+        # Direct-source secret lives in the public URL, so it must be
+        # globally unique (lookups are stateless on the secret).
+        UniqueConstraint("webhook_secret", name="uq_automation_webhook_secret"),
         CheckConstraint(
-            "trigger_type IN ("
-            "'agent_error', 'tool_failed', 'user_satisfaction_low', "
-            "'scheduled_task_completed')",
-            name="ck_automation_trigger_type",
-        ),
-        CheckConstraint(
-            "action_type IN ('slack_notify', 'agent_run')",
-            name="ck_automation_action_type",
+            "source IN ('direct', 'pipedream', 'composio')",
+            name="ck_automation_source",
         ),
         CheckConstraint(
             "scope IN ('local', 'global', 'system')",
@@ -643,6 +648,23 @@ class Automation(TimestampMixin, Base):
             "(scope = 'local' AND owner_user_id IS NOT NULL) OR "
             "(scope IN ('global', 'system') AND owner_user_id IS NULL)",
             name="ck_automation_scope_owner",
+        ),
+        # Source-specific column requirements -- see migration 0028 for
+        # the full constraint expression. Composes:
+        #   direct    -> webhook_secret NOT NULL, others NULL
+        #   pipedream -> external_trigger_id + key both NOT NULL
+        #   composio  -> external_trigger_id NOT NULL, key NULL
+        CheckConstraint(
+            "(source = 'direct'    AND webhook_secret IS NOT NULL "
+            "                       AND external_trigger_id IS NULL "
+            "                       AND external_trigger_key_encrypted IS NULL) "
+            "OR (source = 'pipedream' AND webhook_secret IS NULL "
+            "                          AND external_trigger_id IS NOT NULL "
+            "                          AND external_trigger_key_encrypted IS NOT NULL) "
+            "OR (source = 'composio'  AND webhook_secret IS NULL "
+            "                          AND external_trigger_id IS NOT NULL "
+            "                          AND external_trigger_key_encrypted IS NULL)",
+            name="ck_automation_source_columns",
         ),
     )
 
@@ -660,13 +682,28 @@ class Automation(TimestampMixin, Base):
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    trigger_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    # JSONB dict matched key-by-key against event["data"]. Empty {} = wildcard.
-    trigger_filter: Mapped[dict] = mapped_column(
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    prompt_template: Mapped[str] = mapped_column(Text, nullable=False)
+    # Slack channel/DM id where the agent run posts its reply. NULL =
+    # DM to the automation's creator (resolved at fire time).
+    destination_channel: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 32-byte base64url secret embedded in the inbound URL for
+    # source=direct. NULL for the other sources.
+    webhook_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Provider-assigned trigger id for source in (pipedream, composio).
+    # NULL for direct. Used at delete time so we can clean up upstream.
+    external_trigger_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Per-trigger HMAC signing key from Pipedream (returned once at
+    # trigger creation; we encrypt with the same crypto as bot_token).
+    # NULL for composio (account-wide secret in Doppler) and direct.
+    external_trigger_key_encrypted: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    # Free-form display metadata: app slug, event type, provider-side
+    # filters. UI uses this for the card; the runtime doesn't.
+    trigger_metadata: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default="{}"
     )
-    action_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    action_config: Mapped[dict] = mapped_column(JSONB, nullable=False)
     scope: Mapped[str] = mapped_column(
         String(16), nullable=False, default="local", server_default="local"
     )
@@ -706,9 +743,14 @@ class AutomationRun(Base):
         ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
     )
     automation_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
-    trigger_event: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    action_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    action_config_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # Raw webhook payload that triggered this run. Snapshotted so the
+    # log stays readable even if the upstream provider changes shape.
+    trigger_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # Snapshot the template that was live when this fire happened, so
+    # if the user later edits the automation the historical run still
+    # documents what was executed.
+    prompt_template_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    rendered_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

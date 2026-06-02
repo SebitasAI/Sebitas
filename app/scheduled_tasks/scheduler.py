@@ -296,34 +296,6 @@ async def _dispatch_fire(fire: _PendingFire) -> None:
             duration_seconds=round(time.monotonic() - start, 3),
             error=error,
         )
-        # Publish to automations: subscribers on `scheduled_task_completed`
-        # fire (e.g. "DM me when daily-brief finishes"). Filter keys
-        # exposed: task_name, status. Best-effort.
-        try:
-            from app.automations.events import (
-                Event as _AutoEvent,
-                current_fire_depth as _depth,
-                publish as _publish,
-            )
-
-            await _publish(
-                _AutoEvent(
-                    type="scheduled_task_completed",
-                    workspace_id=fire.workspace_id,
-                    data={
-                        "task_id": str(fire.task_id),
-                        "task_name": fire.name,
-                        "status": status,
-                        "error": error or "",
-                    },
-                    fire_depth=_depth(),
-                )
-            )
-        except Exception as pub_exc:  # noqa: BLE001
-            log.warning(
-                "automation_publish_task_completed_failed",
-                error=str(pub_exc)[:200],
-            )
 
 
 async def _execute_fire(fire: _PendingFire) -> tuple[str | None, str | None]:

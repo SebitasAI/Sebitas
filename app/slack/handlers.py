@@ -207,38 +207,6 @@ async def _handle_feedback(client, body: dict, *, positive: bool) -> None:
         slack_user_id=slack_user_id,
     )
 
-    # Publish a user_satisfaction_low event on 👎 so any automation
-    # subscribed to it can fire (e.g. "DM Sam when someone marks 👎").
-    # Best-effort: a failing publish must not block the ack flow.
-    if not positive:
-        try:
-            from app.automations.events import (
-                Event as _AutoEvent,
-                current_fire_depth as _depth,
-                publish as _publish,
-            )
-            from app.db import repository as _repo
-            from app.db.session import get_session as _get_session
-
-            team_id = (body.get("team") or {}).get("id")
-            if team_id:
-                async with _get_session() as _session:
-                    ws = await _repo.get_workspace(_session, team_id)
-                if ws is not None:
-                    await _publish(
-                        _AutoEvent(
-                            type="user_satisfaction_low",
-                            workspace_id=ws.id,
-                            data={
-                                "trace_id": trace_id,
-                                "slack_user_id": slack_user_id or "",
-                            },
-                            fire_depth=_depth(),
-                        )
-                    )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("automation_publish_satisfaction_failed", error=str(exc))
-
     ack_text = (
         "👍 Bien, anotado."
         if positive

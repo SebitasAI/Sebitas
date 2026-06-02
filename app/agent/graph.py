@@ -194,42 +194,6 @@ async def _tools_node(state: AgentState) -> dict:
                 )
             except Exception:  # noqa: BLE001
                 pass
-            # Publish to automations: any subscriber on `tool_failed` fires.
-            # Best-effort -- a failed publish must not turn into a second
-            # tool-result that confuses Claude.
-            try:
-                from app.automations.events import (
-                    Event as _AutoEvent,
-                    current_fire_depth as _depth,
-                    publish as _publish,
-                )
-
-                ws_str_pub = workspace_id_var.get()
-                if ws_str_pub:
-                    inp_data = tu.get("input") or {}
-                    await _publish(
-                        _AutoEvent(
-                            type="tool_failed",
-                            workspace_id=uuid.UUID(ws_str_pub)
-                            if isinstance(ws_str_pub, str)
-                            else ws_str_pub,
-                            data={
-                                "tool_name": tool.name,
-                                "error": str(exc)[:500],
-                                "error_type": type(exc).__name__,
-                                # Common filterable keys for the tools where
-                                # users will care about specificity.
-                                "app": str(inp_data.get("app") or ""),
-                                "skill": str(inp_data.get("name") or ""),
-                            },
-                            fire_depth=_depth(),
-                        )
-                    )
-            except Exception as pub_exc:  # noqa: BLE001
-                log.warning(
-                    "automation_publish_tool_failed_failed",
-                    error=str(pub_exc)[:200],
-                )
             return {**block, "content": f"Error ejecutando {tu['name']}: {exc}", "is_error": True}
 
     # Independent tool calls in a turn run concurrently.

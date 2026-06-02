@@ -1,28 +1,18 @@
-"""Action dispatchers for automations.
+"""Run the agent on an automation fire.
 
-Two action types in v1:
+Single action in v1: render `prompt_template` against the webhook
+payload (SafeDict so unknown keys stay as `{literal}`) and call
+`run_agent` in the destination channel.
 
-- `slack_notify`: post a Block-Kit-free message in Slack. Config:
-    {
-      "channel": "C0123" | "D0123" | null,   # optional; null -> DM creator
-      "text": "Trace {trace_id} broke: {error}",  # SafeDict template
-    }
-
-- `agent_run`: kick off an agent run with a templated prompt. Config:
-    {
-      "channel": "C0123" | null,   # optional; null -> DM creator
-      "prompt": "Open thread about {entity} and {action}",
-    }
-
-Both share the SafeDict template engine -- `str.format_map(SafeDict(...))`
-fills in keys present in the event payload and leaves the rest as
-`{unknown}` placeholders rather than raising KeyError. That's the right
-default for v1: a misconfigured automation produces a slightly ugly
-message instead of a fired-but-failed run, and the unfilled key is a
-visible breadcrumb."""
+The destination is `automation.destination_channel` if set, otherwise
+a DM with the automation's creator (resolved at fire time via
+`conversations.open`). Mirrors the scheduled-task scheduler's pattern
+of posting a parent message, then invoking `run_agent` in its thread."""
 
 from __future__ import annotations
 
+import json
+import string
 import uuid
 from typing import Any
 
@@ -30,7 +20,6 @@ import structlog
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy import select
 
-from app.automations.events import Event
 from app.db.models import AppUser, Automation, Workspace
 from app.db.session import get_session
 from app.slack.crypto import TokenCryptoError, decrypt_token
@@ -38,13 +27,16 @@ from app.slack.crypto import TokenCryptoError, decrypt_token
 log = structlog.get_logger(__name__)
 
 
+# Marker actor for agent runs spawned by automations. Matches the
+# scheduled-task convention (SYSTEM_SCHEDULED) so Langfuse traces +
+# logs distinguish automation-triggered runs from human ones.
 SYSTEM_ACTOR_SLACK_USER_ID = "SYSTEM_AUTOMATION"
 
 
 class ActionSkipped(Exception):
     """Raised when an action declines to run for a benign reason (e.g.
-    missing creator for DM default). The router records this as
-    `skipped` rather than `failed`."""
+    creator has no Slack id for the default DM). The router records
+    this as `skipped` rather than `failed`."""
 
 
 class SafeDict(dict):
@@ -55,23 +47,78 @@ class SafeDict(dict):
         return "{" + key + "}"
 
 
-def _render(template: str, event: Event) -> str:
-    """Render a v1 template. Variables come from the event payload's
-    `data` dict plus a few standard fields (`type`, `occurred_at`)."""
-    ctx: dict[str, Any] = dict(event.data)
-    ctx["type"] = event.type
-    ctx["occurred_at"] = event.occurred_at.isoformat()
+class _SafeFormatter(string.Formatter):
+    """Treats the whole field name as a single dotted key into the
+    SafeDict, rather than Python's default of "look up first segment,
+    then attribute-access the rest". This lets `{data.trace_id}` work
+    against a flat dict that holds `data.trace_id` as a literal key.
+
+    On any failure (missing key, bad format spec, conversion error)
+    we keep the original `{...}` in the output."""
+
+    def get_field(self, field_name: str, args, kwargs):
+        # Bypass Python's a.b.c attribute walk; the whole field name
+        # is the key into the mapping.
+        if isinstance(kwargs, SafeDict):
+            return kwargs[field_name], field_name
+        return super().get_field(field_name, args, kwargs)
+
+    def format_field(self, value, format_spec):
+        try:
+            return super().format_field(value, format_spec)
+        except Exception:
+            # Bad format spec on a real value -> emit the value as-is.
+            return str(value)
+
+
+_FORMATTER = _SafeFormatter()
+
+
+def _flatten(prefix: str, value: Any, out: dict[str, str]) -> None:
+    """Walk nested dicts and emit dotted keys so a template can refer
+    to `{data.error}` against a payload `{"data": {"error": "..."}}`.
+    Non-dict/list leaves are stringified. Lists are emitted both as
+    a JSON-encoded value (`{tags}` -> `["a","b"]`) AND by index
+    (`{tags.0}` -> `"a"`), so users can pick the form they want."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            child = f"{prefix}.{k}" if prefix else str(k)
+            _flatten(child, v, out)
+        # Also expose the dict at its prefix as JSON, in case the
+        # user wants to dump the whole thing.
+        if prefix:
+            out[prefix] = json.dumps(value, default=str)
+    elif isinstance(value, list):
+        if prefix:
+            out[prefix] = json.dumps(value, default=str)
+        for i, item in enumerate(value):
+            _flatten(f"{prefix}.{i}", item, out)
+    else:
+        if prefix:
+            out[prefix] = "" if value is None else str(value)
+
+
+def render_template(template: str, payload: dict[str, Any]) -> str:
+    """Fill `{key}` and `{nested.key}` placeholders against `payload`.
+    Unknown keys stay literal `{key}`. Never raises on payload contents
+    -- the worst case is a slightly off-looking message, never a
+    failed agent run."""
+    flat: dict[str, str] = {}
+    _flatten("", payload, flat)
+    # Also expose the entire payload at the bareword `payload`.
+    flat["payload"] = json.dumps(payload, default=str)
     try:
-        return template.format_map(SafeDict({k: str(v) for k, v in ctx.items()}))
+        return _FORMATTER.vformat(template, (), SafeDict(flat))
     except Exception as exc:
-        # Bad escape, mismatched braces -- log and fall back to raw.
         log.warning("automation_template_render_failed", error=str(exc))
         return template
 
 
-async def _workspace_bot_client(workspace_id: uuid.UUID) -> tuple[AsyncWebClient, Workspace]:
-    """Build an AsyncWebClient with this workspace's decrypted bot token.
-    Raises if the workspace isn't installed or the token is unreadable."""
+async def _workspace_bot_client(
+    workspace_id: uuid.UUID,
+) -> tuple[AsyncWebClient, Workspace]:
+    """Build an AsyncWebClient with this workspace's decrypted bot
+    token. Raises if not installed or token unreadable."""
     async with get_session() as session:
         ws = (
             await session.execute(select(Workspace).where(Workspace.id == workspace_id))
@@ -79,7 +126,7 @@ async def _workspace_bot_client(workspace_id: uuid.UUID) -> tuple[AsyncWebClient
     if ws is None:
         raise RuntimeError(f"workspace {workspace_id} not found")
     if not ws.bot_token:
-        raise RuntimeError(f"workspace {workspace_id} has no bot_token (not installed)")
+        raise RuntimeError(f"workspace {workspace_id} has no bot_token")
     try:
         bot_token = decrypt_token(ws.bot_token)
     except TokenCryptoError as exc:
@@ -87,15 +134,18 @@ async def _workspace_bot_client(workspace_id: uuid.UUID) -> tuple[AsyncWebClient
     return AsyncWebClient(token=bot_token), ws
 
 
-async def _resolve_default_dm_channel(
+async def _resolve_destination_channel(
     client: AsyncWebClient, automation: Automation
 ) -> str:
-    """When the automation didn't specify a channel, default to a DM with
-    the creator. If there's no creator (system-scope automation) we
-    raise ActionSkipped -- system automations MUST set an explicit channel."""
+    """Return the Slack channel id to post into. If automation has
+    `destination_channel` set, that's it. Otherwise we DM the
+    creator. Raises ActionSkipped if there's no creator + no
+    explicit channel (e.g. orphaned system-scope automation)."""
+    if automation.destination_channel:
+        return automation.destination_channel
     if automation.created_by_user_id is None:
         raise ActionSkipped(
-            "no channel configured and no creator to DM (system-scope?)"
+            "no destination_channel y sin creator para DM."
         )
     async with get_session() as session:
         user = (
@@ -104,46 +154,27 @@ async def _resolve_default_dm_channel(
             )
         ).scalar_one_or_none()
     if user is None or not user.slack_user_id:
-        raise ActionSkipped("creator user has no slack_user_id; cannot DM")
+        raise ActionSkipped("creator no tiene slack_user_id; no puedo DM.")
     resp = await client.conversations_open(users=user.slack_user_id)
     channel_id = (
-        resp.get("channel", {}).get("id") if isinstance(resp, dict) else resp["channel"]["id"]
+        resp.get("channel", {}).get("id")
+        if isinstance(resp, dict)
+        else resp["channel"]["id"]
     )
     if not channel_id:
         raise RuntimeError("conversations.open returned no channel id")
     return channel_id
 
 
-async def _do_slack_notify(automation: Automation, event: Event) -> str:
-    config = automation.action_config or {}
-    template = config.get("text") or ""
-    if not template:
-        raise ActionSkipped("slack_notify: empty text template")
-
-    client, _ws = await _workspace_bot_client(automation.workspace_id)
-    channel = config.get("channel") or await _resolve_default_dm_channel(client, automation)
-    rendered = _render(template, event)
-    resp = await client.chat_postMessage(channel=channel, text=rendered)
-    ts = resp.get("ts") if isinstance(resp, dict) else resp["ts"]
-    return f"posted to {channel} ts={ts}"
-
-
-async def _do_agent_run(automation: Automation, event: Event) -> str:
-    """Kick off an agent run with the rendered prompt. Mirrors the
-    scheduled-task scheduler's pattern: open a parent message in the
-    destination, then call `run_agent` in that thread.
-
-    `event.fire_depth + 1` is propagated via the contextvar so any
-    events the agent emits are accounted for by the loop guard. The
-    plumbing for that contextvar lives in events.py / runner.py."""
-    config = automation.action_config or {}
-    template = config.get("prompt") or ""
-    if not template:
-        raise ActionSkipped("agent_run: empty prompt template")
-
+async def fire_agent_run(
+    automation: Automation, payload: dict[str, Any]
+) -> tuple[str, str]:
+    """Render template -> post a parent message -> run the agent in
+    that thread. Returns (rendered_prompt, short_summary) for the
+    run-log row."""
+    rendered = render_template(automation.prompt_template, payload)
     client, ws = await _workspace_bot_client(automation.workspace_id)
-    channel = config.get("channel") or await _resolve_default_dm_channel(client, automation)
-    prompt = _render(template, event)
+    channel = await _resolve_destination_channel(client, automation)
 
     parent_text = f":zap: Automation `{automation.name}`"
     post_resp = await client.chat_postMessage(channel=channel, text=parent_text)
@@ -153,49 +184,30 @@ async def _do_agent_run(automation: Automation, event: Event) -> str:
     if not parent_ts:
         raise RuntimeError("could not post parent message")
 
-    # Local import: runner imports automations downstream (it publishes
-    # events). Defer to avoid the cycle at module load.
+    # Local import: runner imports the DB/models layer that imports back
+    # here. Defer to break the cycle at module load.
     from app.agent.runner import run_agent  # noqa: PLC0415
-    from app.automations import events as _events  # noqa: PLC0415
 
-    # Push the inherited fire_depth onto a contextvar so any new events
-    # emitted by this run carry it. See events.py for the consumer side.
-    token = _events.set_fire_depth(event.fire_depth + 1)
-    try:
-        await run_agent(
-            client=client,
-            team_id=ws.slack_team_id,
-            slack_user_id=SYSTEM_ACTOR_SLACK_USER_ID,
-            channel=channel,
-            user_text=prompt,
-            user_ts=parent_ts,
-            conversation_key=parent_ts,
-            reply_thread_ts=parent_ts,
-            require_existing_thread=False,
-            files=None,
-            lock_handle=None,
-        )
-    finally:
-        _events.reset_fire_depth(token)
-
-    return f"agent_run dispatched: channel={channel} ts={parent_ts}"
+    await run_agent(
+        client=client,
+        team_id=ws.slack_team_id,
+        slack_user_id=SYSTEM_ACTOR_SLACK_USER_ID,
+        channel=channel,
+        user_text=rendered,
+        user_ts=parent_ts,
+        conversation_key=parent_ts,
+        reply_thread_ts=parent_ts,
+        require_existing_thread=False,
+        files=None,
+        lock_handle=None,
+    )
+    return rendered, f"agent_run dispatched: channel={channel} ts={parent_ts}"
 
 
-_DISPATCH = {
-    "slack_notify": _do_slack_notify,
-    "agent_run": _do_agent_run,
-}
-
-
-async def dispatch(*, automation: Automation, event: Event) -> str | None:
-    """Run the action matching `automation.action_type`. Returns a short
-    one-line summary for the AutomationRun.output column. Raises
-    ActionSkipped for benign no-ops; other exceptions become `failed`
-    runs in the router."""
-    handler = _DISPATCH.get(automation.action_type)
-    if handler is None:
-        raise RuntimeError(f"unknown action_type: {automation.action_type}")
-    return await handler(automation, event)
-
-
-__all__ = ["dispatch", "ActionSkipped", "SafeDict", "SYSTEM_ACTOR_SLACK_USER_ID"]
+__all__ = [
+    "fire_agent_run",
+    "render_template",
+    "ActionSkipped",
+    "SafeDict",
+    "SYSTEM_ACTOR_SLACK_USER_ID",
+]
