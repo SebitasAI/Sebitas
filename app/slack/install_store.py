@@ -27,6 +27,7 @@ from sqlalchemy import select
 from app.auth.clerk_provisioning import provision_for_installer
 from app.db.models import Workspace
 from app.db.session import get_session
+from app.memory.seed import ensure_company_skill, ensure_team_skill
 from app.scheduled_tasks.repository import seed_system_tasks_for_workspace
 from app.slack.crypto import TokenCryptoError, decrypt_token, encrypt_token
 from app.slack.tokens import invalidate_token_cache
@@ -103,6 +104,18 @@ class MisterrInstallationStore(AsyncInstallationStore):
             # in main.py retries idempotently.
             log.warning(
                 "workspace_install_seed_failed",
+                workspace_id=str(ws_id),
+                team_id=team_id,
+                error=str(exc),
+            )
+        # Seed workspace-level memory stubs (company + team). Idempotent;
+        # `users/<id>` is seeded lazily on first user message, not here.
+        try:
+            await ensure_company_skill(ws_id)
+            await ensure_team_skill(ws_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "workspace_install_memory_seed_failed",
                 workspace_id=str(ws_id),
                 team_id=team_id,
                 error=str(exc),

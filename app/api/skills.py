@@ -122,6 +122,10 @@ async def list_skills(
     visible = await skill_registry.list_visible_for_user(
         user.workspace_id, user.app_user_id
     )
+    # Memory skills (slice T-X) live in the same `skill` table but are not
+    # user-managed: hide them from the Skills page so they don't clutter
+    # the list and don't get accidentally uninstalled / overwritten via the UI.
+    visible = [s for s in visible if s.source != "memory"]
     skill_ids = [s.id for s in visible]
     installs_by_skill: dict = {}
     if skill_ids:
@@ -200,6 +204,10 @@ async def _resolve_visible_skill(name: str, user: ResolvedAppUser) -> Skill:
     if row is None:
         raise HTTPException(status_code=404, detail=f"skill `{name}` not found")
     if row.scope == "personal" and row.created_by_user_id != user.app_user_id:
+        raise HTTPException(status_code=404, detail=f"skill `{name}` not found")
+    # Memory skills are internal: behave as if they don't exist from the
+    # Skills API surface (no read body, no install, no uninstall, no delete).
+    if row.source == "memory":
         raise HTTPException(status_code=404, detail=f"skill `{name}` not found")
     return row
 

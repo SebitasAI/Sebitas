@@ -784,3 +784,11 @@ register(Tool(
 # the tool entries into the global registry.
 # --------------------------------------------------------------------------- #
 from app.scheduled_tasks import agent_tools as _scheduled_task_tools  # noqa: E402, F401
+
+
+# --------------------------------------------------------------------------- #
+# Persistent workspace memory (slice T-X Phase A). Imported for side effects
+# so the `remember` tool registers at module load. The memory module proper
+# lives in `app.memory`; this just wires the agent tool entry.
+# --------------------------------------------------------------------------- #
+from app.agent import memory_tools as _memory_tools  # noqa: E402, F401
