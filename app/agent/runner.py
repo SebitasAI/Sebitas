@@ -1211,6 +1211,9 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
         skills_context=skills_context, channel_roster=channel_roster_text,
         app_user_id=str(app_user_id),
         calling_user_identity=identity_text,
+        calling_channel=channel or "",
+        calling_conversation_key=conversation_key or "",
+        calling_reply_thread_ts=reply_thread_ts or "",
     )
     ctx = {
         "run_id": run_id, "seed_len": len(seed), "team_id": team_id,
@@ -1431,6 +1434,9 @@ async def resume_run(*, client, ctx: dict, decision: str) -> None:
             skills_context=skills_ctx,
             app_user_id=app_user_str,
             calling_user_identity=identity_text,
+            calling_channel=ctx.get("channel") or "",
+            calling_conversation_key=ctx.get("conversation_key") or "",
+            calling_reply_thread_ts=ctx.get("reply_thread_ts") or "",
         )
 
     with _langfuse.start_as_current_observation(
