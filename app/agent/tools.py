@@ -161,7 +161,7 @@ async def _load_skill(name: str) -> str:
     block. The body is wrapped in `<skill name="...">` so the model treats it
     as content, not instructions."""
     import uuid as _uuid
-    from app.agent.context import app_user_id_var, run_id_var
+    from app.agent.context import app_user_id_var, run_id_var, workspace_id_var
     from app.skills import registry as _sk_registry
 
     user_str = app_user_id_var.get()
@@ -175,16 +175,35 @@ async def _load_skill(name: str) -> str:
     except (ValueError, TypeError):
         return "Error: contexto de usuario corrupto."
     thread_id = run_id_var.get()
+    loaded = None
     try:
         loaded = await _sk_registry.load_skill_body_for_user(
             user_id, name, thread_id=thread_id
         )
     except _sk_registry.SkillNotFound:
-        return (
-            f"Skill {name!r} no instalada para este usuario. Pedile al humano "
-            "que la instale con `/misterr skill upload` (o que te diga si la "
-            "instaló bajo otro nombre)."
-        )
+        # Fallback for auto-generated `integrations/<app>` skills + any
+        # other workspace-scope `source='catalog'` skill: they're not
+        # installed per-user but every user in the workspace should
+        # still be able to load them. The previous version returned
+        # "no instalada" here, which sent the agent down a broken
+        # discovery path (it would try find_actions and fail).
+        ws_str = workspace_id_var.get()
+        if ws_str:
+            try:
+                workspace_id = _uuid.UUID(ws_str) if isinstance(ws_str, str) else ws_str
+                loaded = await _sk_registry.load_workspace_catalog_skill(
+                    workspace_id, name, thread_id=thread_id
+                )
+            except _sk_registry.SkillNotFound:
+                pass
+            except _sk_registry.SkillError as exc:
+                return f"Error cargando la skill {name!r}: {exc}"
+        if loaded is None:
+            return (
+                f"Skill {name!r} no instalada para este usuario. Pedile al "
+                "humano que la instale con `/misterr skill upload` (o que "
+                "te diga si la instaló bajo otro nombre)."
+            )
     except _sk_registry.SkillError as exc:
         return f"Error cargando la skill {name!r}: {exc}"
 
