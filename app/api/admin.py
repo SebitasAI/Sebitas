@@ -391,6 +391,153 @@ async def list_all_skills(
     return AdminSkillsResponse(skills=skills, total_count=len(skills))
 
 
+class AdminSkillDetail(AdminSkillRow):
+    """Same shape as the row plus the markdown body."""
+
+    body: str
+
+
+@router.get("/skills/{skill_id}", response_model=AdminSkillDetail)
+async def get_skill_detail(
+    skill_id: str,
+    _: ClerkClaims = Depends(require_platform_admin),
+) -> AdminSkillDetail:
+    """Full skill incl. body. No source filter -- admin sees memory skills
+    too, which `/api/skills` hides from regular users."""
+    import uuid as _uuid
+
+    try:
+        sid = _uuid.UUID(skill_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid skill_id") from exc
+
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                select(Skill, Workspace.name)
+                .join(Workspace, Workspace.id == Skill.workspace_id)
+                .where(Skill.id == sid)
+            )
+        ).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="skill not found")
+    skill, ws_name = row
+
+    from app.skills import storage as skill_storage
+
+    try:
+        body = await skill_storage.download_skill_body(
+            workspace_id=skill.workspace_id,
+            skill_id=skill.id,
+            version=skill.version,
+            r2_ref=skill.body_r2_ref,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "admin_skill_body_read_failed",
+            skill_id=skill_id, error=str(exc)[:200],
+        )
+        body = ""
+
+    return AdminSkillDetail(
+        id=str(skill.id),
+        workspace_id=str(skill.workspace_id),
+        workspace_name=ws_name,
+        name=skill.name,
+        description=skill.description,
+        scope=skill.scope,
+        activation_default=skill.activation_default,
+        source=skill.source,
+        version=skill.version,
+        size_bytes=skill.size_bytes,
+        created_by_user_id=str(skill.created_by_user_id) if skill.created_by_user_id else None,
+        created_at=skill.created_at,
+        body=body,
+    )
+
+
+class AdminSkillBodyUpdate(BaseModel):
+    body: str
+
+
+@router.patch("/skills/{skill_id}", response_model=AdminSkillDetail)
+async def update_skill_body_endpoint(
+    skill_id: str,
+    payload: AdminSkillBodyUpdate,
+    _: ClerkClaims = Depends(require_platform_admin),
+) -> AdminSkillDetail:
+    """Replace the body. Bumps `skill.version`; LRU cache misses on next
+    read so the new content shows up immediately.
+
+    For memory skills (source='memory') the admin is responsible for
+    preserving the `## Curated summary` + `## Observations log` structure
+    -- a bad edit breaks the compaction parser. The endpoint does not
+    validate the shape on purpose: admin is a power tool, not a guided UI.
+    """
+    import uuid as _uuid
+
+    try:
+        sid = _uuid.UUID(skill_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid skill_id") from exc
+
+    new_body = payload.body or ""
+    new_size = len(new_body.encode("utf-8"))
+    # R2 layer enforces 256KB; reject earlier so the admin gets a clear error.
+    if new_size > 240_000:
+        raise HTTPException(
+            status_code=400,
+            detail=f"body too large ({new_size} bytes; max 240000)",
+        )
+
+    from app.skills import registry as skill_registry
+
+    try:
+        await skill_registry.update_skill_body(
+            skill_id=sid, new_body=new_body, new_size_bytes=new_size
+        )
+    except skill_registry.SkillNotFound as exc:
+        raise HTTPException(status_code=404, detail="skill not found") from exc
+
+    log.info(
+        "admin_skill_body_edited",
+        skill_id=skill_id,
+        new_size=new_size,
+    )
+    return await get_skill_detail(skill_id, _=_)
+
+
+@router.delete("/skills/{skill_id}", status_code=204)
+async def delete_skill_endpoint(
+    skill_id: str,
+    _: ClerkClaims = Depends(require_platform_admin),
+) -> None:
+    """Drop the skill. CASCADE removes per-user installs. R2 body is
+    deleted best-effort by the registry helper.
+
+    For memory skills: deleting `company` / `team` / `users/<id>` /
+    `channels/<id>` is allowed and survives -- the lifecycle hooks will
+    re-seed `company` + `team` empty stubs on the next install (or
+    `/admin` can re-run the backfill). Per-user / per-channel memory
+    only re-seeds on the next inbound message in that scope.
+    """
+    import uuid as _uuid
+
+    try:
+        sid = _uuid.UUID(skill_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid skill_id") from exc
+
+    from app.skills import registry as skill_registry
+
+    try:
+        await skill_registry.delete_skill(skill_id=sid)
+    except skill_registry.SkillNotFound as exc:
+        raise HTTPException(status_code=404, detail="skill not found") from exc
+
+    log.info("admin_skill_deleted", skill_id=skill_id)
+
+
 # --------------------------------------------------------------------------- #
 # Integrations across workspaces
 # --------------------------------------------------------------------------- #

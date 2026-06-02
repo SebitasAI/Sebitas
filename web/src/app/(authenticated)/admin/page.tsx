@@ -7,8 +7,8 @@
 
 import { useMemo, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
-import { useQuery } from "@tanstack/react-query";
-import { ShieldCheck, ChevronDown, ChevronRight } from "lucide-react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { ShieldCheck, ChevronDown, ChevronRight, X } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 
 import { PageBody, PageHeader } from "../_components/page-header";
@@ -18,6 +18,7 @@ import {
   type WorkspacesResponse,
   type WorkspaceUsersResponse,
   type AdminScheduledTasksResponse,
+  type AdminSkillRow,
   type AdminSkillsResponse,
   type AdminIntegrationsResponse,
 } from "@/lib/api/admin";
@@ -497,37 +498,227 @@ function SkillsTable({
 }: {
   query: ReturnType<typeof useQuery<AdminSkillsResponse>>;
 }) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
   if (query.isLoading) return <Loader />;
   if (query.isError)
     return <ErrorBlock message={(query.error as Error).message} />;
   const skills = query.data?.skills ?? [];
   if (skills.length === 0) return <EmptyBlock label="skills" />;
   return (
-    <div className="overflow-x-auto rounded-lg border border-[var(--color-border)] bg-white">
-      <table className="w-full text-left text-xs">
-        <thead className="bg-[var(--color-surface-fog)] text-[10px] uppercase tracking-wide text-neutral-500">
-          <tr>
-            <th className="px-3 py-2">Workspace</th>
-            <th className="px-3 py-2">Name</th>
-            <th className="px-3 py-2">Scope</th>
-            <th className="px-3 py-2">Activación</th>
-            <th className="px-3 py-2">Size</th>
-            <th className="px-3 py-2">Descripción</th>
-          </tr>
-        </thead>
-        <tbody>
-          {skills.map((s) => (
-            <tr key={s.id} className="border-t border-[var(--color-border)]">
-              <td className="px-3 py-2">{s.workspace_name ?? "—"}</td>
-              <td className="px-3 py-2 font-mono">{s.name}</td>
-              <td className="px-3 py-2">{s.scope}</td>
-              <td className="px-3 py-2">{s.activation_default}</td>
-              <td className="px-3 py-2">{Math.max(1, Math.round(s.size_bytes / 1024))} KB</td>
-              <td className="px-3 py-2">{s.description}</td>
+    <>
+      <div className="overflow-x-auto rounded-lg border border-[var(--color-border)] bg-white">
+        <table className="w-full text-left text-xs">
+          <thead className="bg-[var(--color-surface-fog)] text-[10px] uppercase tracking-wide text-neutral-500">
+            <tr>
+              <th className="px-3 py-2">Workspace</th>
+              <th className="px-3 py-2">Name</th>
+              <th className="px-3 py-2">Source</th>
+              <th className="px-3 py-2">Scope</th>
+              <th className="px-3 py-2">Activación</th>
+              <th className="px-3 py-2">Size</th>
+              <th className="px-3 py-2">Descripción</th>
+              <th className="px-3 py-2 text-right">Acciones</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {skills.map((s) => (
+              <tr key={s.id} className="border-t border-[var(--color-border)]">
+                <td className="px-3 py-2">{s.workspace_name ?? "—"}</td>
+                <td className="px-3 py-2 font-mono">{s.name}</td>
+                <td className="px-3 py-2">
+                  <span
+                    className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                      s.source === "memory"
+                        ? "bg-purple-50 text-purple-700"
+                        : s.source === "catalog"
+                          ? "bg-blue-50 text-blue-700"
+                          : "bg-neutral-100 text-neutral-700"
+                    }`}
+                  >
+                    {s.source}
+                  </span>
+                </td>
+                <td className="px-3 py-2">{s.scope}</td>
+                <td className="px-3 py-2">{s.activation_default}</td>
+                <td className="px-3 py-2">
+                  {Math.max(1, Math.round(s.size_bytes / 1024))} KB
+                </td>
+                <td className="px-3 py-2">{s.description}</td>
+                <td className="px-3 py-2 text-right">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedId(s.id)}
+                    className="rounded border border-[var(--color-border)] bg-white px-2 py-1 text-[11px] font-medium hover:bg-neutral-50"
+                  >
+                    Ver / Editar
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {selectedId && (
+        <SkillDetailModal
+          skillId={selectedId}
+          onClose={() => setSelectedId(null)}
+          rows={skills}
+        />
+      )}
+    </>
+  );
+}
+
+function SkillDetailModal({
+  skillId,
+  onClose,
+  rows,
+}: {
+  skillId: string;
+  onClose: () => void;
+  rows: AdminSkillRow[];
+}) {
+  const { getToken } = useAuth();
+  const qc = useQueryClient();
+  const summary = rows.find((r) => r.id === skillId);
+  const isMemory = summary?.source === "memory";
+
+  const detailQuery = useQuery({
+    queryKey: ["admin", "skill", skillId],
+    queryFn: async () => {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("No Clerk token");
+      return adminApi.skillDetail(skillId, token);
+    },
+  });
+
+  const [draft, setDraft] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const saveMutation = useMutation({
+    mutationFn: async (body: string) => {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("No Clerk token");
+      return adminApi.updateSkillBody(skillId, body, token);
+    },
+    onSuccess: () => {
+      setError(null);
+      setDraft(null);
+      qc.invalidateQueries({ queryKey: ["admin", "skill", skillId] });
+      qc.invalidateQueries({ queryKey: ["admin", "skills"] });
+    },
+    onError: (e: Error) => setError(e.message),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async () => {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("No Clerk token");
+      return adminApi.deleteSkill(skillId, token);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin", "skills"] });
+      onClose();
+    },
+    onError: (e: Error) => setError(e.message),
+  });
+
+  const body =
+    draft !== null ? draft : (detailQuery.data?.body ?? "");
+  const isDirty = draft !== null && draft !== detailQuery.data?.body;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-lg bg-white shadow-xl">
+        <div className="flex items-start justify-between border-b border-[var(--color-border)] px-5 py-3">
+          <div>
+            <h2 className="font-mono text-sm font-semibold">
+              {summary?.name ?? skillId}
+            </h2>
+            <p className="mt-0.5 text-xs text-neutral-500">
+              {summary?.workspace_name ?? "—"} · {summary?.source} · {summary?.scope} ·{" "}
+              v{summary?.version}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded p-1 text-neutral-500 hover:bg-neutral-100"
+            aria-label="Cerrar"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {isMemory && (
+          <div className="mx-5 mt-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <strong>Memoria.</strong> Mantené las secciones{" "}
+            <code className="font-mono">## Curated summary</code> y{" "}
+            <code className="font-mono">## Observations log</code>. Editar mal
+            puede romper la compactación.
+          </div>
+        )}
+
+        <div className="flex-1 overflow-auto p-5">
+          {detailQuery.isLoading ? (
+            <Loader />
+          ) : detailQuery.isError ? (
+            <ErrorBlock message={(detailQuery.error as Error).message} />
+          ) : (
+            <textarea
+              value={body}
+              onChange={(e) => setDraft(e.target.value)}
+              spellCheck={false}
+              className="h-[55vh] w-full resize-none rounded border border-[var(--color-border)] bg-[var(--color-surface-fog)] p-3 font-mono text-xs leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-200"
+            />
+          )}
+        </div>
+
+        {error && (
+          <div className="mx-5 mb-2 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700">
+            {error}
+          </div>
+        )}
+
+        <div className="flex items-center justify-between gap-3 border-t border-[var(--color-border)] px-5 py-3">
+          <button
+            type="button"
+            onClick={() => {
+              if (
+                window.confirm(
+                  `¿Borrar "${summary?.name}"? Esta acción no se puede deshacer.`,
+                )
+              ) {
+                deleteMutation.mutate();
+              }
+            }}
+            disabled={deleteMutation.isPending}
+            className="rounded border border-red-300 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+          >
+            {deleteMutation.isPending ? "Borrando..." : "Borrar"}
+          </button>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded border border-[var(--color-border)] bg-white px-3 py-1.5 text-xs font-medium hover:bg-neutral-50"
+            >
+              Cerrar
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (draft !== null) saveMutation.mutate(draft);
+              }}
+              disabled={!isDirty || saveMutation.isPending}
+              className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {saveMutation.isPending ? "Guardando..." : "Guardar"}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
