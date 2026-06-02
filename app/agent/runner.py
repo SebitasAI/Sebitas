@@ -360,7 +360,25 @@ async def _persist_user(
                 attachment_metadata=a.get("attachment_metadata"),
             )
         await session.commit()
-        return workspace.id, user.id
+        workspace_id_out = workspace.id
+        app_user_id_out = user.id
+
+    # Memory: ensure the per-user stub exists on first interaction. Idempotent,
+    # cheap (one SELECT for warm path), best-effort (failure logs + skips, never
+    # blocks the user-visible message persistence). Skipped for the scheduler
+    # system actor since "SYSTEM_SCHEDULED" doesn't need a personal memory.
+    if not slack_user_id.startswith("SYSTEM_"):
+        from app.memory.seed import ensure_user_skill
+        try:
+            await ensure_user_skill(workspace_id_out, app_user_id_out, slack_user_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "memory_user_skill_seed_skipped",
+                workspace_id=str(workspace_id_out),
+                slack_user_id=slack_user_id,
+                error=str(exc)[:200],
+            )
+    return workspace_id_out, app_user_id_out
 
 
 def _text_of(content: Any) -> str:
@@ -1143,7 +1161,11 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
     run_id = f"{conversation_key}:{user_ts}"
     # Per-user skills context (always_active bodies + on_demand descriptions,
     # built fresh each turn so install/uninstall takes effect on the next reply).
-    skills_context = await build_skills_context(app_user_id)
+    skills_context = await build_skills_context(
+        app_user_id,
+        workspace_id=workspace_id,
+        slack_user_id=slack_user_id,
+    )
     # Slack roster: ensure the workspace's user list is synced (lazy, cheap on
     # warm cache) then build a compact channel-member block for this run so the
     # agent can use real <@U...> mentions without an extra tool round-trip.
@@ -1341,16 +1363,9 @@ async def resume_run(*, client, ctx: dict, decision: str) -> None:
         skills_ctx = ""
         slack_user_id: str | None = None
         if app_user_str:
-            try:
-                skills_ctx = await build_skills_context(uuid.UUID(app_user_str))
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "skills_context_rebuild_failed",
-                    error=str(exc), app_user_id=app_user_str,
-                )
-            # Resolve the calling user's slack_user_id so the resumed turn keeps
-            # the identity block (otherwise the agent forgets who it's talking
-            # to between the approval gate and the post-approval execution).
+            # Resolve the calling user's slack_user_id FIRST so we can pass
+            # it through to skill context (so memory blocks are scoped to
+            # this user) AND keep the identity block on the resumed turn.
             try:
                 from app.db.models import AppUser
                 from sqlalchemy import select as _select
@@ -1365,6 +1380,17 @@ async def resume_run(*, client, ctx: dict, decision: str) -> None:
                     ).scalar_one_or_none()
             except Exception as exc:  # noqa: BLE001
                 log.warning("identity_resume_lookup_failed", error=str(exc))
+            try:
+                skills_ctx = await build_skills_context(
+                    uuid.UUID(app_user_str),
+                    workspace_id=workspace.id,
+                    slack_user_id=slack_user_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "skills_context_rebuild_failed",
+                    error=str(exc), app_user_id=app_user_str,
+                )
         identity_text = await _build_calling_user_identity_block(
             workspace.id, slack_user_id
         )
