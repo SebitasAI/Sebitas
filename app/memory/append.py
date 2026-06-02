@@ -55,7 +55,7 @@ MAX_APPEND_RETRIES: int = 3
 _LOG_HEADER = "## Observations log"
 
 
-SourceTag = Literal["explicit-remember", "post-pass"]
+SourceTag = Literal["explicit-remember", "post-pass", "onboarding-scan"]
 
 
 def _format_observation(text: str, source: SourceTag, when: datetime) -> str:

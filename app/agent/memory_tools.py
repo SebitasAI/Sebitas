@@ -109,6 +109,78 @@ async def _remember_handler(scope: str, fact: str) -> str:
     return f"✓ Anotado en {label}: «{fact}»."
 
 
+async def _aprende_workspace_handler() -> str:
+    """Trigger the onboarding scan for the calling workspace. Walks four
+    sources (channels, members, integrations, recent messages) and writes
+    findings to the company + team memory skills.
+
+    Synchronous from the agent's POV: returns the summary text once the
+    scan completes (typically 5-30s depending on workspace size + number
+    of channels Misterr is a member of)."""
+    workspace_id = _ctx_workspace_id()
+    if workspace_id is None:
+        return "Error: no hay contexto de workspace."
+
+    # Local import to avoid a circular at module load: onboarding.py
+    # depends on app.slack.tokens which transitively touches the agent layer.
+    from app.memory.onboarding import run_onboarding_scan
+
+    try:
+        summary = await run_onboarding_scan(workspace_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "aprende_workspace_failed",
+            workspace_id=str(workspace_id),
+            error=str(exc)[:200],
+        )
+        return (
+            "El scan falló a mitad de camino (ya quedó en logs). Lo que "
+            "alcanzamos a leer se guardó. Reintentá en un momento."
+        )
+
+    parts: list[str] = []
+    if summary.get("channels_written"):
+        parts.append(f"{summary['channels_written']} canales")
+    if summary.get("members_written"):
+        parts.append(f"{summary['members_written']} miembros")
+    if summary.get("integrations_written"):
+        parts.append(f"integraciones del workspace")
+    if summary.get("facts_written"):
+        parts.append(
+            f"{summary['facts_written']} hechos extraídos de "
+            f"{summary.get('channels_scanned', 0)} canales"
+        )
+    if not parts:
+        return (
+            "Hice el scan pero no encontré nada nuevo para guardar. "
+            "Probablemente el bot todavía no es miembro de ningún canal."
+        )
+    return "✓ Scan completo. Agregué a memoria: " + ", ".join(parts) + "."
+
+
+register(
+    Tool(
+        name="aprende_workspace",
+        description=(
+            "Trigger a one-time workspace onboarding scan that fills the "
+            "company + team memories with channels, members, integrations, "
+            "and durable facts extracted from recent messages in the bot's "
+            "public channels. Use when the user explicitly asks: 'aprende "
+            "del workspace', '/misterr aprende', 'fai un scan del workspace', "
+            "'do a workspace scan', or similar. Idempotent (re-running just "
+            "re-appends; Phase C compaction folds duplicates). Takes 5-30s. "
+            "Returns a one-line summary of what was written."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        handler=_aprende_workspace_handler,
+    )
+)
+
+
 register(
     Tool(
         name="remember",
