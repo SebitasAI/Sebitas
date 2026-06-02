@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   UserCircle,
   Users,
+  Zap,
 } from "lucide-react";
 import { useAuth } from "@clerk/nextjs";
 import { useQuery } from "@tanstack/react-query";
@@ -59,6 +60,7 @@ const MAIN_NAV: NavItem[] = [
   // ./nav-icons were ported from Antiff and don't have a calendar variant.
   // strokeWidth tuned to read at the same visual weight as the filled set.
   { href: "/scheduled-tasks", label: "Scheduled tasks", icon: <CalendarClock className="size-5" strokeWidth={1.75} /> },
+  { href: "/automations", label: "Automations", icon: <Zap className="size-5" strokeWidth={1.75} /> },
 ];
 
 const SETTINGS_NAV: NavItem[] = [
