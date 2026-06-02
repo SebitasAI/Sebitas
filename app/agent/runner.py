@@ -432,14 +432,15 @@ def _text_of(content: Any) -> str:
 
 
 def _extract_integration_calls(run_messages: list[dict]) -> list[dict]:
-    """Scan a run's messages for `run_action` tool calls and pull the
-    (app, action_id) for each. Used by the integration-skill auto-
-    improve post-pass; we feed it the action ids the agent actually
-    chose so haiku can judge if a better action existed.
+    """Scan a run's messages for `run_action` tool calls and pull
+    `(app, action_id, params)` for each. The post-pass auto-improve
+    uses the params to detect PARAM-level mistakes (e.g.
+    `includeParties=false` when filtering by company), not just the
+    fact that an action was chosen.
 
-    Returns a list of `{"app": str, "action_id": str}` dicts, one
-    per `run_action` invocation in chronological order. Empty when the
-    turn didn't touch any integration."""
+    Returns a list of `{"app": str, "action_id": str, "params": dict}`
+    dicts, one per `run_action` invocation in chronological order.
+    Empty when the turn didn't touch any integration."""
     out: list[dict] = []
     for m in run_messages:
         if m.get("role") != "assistant":
@@ -459,8 +460,18 @@ def _extract_integration_calls(run_messages: list[dict]) -> list[dict]:
                 continue
             app = args.get("app")
             action_id = args.get("action_id") or args.get("component_id")
+            # `params` is the dict of configured props the agent
+            # passed. Pipedream's tool shape names this field
+            # interchangeably; cover both.
+            params = args.get("params") or args.get("configured") or {}
+            if not isinstance(params, dict):
+                params = {}
             if isinstance(app, str) and isinstance(action_id, str):
-                out.append({"app": app.lower().strip(), "action_id": action_id})
+                out.append({
+                    "app": app.lower().strip(),
+                    "action_id": action_id,
+                    "params": params,
+                })
     return out
 
 

@@ -25,20 +25,25 @@ Pipedream queries per day, not 40.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 import uuid
 from typing import Any
 
+import litellm
 import structlog
+from langfuse import get_client
 from sqlalchemy import select
 
+from app.config import get_settings
 from app.db.models import IntegrationConnection, Skill, Workspace
 from app.db.session import get_session
 from app.integrations import pipedream as pd
 from app.skills import registry as skill_registry
 
 log = structlog.get_logger(__name__)
+_langfuse = get_client()
 
 
 # Cache: {app_slug: (rendered_body, cached_at_unix)}. TTL keeps Pipedream
@@ -75,6 +80,137 @@ def _fmt_prop(prop: dict[str, Any]) -> str:
     return f"    - `{name}` ({type_}{optional})"
 
 
+# Cache for haiku-generated usage hints per action. Hints don't change
+# unless Pipedream changes the action's props -- safe to cache for the
+# same 24h as the catalog itself. Key: (app_slug, action_key).
+_action_hint_cache: dict[tuple[str, str], tuple[str, float]] = {}
+
+
+_USAGE_HINT_PROMPT = """\
+Tarea: leer la definición de UNA action de un integration provider y
+escribir guidance OPERATIVO (1-3 frases cortas) para que un agente AI
+sepa CUÁNDO usar esta action y CÓMO setear los parámetros clave.
+
+ACTION:
+  key:         {key}
+  name:        {name}
+  description: {description}
+
+CONFIGURABLE PROPS:
+{props_blob}
+
+INSTRUCCIONES:
+
+1. Devolvé un JSON con UN campo:
+     - "hint": string en español, 1-3 frases SHORT, ≤ 400 chars.
+
+2. El hint debe responder DOS preguntas:
+     a. ¿Cuándo es la action correcta? ("Use this when the user wants to ...")
+     b. ¿Qué param boolean / requerido es CRÍTICO setear bien? (especialmente
+        flags `include*` que cambian la shape del response)
+
+3. Sé ESPECÍFICO. Mal: "use to fetch data". Bien: "use to list calls; if
+   you need company/contact info per call, set includeParties=true".
+
+4. NO inventes capacidades que no existan en los props. Solo lee los
+   props y describí qué hacen.
+
+5. Si no podés concluir nada útil (action genérica, props obvios), devolvé
+   `"hint": ""`.
+
+OUTPUT: solo el JSON. Sin preámbulo, sin código fenced, sin comentarios.
+Cuando no haya hint útil, devolvé `{{"hint": ""}}`.
+"""
+
+
+def _props_blob(props: list[dict]) -> str:
+    """Compact representation of props for the haiku prompt."""
+    lines: list[str] = []
+    for p in props[:20]:
+        name = p.get("name", "?")
+        type_ = p.get("type", "?")
+        optional = " optional" if p.get("optional") else " required"
+        desc = (p.get("description") or "").replace("\n", " ").strip()[:160]
+        lines.append(f"  - {name} ({type_}{optional}): {desc}")
+    return "\n".join(lines) if lines else "  (none)"
+
+
+async def _generate_action_usage_hint(action: dict[str, Any]) -> str:
+    """Single cheap-model call. Returns a 1-3 sentence operative guide
+    for the agent on WHEN to use this action and WHAT params matter.
+    Returns "" on any failure or when haiku decided there's nothing
+    useful to say. Cached at module level by (app_implied_in_key, key)
+    so the same action across workspaces only gets one haiku call per
+    24h refresh."""
+    key = action.get("key") or ""
+    if not key:
+        return ""
+    cached = _action_hint_cache.get((key,))
+    now = time.monotonic()
+    if cached and (now - cached[1]) < _CATALOG_TTL_S:
+        return cached[0]
+
+    settings = get_settings()
+    model = settings.cheap_model
+    prompt = _USAGE_HINT_PROMPT.format(
+        key=key,
+        name=action.get("name") or key,
+        description=(action.get("description") or "")[:600],
+        props_blob=_props_blob(action.get("props") or []),
+    )
+    try:
+        with _langfuse.start_as_current_observation(
+            as_type="generation",
+            name="catalog_skills:usage_hint",
+            model=model,
+            input=prompt,
+        ) as gen:
+            response = await litellm.acompletion(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=400,
+            )
+            raw = (response.choices[0].message.content or "").strip()
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                gen.update(
+                    output=raw,
+                    usage_details={
+                        "input": getattr(usage, "prompt_tokens", 0) or 0,
+                        "output": getattr(usage, "completion_tokens", 0) or 0,
+                    },
+                )
+            else:
+                gen.update(output=raw)
+    except Exception as exc:  # noqa: BLE001
+        log.info("catalog_skill_hint_model_failed", key=key, error=str(exc)[:200])
+        _action_hint_cache[(key,)] = ("", now)
+        return ""
+
+    raw = re.sub(r"^```(?:\w+)?\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw).strip()
+    if not raw or raw == "{}":
+        _action_hint_cache[(key,)] = ("", now)
+        return ""
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        _action_hint_cache[(key,)] = ("", now)
+        return ""
+    if not isinstance(parsed, dict):
+        _action_hint_cache[(key,)] = ("", now)
+        return ""
+    hint = parsed.get("hint")
+    if not isinstance(hint, str) or not hint.strip():
+        _action_hint_cache[(key,)] = ("", now)
+        return ""
+    hint = hint.strip().replace("\n", " ")
+    if len(hint) > 500:
+        hint = hint[:500].rstrip() + "…"
+    _action_hint_cache[(key,)] = (hint, now)
+    return hint
+
+
 async def _fetch_app_catalog(app: str) -> list[dict[str, Any]]:
     """Pull every action for `app` from Pipedream + enrich each with
     its configurable props. Returns a normalized list ready for
@@ -100,12 +236,20 @@ async def _fetch_app_catalog(app: str) -> list[dict[str, Any]]:
         # Strip auth ('app') props -- always present, never useful
         # for the agent to know about.
         props = [p for p in props if p.get("type") != "app"]
-        enriched.append({
+        action_dict = {
             "key": key,
             "name": name,
             "description": desc,
             "props": props,
-        })
+        }
+        # Ask haiku to produce 1-3 sentences of operative guidance:
+        # "when to use this action" + "what flags matter". This is
+        # what distinguishes "describe an API" from "tell an agent
+        # how to use an API". Hints are cached per action key for
+        # 24h, so the daily sweep hits haiku once per action across
+        # the whole platform.
+        action_dict["usage_hint"] = await _generate_action_usage_hint(action_dict)
+        enriched.append(action_dict)
     return enriched
 
 
@@ -152,6 +296,15 @@ async def _get_or_build_available_section(app: str) -> str:
                 lines.append(f"**{a['name']}**")
             if a.get("description"):
                 lines.append(a["description"])
+            # Operative guidance from haiku: when to use this action +
+            # what params matter. The whole point of catalog skills is
+            # to surface this kind of decision-relevant info; without
+            # it the agent reads "Whether to include parties in the
+            # response" and defaults to False because the description
+            # is passive.
+            if a.get("usage_hint"):
+                lines.append("")
+                lines.append(f"**Cuándo usar / params clave:** {a['usage_hint']}")
             props = a.get("props") or []
             if props:
                 lines.append("")

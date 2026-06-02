@@ -65,10 +65,10 @@ MAX_INSIGHT_CHARS: int = 320
 
 
 _INSIGHT_PROMPT = """\
-Tarea: revisar UN turno entre un usuario y un asistente AI en Slack, en
+Tarea: revisar UN turno entre un usuario y un asistente AI en Slack en
 el cual el asistente usó la integración `{app}` mediante una o más
-acciones (`{actions}`). Detectar si hay una LECCIÓN GENERALIZABLE para
-que el asistente elija mejor el próximo turno con esa integración.
+acciones. Tu objetivo es detectar un ERROR de PARÁMETROS o ELECCIÓN de
+action concreto y emitir guidance para corregirlo en el futuro.
 
 CONTEXTO:
 
@@ -81,27 +81,52 @@ CONTEXTO:
 </assistant_response>
 
 <actions_invoked>
-{actions}
+{actions_detailed}
 </actions_invoked>
 
 INSTRUCCIONES:
 
 1. Devolvé un JSON con DOS campos:
      - "has_insight": boolean
-     - "insight": string en español, una o dos frases, ≤ {max_chars} chars
+     - "insight": string en español, ≤ {max_chars} chars
 
-2. CRITERIOS PARA emitir un insight (TODOS deben cumplirse):
-     - El turno reveló un patrón sobre CÓMO usar `{app}` que el
-       asistente NO va a recordar la próxima vez sin documentarlo.
-     - El insight es CONCRETO y ACCIONABLE: "usá action X cuando el
-       intent sea Y", "evitá action X cuando el intent sea Y porque
-       devuelve Z". NO conceptos vagos.
-     - Aplica a futuros turnos similares, no a este caso específico.
+2. Buscás SOLO uno de estos tipos de errores. Si no encajan, devolvé
+   `has_insight: false`:
+
+   **A) PARAM ERROR** (más importante): el asistente eligió la action
+   correcta pero seteó un parámetro CRÍTICO mal. Ejemplos:
+     - boolean flag `include*` en `false` cuando el intent del user
+       requería los datos incluidos (e.g. `includeParties=false` cuando
+       el user buscaba por nombre de empresa)
+     - filtro de fecha demasiado estrecho cuando el user no lo limitó
+     - `maxResults` muy bajo perdiendo data
+     - parámetro requerido omitido → la action devolvió data vacía
+   El insight debe nombrar el PARAM ESPECÍFICO y el VALOR CORRECTO:
+   "Cuando el user pida filtrar calls por empresa/cuenta, set
+   `includeParties=true` en gong-get-extensive-data y filtrá
+   client-side por parties[].name."
+
+   **B) WRONG ACTION**: el asistente eligió una action peor cuando
+   existía una mejor en el catálogo. El insight debe nombrar AMBAS
+   actions y explicar cuándo cambiar:
+   "Cuando el intent es filtrar por nombre, NO uses list-X (solo trae
+   ids), usá get-extensive-X con los filtros adecuados."
 
 3. CRITERIOS PARA emitir NULL (`has_insight: false`):
+     - El turno fue un éxito directo (no hay error que corregir).
+     - El error fue de la API misma, no del asistente.
+     - El asistente respondió pidiendo aclaración (eso es OK, no es
+       un error de uso de la integración -- NO digas "pedir filtros
+       primero" porque eso no resuelve el bug, solo lo posterga).
+     - La causa del fallo es ambigua y no podés señalar un param
+       específico o una action específica.
      - Cuando dudás. La precisión importa más que la cobertura.
-     - El turno fue un éxito directo sin friction (no aprendiste nada).
-     - El insight ya sería obvio de la descripción default de la action.
+
+4. PROHIBIDO:
+     - Notas tipo "pedir más contexto al user" o "pedir filtros antes
+       de invocar" (no son insights, son re-pasar el problema).
+     - Notas genéricas ("optimizar la búsqueda", "evitar costo").
+     - Notas sin evidencia clara en el turno.
      - El caso es muy específico al user / workspace / fecha.
 
 4. NO inventes recomendaciones que no estén respaldadas por evidencia
@@ -126,16 +151,45 @@ async def _extract_insight(
     user_text: str,
     agent_response: str,
     app: str,
-    action_ids: list[str],
+    action_calls: list[dict],
 ) -> str | None:
     """One haiku call. Returns the insight string when emitted, else
-    None. Never raises."""
-    actions_blob = "\n".join(f"- {a}" for a in action_ids) or "(none)"
+    None. Never raises.
+
+    `action_calls` is a list of `{action_id, params}` dicts so the
+    haiku can see PARAM-level decisions (not just which action was
+    chosen). This is what unlocks PARAM-error insights like
+    `includeParties=false` being wrong for company-filter intents."""
+    if not action_calls:
+        return None
+    detailed_lines: list[str] = []
+    for c in action_calls[:10]:
+        aid = c.get("action_id") or "?"
+        params = c.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+        # Format each param compactly. Booleans + small primitives
+        # are most informative; trim long values to keep the prompt
+        # focused.
+        if params:
+            param_bits = []
+            for k, v in list(params.items())[:15]:
+                if isinstance(v, (str, int, float, bool)):
+                    val = str(v)[:60]
+                else:
+                    val = "[…]"  # collapse objects/lists for brevity
+                param_bits.append(f"{k}={val}")
+            params_repr = ", ".join(param_bits)
+        else:
+            params_repr = "(no params passed)"
+        detailed_lines.append(f"- `{aid}` called with: {params_repr}")
+    actions_detailed = "\n".join(detailed_lines)
+
     prompt = _INSIGHT_PROMPT.format(
         app=app,
         user_text=_trim(user_text) or "(vacío)",
         agent_response=_trim(agent_response) or "(vacío)",
-        actions=actions_blob,
+        actions_detailed=actions_detailed,
         max_chars=MAX_INSIGHT_CHARS,
     )
     settings = get_settings()
@@ -314,9 +368,11 @@ async def maybe_improve_skill(
     returns the number of insights appended (often 0)."""
     if not integration_calls:
         return 0
-    # Group action ids by app so we make one haiku call per app touched
-    # in this turn (instead of one per action).
-    by_app: dict[str, list[str]] = {}
+    # Group calls (action_id + params) by app so we make ONE haiku
+    # call per app touched in this turn. Passing params lets haiku see
+    # param-level mistakes like `includeParties=false` when filtering
+    # by company.
+    by_app: dict[str, list[dict]] = {}
     for call in integration_calls:
         app = (call.get("app") or "").lower().strip()
         if not app:
@@ -324,13 +380,16 @@ async def maybe_improve_skill(
         aid = call.get("action_id") or call.get("component_id")
         if not isinstance(aid, str) or not aid:
             continue
-        by_app.setdefault(app, []).append(aid)
+        by_app.setdefault(app, []).append({
+            "action_id": aid,
+            "params": call.get("params") or {},
+        })
 
     written = 0
-    for app, action_ids in by_app.items():
+    for app, action_calls in by_app.items():
         try:
             insight = await _extract_insight(
-                user_text, agent_response, app, action_ids
+                user_text, agent_response, app, action_calls
             )
         except Exception as exc:  # noqa: BLE001
             log.info("auto_improve_unexpected", app=app, error=str(exc)[:200])

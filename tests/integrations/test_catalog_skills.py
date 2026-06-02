@@ -35,7 +35,8 @@ pytestmark = pytest.mark.integration
 
 def _stub_pd(monkeypatch, actions: list[dict], component_props: dict[str, list]):
     """Replace pipedream.search_actions + get_component for the duration
-    of a test."""
+    of a test. Also stubs `_generate_action_usage_hint` to return ""
+    so the haiku call doesn't fire against live LiteLLM during tests."""
     from app.integrations import pipedream as pd
 
     async def _search(app, query=None):
@@ -44,10 +45,15 @@ def _stub_pd(monkeypatch, actions: list[dict], component_props: dict[str, list])
     async def _get_comp(component_id):
         return {"configurable_props": component_props.get(component_id, [])}
 
+    async def _no_hint(action):
+        return ""
+
     monkeypatch.setattr(pd, "search_actions", _search)
     monkeypatch.setattr(pd, "get_component", _get_comp)
+    monkeypatch.setattr(catalog_skills, "_generate_action_usage_hint", _no_hint)
     # Bust the in-process catalog cache so the test sees fresh data.
     catalog_skills._catalog_cache.clear()
+    catalog_skills._action_hint_cache.clear()
 
 
 @pytest.mark.asyncio
