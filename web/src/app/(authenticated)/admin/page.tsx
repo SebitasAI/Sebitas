@@ -686,12 +686,16 @@ function SkillDetailModal({
 }: {
   skillId: string;
   onClose: () => void;
-  rows: AdminSkillRow[];
+  // Optional now. When opened from the Skills tab we have the row in
+  // hand (instant header). When opened from the Integrations tab
+  // (Ver skill on a row) we don't — the detail query supplies the
+  // header fields a moment later.
+  rows?: AdminSkillRow[];
 }) {
   const { getToken } = useAuth();
   const qc = useQueryClient();
-  const summary = rows.find((r) => r.id === skillId);
-  const isMemory = summary?.source === "memory";
+  const summary = rows?.find((r) => r.id === skillId);
+  const isMemory = (summary?.source ?? null) === "memory";
 
   const detailQuery = useQuery({
     queryKey: ["admin", "skill", skillId],
@@ -743,11 +747,13 @@ function SkillDetailModal({
         <div className="flex items-start justify-between border-b border-[var(--color-border)] px-5 py-3">
           <div>
             <h2 className="font-mono text-sm font-semibold">
-              {summary?.name ?? skillId}
+              {summary?.name ?? detailQuery.data?.name ?? skillId}
             </h2>
             <p className="mt-0.5 text-xs text-neutral-500">
-              {summary?.workspace_name ?? "—"} · {summary?.source} · {summary?.scope} ·{" "}
-              v{summary?.version}
+              {(summary?.workspace_name ?? detailQuery.data?.workspace_name) ?? "—"} ·{" "}
+              {summary?.source ?? detailQuery.data?.source ?? "—"} ·{" "}
+              {summary?.scope ?? detailQuery.data?.scope ?? "—"} ·{" "}
+              v{summary?.version ?? detailQuery.data?.version ?? "?"}
             </p>
           </div>
           <button
@@ -837,46 +843,76 @@ function IntegrationsTable({
 }: {
   query: ReturnType<typeof useQuery<AdminIntegrationsResponse>>;
 }) {
+  const [openSkillId, setOpenSkillId] = useState<string | null>(null);
+
   if (query.isLoading) return <Loader />;
   if (query.isError)
     return <ErrorBlock message={(query.error as Error).message} />;
   const items = query.data?.integrations ?? [];
   if (items.length === 0) return <EmptyBlock label="integrations" />;
   return (
-    <div className="overflow-x-auto rounded-lg border border-[var(--color-border)] bg-white">
-      <table className="w-full text-left text-xs">
-        <thead className="bg-[var(--color-surface-fog)] text-[10px] uppercase tracking-wide text-neutral-500">
-          <tr>
-            <th className="px-3 py-2">Workspace</th>
-            <th className="px-3 py-2">App</th>
-            <th className="px-3 py-2">Provider</th>
-            <th className="px-3 py-2">Estado</th>
-            <th className="px-3 py-2">Creado</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((r) => (
-            <tr key={r.id} className="border-t border-[var(--color-border)]">
-              <td className="px-3 py-2">{r.workspace_name ?? "—"}</td>
-              <td className="px-3 py-2 font-mono">{r.app}</td>
-              <td className="px-3 py-2">{r.provider}</td>
-              <td className="px-3 py-2">
-                {r.status === "connected" ? (
-                  <span className="text-emerald-600">{r.status}</span>
-                ) : r.status === "pending" ? (
-                  <span className="text-amber-600">{r.status}</span>
-                ) : (
-                  <span className="text-neutral-500">{r.status}</span>
-                )}
-              </td>
-              <td className="px-3 py-2">
-                {formatDistanceToNow(new Date(r.created_at), { addSuffix: true })}
-              </td>
+    <>
+      <div className="overflow-x-auto rounded-lg border border-[var(--color-border)] bg-white">
+        <table className="w-full text-left text-xs">
+          <thead className="bg-[var(--color-surface-fog)] text-[10px] uppercase tracking-wide text-neutral-500">
+            <tr>
+              <th className="px-3 py-2">Workspace</th>
+              <th className="px-3 py-2">App</th>
+              <th className="px-3 py-2">Provider</th>
+              <th className="px-3 py-2">Estado</th>
+              <th className="px-3 py-2">Creado</th>
+              <th className="px-3 py-2 text-right">Skill</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+          </thead>
+          <tbody>
+            {items.map((r) => (
+              <tr key={r.id} className="border-t border-[var(--color-border)]">
+                <td className="px-3 py-2">{r.workspace_name ?? "—"}</td>
+                <td className="px-3 py-2 font-mono">{r.app}</td>
+                <td className="px-3 py-2">{r.provider}</td>
+                <td className="px-3 py-2">
+                  {r.status === "connected" ? (
+                    <span className="text-emerald-600">{r.status}</span>
+                  ) : r.status === "pending" ? (
+                    <span className="text-amber-600">{r.status}</span>
+                  ) : (
+                    <span className="text-neutral-500">{r.status}</span>
+                  )}
+                </td>
+                <td className="px-3 py-2">
+                  {formatDistanceToNow(new Date(r.created_at), { addSuffix: true })}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  {r.linked_skill_id ? (
+                    <button
+                      type="button"
+                      onClick={() => setOpenSkillId(r.linked_skill_id)}
+                      className="rounded border border-[var(--color-border)] bg-white px-2 py-1 text-[11px] font-medium hover:bg-neutral-50"
+                      title={`Abrir integrations/${r.app}`}
+                    >
+                      Ver skill
+                    </button>
+                  ) : (
+                    <span
+                      className="text-[11px] text-neutral-400"
+                      title="No hay skill auto-generada (probablemente Composio o aún no se generó)"
+                    >
+                      —
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {openSkillId && (
+        <SkillDetailModal
+          skillId={openSkillId}
+          onClose={() => setOpenSkillId(null)}
+        />
+      )}
+    </>
   );
 }
 

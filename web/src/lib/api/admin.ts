@@ -98,6 +98,11 @@ export type AdminIntegrationRow = {
   provider: string;
   status: string;
   created_at: string;
+  // Auto-generated catalog skill (`integrations/<app>`) — null when no
+  // skill exists yet for this (workspace, app). The /admin UI uses it
+  // to surface a "Ver skill" button that opens the existing Skill
+  // detail modal in place.
+  linked_skill_id: string | null;
 };
 
 export type AdminIntegrationsResponse = {
