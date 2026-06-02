@@ -87,9 +87,13 @@ _action_hint_cache: dict[tuple[str, str], tuple[str, float]] = {}
 
 
 _USAGE_HINT_PROMPT = """\
-Tarea: leer la definición de UNA action de un integration provider y
-escribir guidance OPERATIVO (1-3 frases cortas) para que un agente AI
-sepa CUÁNDO usar esta action y CÓMO setear los parámetros clave.
+Task: read the definition of ONE action from an integration provider
+and write OPERATIVE guidance (1-3 short sentences) so an AI agent
+knows WHEN to use this action and HOW to set the key parameters.
+
+The hint will be embedded in the agent's system prompt at decision
+time. It MUST be in English (the rest of the agent's prompt is
+English; mixing languages degrades retrieval).
 
 ACTION:
   key:         {key}
@@ -99,27 +103,28 @@ ACTION:
 CONFIGURABLE PROPS:
 {props_blob}
 
-INSTRUCCIONES:
+INSTRUCTIONS:
 
-1. Devolvé un JSON con UN campo:
-     - "hint": string en español, 1-3 frases SHORT, ≤ 400 chars.
+1. Return a JSON object with ONE field:
+     - "hint": string in English, 1-3 short sentences, ≤ 400 chars.
 
-2. El hint debe responder DOS preguntas:
-     a. ¿Cuándo es la action correcta? ("Use this when the user wants to ...")
-     b. ¿Qué param boolean / requerido es CRÍTICO setear bien? (especialmente
-        flags `include*` que cambian la shape del response)
+2. The hint must answer TWO questions:
+     a. When is this action the right pick? ("Use this when the user
+        wants to ...")
+     b. Which boolean / required param is CRITICAL to set correctly?
+        Especially `include*` flags that change the response shape.
 
-3. Sé ESPECÍFICO. Mal: "use to fetch data". Bien: "use to list calls; if
-   you need company/contact info per call, set includeParties=true".
+3. Be SPECIFIC. Bad: "use to fetch data". Good: "use to list calls;
+   if you need company/contact info per call, set includeParties=true".
 
-4. NO inventes capacidades que no existan en los props. Solo lee los
-   props y describí qué hacen.
+4. Do NOT invent capabilities that aren't in the props. Read the
+   props and describe what they actually do.
 
-5. Si no podés concluir nada útil (action genérica, props obvios), devolvé
-   `"hint": ""`.
+5. If you can't conclude anything useful (generic action, obvious
+   props), return `"hint": ""`.
 
-OUTPUT: solo el JSON. Sin preámbulo, sin código fenced, sin comentarios.
-Cuando no haya hint útil, devolvé `{{"hint": ""}}`.
+OUTPUT: only the JSON object. No preamble, no code fences, no
+comments. When there's no useful hint, return `{{"hint": ""}}`.
 """
 
 
@@ -304,7 +309,7 @@ async def _get_or_build_available_section(app: str) -> str:
             # is passive.
             if a.get("usage_hint"):
                 lines.append("")
-                lines.append(f"**Cuándo usar / params clave:** {a['usage_hint']}")
+                lines.append(f"**When to use / key params:** {a['usage_hint']}")
             props = a.get("props") or []
             if props:
                 lines.append("")

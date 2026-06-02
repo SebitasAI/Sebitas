@@ -65,12 +65,16 @@ MAX_INSIGHT_CHARS: int = 320
 
 
 _INSIGHT_PROMPT = """\
-Tarea: revisar UN turno entre un usuario y un asistente AI en Slack en
-el cual el asistente usó la integración `{app}` mediante una o más
-acciones. Tu objetivo es detectar un ERROR de PARÁMETROS o ELECCIÓN de
-action concreto y emitir guidance para corregirlo en el futuro.
+Task: review ONE turn between a user and an AI assistant in Slack in
+which the assistant used the integration `{app}` via one or more
+actions. Your job is to detect a SPECIFIC PARAM error or ACTION
+choice error and emit guidance to fix it in future turns.
 
-CONTEXTO:
+The insight will be embedded in the agent's system prompt at decision
+time. It MUST be in English (the rest of the agent's prompt + tool
+descriptions are English; mixing languages degrades retrieval).
+
+CONTEXT:
 
 <user_request>
 {user_text}
@@ -84,59 +88,58 @@ CONTEXTO:
 {actions_detailed}
 </actions_invoked>
 
-INSTRUCCIONES:
+INSTRUCTIONS:
 
-1. Devolvé un JSON con DOS campos:
+1. Return a JSON object with TWO fields:
      - "has_insight": boolean
-     - "insight": string en español, ≤ {max_chars} chars
+     - "insight": string in English, ≤ {max_chars} chars
 
-2. Buscás SOLO uno de estos tipos de errores. Si no encajan, devolvé
+2. Look for ONE of these specific failure modes. If none fit, return
    `has_insight: false`:
 
-   **A) PARAM ERROR** (más importante): el asistente eligió la action
-   correcta pero seteó un parámetro CRÍTICO mal. Ejemplos:
-     - boolean flag `include*` en `false` cuando el intent del user
-       requería los datos incluidos (e.g. `includeParties=false` cuando
-       el user buscaba por nombre de empresa)
-     - filtro de fecha demasiado estrecho cuando el user no lo limitó
-     - `maxResults` muy bajo perdiendo data
-     - parámetro requerido omitido → la action devolvió data vacía
-   El insight debe nombrar el PARAM ESPECÍFICO y el VALOR CORRECTO:
-   "Cuando el user pida filtrar calls por empresa/cuenta, set
-   `includeParties=true` en gong-get-extensive-data y filtrá
-   client-side por parties[].name."
+   **A) PARAM ERROR** (most important): the assistant picked the right
+   action but set a CRITICAL parameter wrong. Examples:
+     - boolean flag `include*` set to `false` when the user's intent
+       required the included data (e.g. `includeParties=false` when
+       the user was filtering by company name)
+     - date filter too narrow when the user did not constrain it
+     - `maxResults` too low, losing data
+     - required parameter omitted -> action returned empty data
+   The insight must name the SPECIFIC PARAM and the CORRECT VALUE:
+   "When the user asks to filter calls by company/account, set
+   `includeParties=true` on gong-get-extensive-data and filter
+   client-side on parties[].name."
 
-   **B) WRONG ACTION**: el asistente eligió una action peor cuando
-   existía una mejor en el catálogo. El insight debe nombrar AMBAS
-   actions y explicar cuándo cambiar:
-   "Cuando el intent es filtrar por nombre, NO uses list-X (solo trae
-   ids), usá get-extensive-X con los filtros adecuados."
+   **B) WRONG ACTION**: the assistant chose a weaker action when a
+   better one existed in the catalog. The insight must name BOTH
+   actions and explain when to switch:
+   "When the intent is filtering by name, do NOT use list-X (returns
+   only ids), use get-extensive-X with the right filters."
 
-3. CRITERIOS PARA emitir NULL (`has_insight: false`):
-     - El turno fue un éxito directo (no hay error que corregir).
-     - El error fue de la API misma, no del asistente.
-     - El asistente respondió pidiendo aclaración (eso es OK, no es
-       un error de uso de la integración -- NO digas "pedir filtros
-       primero" porque eso no resuelve el bug, solo lo posterga).
-     - La causa del fallo es ambigua y no podés señalar un param
-       específico o una action específica.
-     - Cuando dudás. La precisión importa más que la cobertura.
+3. EMIT NULL (`has_insight: false`) when:
+     - The turn was a direct success (no error to correct).
+     - The failure was on the API side, not the assistant.
+     - The assistant responded asking for clarification (that's OK,
+       it's not an integration-usage error -- do NOT say "ask for
+       filters first" because that postpones the bug, doesn't solve it).
+     - The failure cause is ambiguous and you can't point to a
+       specific param or a specific action.
+     - When you're unsure. Precision matters more than recall.
 
-4. PROHIBIDO:
-     - Notas tipo "pedir más contexto al user" o "pedir filtros antes
-       de invocar" (no son insights, son re-pasar el problema).
-     - Notas genéricas ("optimizar la búsqueda", "evitar costo").
-     - Notas sin evidencia clara en el turno.
-     - El caso es muy específico al user / workspace / fecha.
+4. FORBIDDEN:
+     - Notes like "ask user for more context" or "ask for filters
+       before invoking" (not insights, they push the problem back).
+     - Generic notes ("optimize the search", "reduce cost").
+     - Notes without clear evidence in the turn.
+     - Notes specific to one user / workspace / date.
 
-4. NO inventes recomendaciones que no estén respaldadas por evidencia
-   en el turno. Si la única evidencia es "el agente se equivocó",
-   pero no podés decir POR QUÉ se equivocó ni QUÉ debería haber hecho,
-   devolvé `has_insight: false`.
+5. Do NOT invent recommendations not backed by evidence in the turn.
+   If the only evidence is "the agent failed" but you can't say WHY
+   or WHAT it should have done, return `has_insight: false`.
 
-OUTPUT: solo el JSON. Sin preámbulo, sin código fenced, sin comentarios.
-Cuando `has_insight: false`, podés omitir el campo `insight` o ponerlo en
-"".
+OUTPUT: only the JSON object. No preamble, no code fences, no
+comments. When `has_insight: false`, omit the `insight` field or set
+it to "".
 """
 
 
