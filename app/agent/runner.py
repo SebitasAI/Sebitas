@@ -304,13 +304,11 @@ async def _load_history(team_id: str, channel: str, conversation_key: str) -> li
     content blocks (image/document via fresh presigned URL, text inline).
 
     DM flattening: 1:1 DM channel ids start with 'D'. Slack lets the user
-    "reply in thread" to any message, which would otherwise split the
-    history across multiple Thread rows (one for the channel root, one
-    per threaded sub-conversation). The agent then loses context of
-    everything posted at root. For DMs we flatten -- one continuous
-    conversation regardless of which Thread row the message lives in.
-    Channels + mpims keep per-thread isolation (parallel threads carry
-    real semantic separation there)."""
+    reply "in thread" to any message, which splits history across multiple
+    Thread rows (channel root + one per threaded sub-conversation). The
+    agent then loses context of everything posted at root. For DMs we
+    flatten -- one continuous conversation regardless of which Thread row
+    a message lives in. Channels + mpims keep per-thread isolation."""
     from app.slack import files as sf  # lazy: avoid import cycle at module load
 
     is_dm = bool(channel) and channel[:1].upper() == "D"

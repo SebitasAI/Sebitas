@@ -176,6 +176,40 @@ async def get_thread_messages(
     return list(reversed(result.scalars().all()))
 
 
+async def get_dm_channel_messages(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    slack_channel_id: str,
+    limit: int = 30,
+) -> list[Message]:
+    """Most recent `limit` messages across EVERY Thread row in this DM
+    channel, in chronological order.
+
+    Why this exists: in DMs, when a user replies "in thread" to a
+    message Misterr posted at the channel root, Slack sets thread_ts
+    to Misterr's message timestamp. The runner persists the user's
+    reply under a NEW Thread row keyed by that thread_ts, while
+    Misterr's original message lives in the channel-root Thread row
+    (slack_thread_ts == channel_id). Loading history by thread alone
+    misses the parent and the agent sees an empty context.
+
+    For 1:1 DMs the natural mental model is "one continuous
+    conversation per user", so we flatten across Thread rows.
+    Channels and mpims keep per-thread isolation because parallel
+    threads are semantically meaningful there."""
+    result = await session.execute(
+        select(Message)
+        .join(Thread, Thread.id == Message.thread_id)
+        .where(
+            Thread.workspace_id == workspace_id,
+            Thread.slack_channel_id == slack_channel_id,
+        )
+        .order_by(Message.created_at.desc())
+        .limit(limit)
+    )
+    return list(reversed(result.scalars().all()))
+
+
 async def get_slack_tz_for_app_user(
     session: AsyncSession, app_user_id: uuid.UUID
 ) -> str | None:
