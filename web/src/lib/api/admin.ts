@@ -105,6 +105,29 @@ export type AdminIntegrationsResponse = {
   total_count: number;
 };
 
+export type AdminFollowUpRow = {
+  id: string;
+  workspace_id: string;
+  workspace_name: string | null;
+  app_user_id: string;
+  slack_user_id: string | null;
+  channel: string;
+  conversation_key: string;
+  reason: string;
+  scheduled_for: string;
+  status: "pending" | "sent" | "cancelled";
+  nudge_count: number;
+  created_at: string;
+  sent_at: string | null;
+  cancelled_at: string | null;
+  cancelled_reason: string | null;
+};
+
+export type AdminFollowUpsResponse = {
+  follow_ups: AdminFollowUpRow[];
+  total_count: number;
+};
+
 function backendBase(): string {
   const url = process.env.NEXT_PUBLIC_BACKEND_URL;
   if (!url) {
@@ -228,6 +251,25 @@ export const adminApi = {
     const res = await fetch(
       `${backendBase()}/api/admin/skills/${encodeURIComponent(skillId)}`,
       { method: "DELETE", headers: authHeaders(token) },
+    );
+    if (!res.ok) await expectOk(res);
+  },
+  followUps: async (
+    token: string,
+    workspaceId?: string,
+    statusFilter?: "pending" | "sent" | "cancelled",
+  ): Promise<AdminFollowUpsResponse> => {
+    const url = new URL(`${backendBase()}/api/admin/follow-ups`);
+    if (workspaceId) url.searchParams.set("workspace_id", workspaceId);
+    if (statusFilter) url.searchParams.set("status_filter", statusFilter);
+    const res = await fetch(url.toString(), { headers: authHeaders(token) });
+    await expectOk(res);
+    return res.json();
+  },
+  cancelFollowUp: async (followUpId: string, token: string): Promise<void> => {
+    const res = await fetch(
+      `${backendBase()}/api/admin/follow-ups/${encodeURIComponent(followUpId)}/cancel`,
+      { method: "POST", headers: authHeaders(token) },
     );
     if (!res.ok) await expectOk(res);
   },

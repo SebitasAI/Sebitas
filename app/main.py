@@ -33,6 +33,7 @@ from app.logging import configure_logging
 from app.automations.webhooks import router as automation_webhooks_router
 from app.memory.compaction import run_compaction_loop as run_memory_compaction_loop
 from app.follow_ups.worker import run_follow_up_loop
+from app.follow_ups.integration_sweeper import run_integration_sweep_loop
 from app.scheduled_tasks.repository import seed_system_tasks_for_all_workspaces
 from app.scheduled_tasks.scheduler import run_scheduler_loop
 from app.skills.preview_store import cleanup_expired as cleanup_expired_previews
@@ -146,6 +147,11 @@ async def lifespan(_: FastAPI):
         # run in the same thread. See app/follow_ups/worker.py.
         follow_up_task = asyncio.create_task(run_follow_up_loop())
 
+        # Integration sweeper: every 30 min looks for stale pending
+        # IntegrationConnection rows (status='pending' older than 4h)
+        # and schedules a follow-up nudging the user to finish OAuth.
+        integration_sweep_task = asyncio.create_task(run_integration_sweep_loop())
+
         # Clerk Organizations backfill (slice T-5). Idempotent: for each
         # installed workspace without a clerk_org_id, provision one and
         # link existing AppUsers as members. Once all rows are linked this
@@ -169,6 +175,7 @@ async def lifespan(_: FastAPI):
             scheduled_task_loop.cancel()
             memory_compaction_task.cancel()
             follow_up_task.cancel()
+            integration_sweep_task.cancel()
             try:
                 await handler.close_async()
             except Exception as exc:  # noqa: BLE001

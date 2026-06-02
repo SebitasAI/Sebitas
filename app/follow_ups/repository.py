@@ -119,6 +119,10 @@ async def fetch_due_pending(*, limit: int = 50) -> list[FollowUp]:
 
 
 async def mark_sent(follow_up_id: uuid.UUID) -> None:
+    """Terminal: the nudge fired and we won't re-try. Used when the
+    escalation policy decided this was the final nudge for the row
+    (nudge_count would exceed MAX_NUDGES), or for any case where
+    re-nudging doesn't make sense."""
     async with get_session() as session:
         await session.execute(
             update(FollowUp)
@@ -130,6 +134,43 @@ async def mark_sent(follow_up_id: uuid.UUID) -> None:
             )
         )
         await session.commit()
+
+
+# Escalation policy (Phase 2). After each nudge, re-arm the row to fire
+# again after `_ESCALATION_HOURS[nudge_count]` -- capping at MAX_NUDGES.
+# Example for nudge_count 1, 2: 24h, 72h. After the 3rd fire we mark
+# the row 'sent' (terminal) and give up.
+MAX_NUDGES: int = 3
+_ESCALATION_HOURS: tuple[int, int, int] = (24, 72, 168)  # 1d, 3d, 7d
+
+
+async def mark_nudge_fired_and_reschedule(follow_up_id: uuid.UUID) -> bool:
+    """Called after a nudge was dispatched. Increments nudge_count and
+    EITHER re-arms the row for another nudge (if under MAX_NUDGES)
+    OR marks it 'sent' (terminal).
+
+    Returns True iff the row was re-armed for another nudge (worker
+    can log "escalation scheduled"), False iff it was marked sent."""
+    async with get_session() as session:
+        row = await session.get(FollowUp, follow_up_id)
+        if row is None:
+            return False
+        new_count = (row.nudge_count or 0) + 1
+        if new_count >= MAX_NUDGES:
+            row.status = "sent"
+            row.sent_at = datetime.now(timezone.utc)
+            row.nudge_count = new_count
+            await session.commit()
+            return False
+        # Re-arm. Pick the escalation interval by the nudge index we
+        # just fired (0-indexed); clamp into the tuple to be defensive.
+        idx = min(new_count - 1, len(_ESCALATION_HOURS) - 1)
+        next_hours = _ESCALATION_HOURS[idx]
+        row.nudge_count = new_count
+        row.scheduled_for = datetime.now(timezone.utc) + timedelta(hours=next_hours)
+        # status stays 'pending' so the worker picks it up again.
+        await session.commit()
+        return True
 
 
 async def mark_cancelled(follow_up_id: uuid.UUID, *, reason: str) -> None:
@@ -210,13 +251,54 @@ async def follow_up_summary_for_user(
     return summary
 
 
+async def list_recent(*, limit: int = 200) -> list[FollowUp]:
+    """Read all follow-ups across workspaces, most-recently-created first.
+    Used by the /admin tab. Caps at `limit` because we don't paginate yet
+    (history grows slowly; thousands of rows over months still fit in one
+    payload)."""
+    async with get_session() as session:
+        rows = (
+            await session.execute(
+                select(FollowUp)
+                .order_by(FollowUp.created_at.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+    return list(rows)
+
+
+async def admin_cancel(follow_up_id: uuid.UUID) -> bool:
+    """Manual cancellation from the /admin UI. Returns True iff a
+    pending row was transitioned to cancelled; False otherwise (row
+    missing or already terminal)."""
+    async with get_session() as session:
+        result = await session.execute(
+            update(FollowUp)
+            .where(
+                FollowUp.id == follow_up_id,
+                FollowUp.status == "pending",
+            )
+            .values(
+                status="cancelled",
+                cancelled_at=datetime.now(timezone.utc),
+                cancelled_reason="admin",
+            )
+        )
+        await session.commit()
+        return (result.rowcount or 0) > 0
+
+
 __all__ = [
     "create_follow_up",
     "fetch_due_pending",
     "mark_sent",
+    "mark_nudge_fired_and_reschedule",
     "mark_cancelled",
     "user_replied_since",
     "follow_up_summary_for_user",
+    "list_recent",
+    "admin_cancel",
     "MIN_WAIT_HOURS",
     "MAX_WAIT_HOURS",
+    "MAX_NUDGES",
 ]

@@ -21,6 +21,8 @@ import {
   type AdminSkillRow,
   type AdminSkillsResponse,
   type AdminIntegrationsResponse,
+  type AdminFollowUpsResponse,
+  type AdminFollowUpRow,
 } from "@/lib/api/admin";
 
 export default function AdminPage() {
@@ -89,7 +91,7 @@ function AdminDashboard() {
     },
   });
 
-  const [tab, setTab] = useState<"workspaces" | "scheduled-tasks" | "skills" | "integrations">(
+  const [tab, setTab] = useState<"workspaces" | "scheduled-tasks" | "skills" | "integrations" | "follow-ups">(
     "workspaces",
   );
   const [filterWs, setFilterWs] = useState<string | null>(null);
@@ -132,13 +134,14 @@ function Tabs({
   onChange,
 }: {
   value: string;
-  onChange: (v: "workspaces" | "scheduled-tasks" | "skills" | "integrations") => void;
+  onChange: (v: "workspaces" | "scheduled-tasks" | "skills" | "integrations" | "follow-ups") => void;
 }) {
   const items: { id: typeof value; label: string }[] = [
     { id: "workspaces", label: "Workspaces" },
     { id: "scheduled-tasks", label: "Scheduled tasks" },
     { id: "skills", label: "Skills" },
     { id: "integrations", label: "Integrations" },
+    { id: "follow-ups", label: "Follow-ups" },
   ];
   return (
     <div role="tablist" className="flex gap-1 rounded-lg bg-[var(--color-surface-fog)] p-1 text-sm">
@@ -337,7 +340,7 @@ function FilteredView({
   filterWs,
   onChangeFilter,
 }: {
-  tab: "scheduled-tasks" | "skills" | "integrations";
+  tab: "scheduled-tasks" | "skills" | "integrations" | "follow-ups";
   workspaces: WorkspaceSummary[];
   filterWs: string | null;
   onChangeFilter: (v: string | null) => void;
@@ -371,6 +374,15 @@ function FilteredView({
       return adminApi.integrations(token, filterWs ?? undefined);
     },
   });
+  const followUpsQuery = useQuery({
+    queryKey: ["admin", "follow-ups", filterWs],
+    enabled: tab === "follow-ups",
+    queryFn: async (): Promise<AdminFollowUpsResponse> => {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("No Clerk session token available.");
+      return adminApi.followUps(token, filterWs ?? undefined);
+    },
+  });
 
   return (
     <div className="flex flex-col gap-3">
@@ -383,9 +395,106 @@ function FilteredView({
         <ScheduledTasksTable query={tasksQuery} />
       ) : tab === "skills" ? (
         <SkillsTable query={skillsQuery} />
-      ) : (
+      ) : tab === "integrations" ? (
         <IntegrationsTable query={integrationsQuery} />
+      ) : (
+        <FollowUpsTable query={followUpsQuery} />
       )}
+    </div>
+  );
+}
+
+function FollowUpsTable({
+  query,
+}: {
+  query: ReturnType<typeof useQuery<AdminFollowUpsResponse>>;
+}) {
+  const { getToken } = useAuth();
+  const qc = useQueryClient();
+  const cancelMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("No Clerk session token available.");
+      return adminApi.cancelFollowUp(id, token);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin", "follow-ups"] });
+    },
+  });
+
+  if (query.isLoading) return <Loader />;
+  if (query.isError)
+    return <ErrorBlock message={(query.error as Error).message} />;
+  const rows = query.data?.follow_ups ?? [];
+  if (rows.length === 0) return <EmptyBlock label="follow-ups" />;
+  return (
+    <div className="overflow-x-auto rounded-lg border border-[var(--color-border)] bg-white">
+      <table className="w-full text-left text-xs">
+        <thead className="bg-[var(--color-surface-fog)] text-[10px] uppercase tracking-wide text-neutral-500">
+          <tr>
+            <th className="px-3 py-2">Workspace</th>
+            <th className="px-3 py-2">Usuario</th>
+            <th className="px-3 py-2">Motivo</th>
+            <th className="px-3 py-2">Estado</th>
+            <th className="px-3 py-2">Nudges</th>
+            <th className="px-3 py-2">Programado</th>
+            <th className="px-3 py-2 text-right">Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r: AdminFollowUpRow) => {
+            const isPending = r.status === "pending";
+            const statusColor =
+              r.status === "pending"
+                ? "bg-amber-50 text-amber-700"
+                : r.status === "sent"
+                  ? "bg-green-50 text-green-700"
+                  : "bg-neutral-100 text-neutral-600";
+            return (
+              <tr key={r.id} className="border-t border-[var(--color-border)]">
+                <td className="px-3 py-2">{r.workspace_name ?? "—"}</td>
+                <td className="px-3 py-2 font-mono">
+                  {r.slack_user_id ?? r.app_user_id.slice(0, 8)}
+                </td>
+                <td className="px-3 py-2 max-w-[420px] truncate" title={r.reason}>
+                  {r.reason}
+                </td>
+                <td className="px-3 py-2">
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${statusColor}`}>
+                    {r.status}
+                  </span>
+                </td>
+                <td className="px-3 py-2">{r.nudge_count}/3</td>
+                <td className="px-3 py-2">
+                  {formatDistanceToNow(new Date(r.scheduled_for), { addSuffix: true })}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  {isPending ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `¿Cancelar este follow-up? Motivo:\n\n${r.reason}`,
+                          )
+                        ) {
+                          cancelMutation.mutate(r.id);
+                        }
+                      }}
+                      disabled={cancelMutation.isPending}
+                      className="rounded border border-red-300 bg-white px-2 py-1 text-[11px] font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                    >
+                      Cancelar
+                    </button>
+                  ) : (
+                    <span className="text-[11px] text-neutral-400">—</span>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
