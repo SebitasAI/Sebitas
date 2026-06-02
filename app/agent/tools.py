@@ -273,8 +273,39 @@ async def _find_actions(app: str, query: str | None = None) -> str:
     return await _gateway.find_actions(app, query)
 
 
-async def _run_integration_action(app: str, action_id: str, params: dict | None = None) -> str:
-    return await _gateway.run_action(app, action_id, params or {})
+async def _run_integration_action(
+    app: str,
+    action_id: str,
+    params: dict | None = None,
+    filter_substring: str | None = None,
+) -> str:
+    return await _gateway.run_action(
+        app, action_id, params or {}, filter_substring=filter_substring or None,
+    )
+
+
+async def _find_in_action(
+    app: str,
+    action_id: str,
+    filter_substring: str,
+    base_params: dict | None = None,
+    date_from_param: str = "fromDateTime",
+    date_to_param: str = "toDateTime",
+    window_days: int = 2,
+    max_iterations: int = 15,
+    end_iso: str | None = None,
+) -> str:
+    return await _gateway.find_in_action(
+        app=app,
+        action_id=action_id,
+        filter_substring=filter_substring,
+        base_params=base_params or {},
+        date_from_param=date_from_param,
+        date_to_param=date_to_param,
+        window_days=window_days,
+        max_iterations=max_iterations,
+        end_iso=end_iso,
+    )
 
 
 async def _run_action_gate(inp: dict) -> bool:
@@ -359,7 +390,16 @@ register(Tool(
     description=(
         "Run an action of a connected integration. Credentials are injected "
         "server-side; you never provide or see them. Give the app, the action_id "
-        "(from find_actions), and the action's params."
+        "(from find_actions), and the action's params.\n\n"
+        "OPTIONAL: pass `filter_substring` when the user is looking for a "
+        "specific entity (company name, person, email, account id) inside a "
+        "list-style response. The gateway runs the action, then keeps only "
+        "items whose nested data contains the substring (case-insensitive, "
+        "any field at any depth: parties[].emailAddress, "
+        "context[].objects[].fields[].value, metaData.title, etc.) and drops "
+        "the rest BEFORE the LLM sees them. Use this for needle-in-haystack "
+        "queries like 'last call with MercadoLibre' to avoid iterating the "
+        "same action with different date windows."
     ),
     input_schema={
         "type": "object",
@@ -367,10 +407,111 @@ register(Tool(
             "app": {"type": "string", "description": "Connected app slug"},
             "action_id": {"type": "string", "description": "Action id from find_actions"},
             "params": {"type": "object", "description": "Action parameters"},
+            "filter_substring": {
+                "type": "string",
+                "description": (
+                    "Optional. Case-insensitive substring that response items "
+                    "must contain in any nested field to be kept. Use for "
+                    "needle searches (company/person/email). Leave empty for "
+                    "the unfiltered response."
+                ),
+            },
         },
         "required": ["app", "action_id"],
     },
     handler=_run_integration_action,
+    risky_check=_run_action_gate,
+))
+
+
+register(Tool(
+    name="find_in_action",
+    description=(
+        "Iteratively sweep backward-walking date windows on a list-style "
+        "action until at least one item matches `filter_substring`. Use "
+        "for needle-in-haystack searches on actions that DON'T expose a "
+        "cursor (e.g. gong-get-extensive-data, hubspot list endpoints, "
+        "salesforce list endpoints) when a single `run_action(... "
+        "filter_substring=...)` would only see the most recent N rows "
+        "and miss the match.\n\n"
+        "The gateway sweeps server-side: each iteration spends ~$0.005, "
+        "stops as soon as one match shows up, returns the matching rows "
+        "with `[find_in_action] hit on iteration K/N (window ...)` "
+        "footer so you know how deep we went. Caps: max_iterations=60.\n\n"
+        "Read the action's date param names off `load_skill` / "
+        "`find_actions` and pass them as `date_from_param` / "
+        "`date_to_param`. Defaults match Gong; HubSpot may need "
+        "`createdAfter`/`createdBefore`, Salesforce `start`/`end`, etc.\n\n"
+        "Prefer `run_action(... filter_substring=...)` for a single "
+        "window. Reach for `find_in_action` only when you have to walk "
+        "history (e.g. the answer might be older than the action's "
+        "default page) and the action has no cursor."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "app": {"type": "string", "description": "Connected app slug"},
+            "action_id": {
+                "type": "string",
+                "description": "Action id from find_actions (must be list-style with date filters)",
+            },
+            "filter_substring": {
+                "type": "string",
+                "description": (
+                    "Case-insensitive substring the gateway will deep-match "
+                    "against each response item's nested fields. The needle "
+                    "(company name, email, account id, person name)."
+                ),
+            },
+            "base_params": {
+                "type": "object",
+                "description": (
+                    "Non-date params to merge into every sweep call (e.g. "
+                    "`context='Extended'`, `includeParties=true`, "
+                    "`maxResults=100`). Date params, if you include them "
+                    "here, are stripped — find_in_action owns the window."
+                ),
+            },
+            "date_from_param": {
+                "type": "string",
+                "description": (
+                    "Name of the 'start of window' date param on this "
+                    "action. Default 'fromDateTime' (Gong). Other examples: "
+                    "'createdAfter' (HubSpot), 'start' (Salesforce)."
+                ),
+            },
+            "date_to_param": {
+                "type": "string",
+                "description": (
+                    "Name of the 'end of window' date param. Default "
+                    "'toDateTime' (Gong)."
+                ),
+            },
+            "window_days": {
+                "type": "integer",
+                "description": (
+                    "Size of each window in days. Default 2. Use smaller "
+                    "(1) for high-traffic data, larger (7) for sparse."
+                ),
+            },
+            "max_iterations": {
+                "type": "integer",
+                "description": (
+                    "Max number of windows to sweep. Default 15. Hard cap 60."
+                ),
+            },
+            "end_iso": {
+                "type": "string",
+                "description": (
+                    "Optional ISO-8601 datetime to anchor the most recent "
+                    "window. Defaults to now (UTC). Use e.g. "
+                    "'2026-06-02T23:59:59Z'."
+                ),
+            },
+        },
+        "required": ["app", "action_id", "filter_substring"],
+    },
+    handler=_find_in_action,
     risky_check=_run_action_gate,
 ))
 

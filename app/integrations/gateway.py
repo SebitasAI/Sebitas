@@ -140,6 +140,35 @@ def _render_truncated(result: object, fallback_out: object) -> str:
     )
 
 
+def _deep_string_match(value: object, needle_lower: str) -> bool:
+    """Recursively walk `value` and return True iff `needle_lower` is a
+    substring of any string-typed field, key, or scalar coerced to str.
+
+    Why this exists: integration responses bury the search target deep
+    (e.g. Gong puts the CRM account name 4 levels in:
+    `parties[].context[].objects[].fields[{name='Name', value='...'}]`).
+    Asking the LLM to navigate that structure across 100s of rows is
+    expensive and brittle. The substring match runs server-side, cheap,
+    no LLM tokens involved, and works generically across providers.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return needle_lower in value.lower()
+    if isinstance(value, (int, float, bool)):
+        return needle_lower in str(value).lower()
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(k, str) and needle_lower in k.lower():
+                return True
+            if _deep_string_match(v, needle_lower):
+                return True
+        return False
+    if isinstance(value, (list, tuple, set)):
+        return any(_deep_string_match(v, needle_lower) for v in value)
+    return False
+
+
 def _classify(action_id: str) -> bool:
     """Return True if the action should be gated (destructive/irreversible)."""
     tokens = re.split(r"[-_.\s]+", (action_id or "").lower())
@@ -513,10 +542,25 @@ async def run_action_raw(app: str, action_id: str, params: dict | None = None) -
     )
 
 
-async def run_action(app: str, action_id: str, params: dict | None = None) -> str:
+async def run_action(
+    app: str,
+    action_id: str,
+    params: dict | None = None,
+    *,
+    filter_substring: str | None = None,
+) -> str:
     """Pre-validate the connection (auth fields present, OAuth not expired),
     then invoke through the provider. Any provider error is mapped to an
-    actionable user-facing message."""
+    actionable user-facing message.
+
+    `filter_substring`, when set, applies a server-side deep substring
+    match across each response item BEFORE truncation: only items whose
+    nested structure contains the substring (case-insensitive) are kept.
+    Use when the user is asking for a needle and only a handful of rows
+    in a list-style response actually match (e.g. "calls with
+    MercadoLibre" across 1391 Gong rows). Cheap, no LLM tokens, works
+    generically across providers because it walks any nested shape.
+    """
     ws = _current_workspace()
     if not ws:
         return "Error: sin contexto de workspace."
@@ -594,6 +638,38 @@ async def run_action(app: str, action_id: str, params: dict | None = None) -> st
 
         out = result.get("ret", result) if isinstance(result, dict) else result
 
+        # Server-side substring filter: when the caller knows what
+        # they're looking for, we filter items BEFORE annotation and
+        # truncation. This collapses needle-in-haystack searches (e.g.
+        # "calls with MercadoLibre" across 1391 Gong rows) from many
+        # iterative LLM-driven sweeps into a single round-trip whose
+        # response only carries matches. Provider response is left
+        # intact for the guardrail; the filter only reshapes the
+        # rendered text.
+        filter_summary = None
+        if filter_substring:
+            needle = filter_substring.strip().lower()
+            if needle:
+                items = _ag._extract_items(result)
+                if items is not None and isinstance(items, list):
+                    matched = [it for it in items if _deep_string_match(it, needle)]
+                    filter_summary = {
+                        "needle": filter_substring,
+                        "total": len(items),
+                        "matched": len(matched),
+                    }
+                    log.info(
+                        "integration_action_filter",
+                        app=app, action=action_id,
+                        needle=filter_substring,
+                        total=len(items), matched=len(matched),
+                    )
+                    # Re-wrap the matches in the same envelope shape
+                    # the renderer + guardrail expect (`ret` is the
+                    # canonical Pipedream wrapper).
+                    result = {"ret": matched}
+                    out = matched
+
         # Post-call: if the result looks sparse AND the agent left
         # "rich-response" flags off, prepend a hint so the next LLM
         # turn knows exactly what to flip. Generic detector that works
@@ -611,6 +687,13 @@ async def run_action(app: str, action_id: str, params: dict | None = None) -> st
             )
 
         text = _render_truncated(result, out)
+        if filter_summary is not None:
+            text = (
+                f"[filter] needle={filter_summary['needle']!r}: "
+                f"{filter_summary['matched']} of {filter_summary['total']} "
+                "items matched (rest dropped before display).\n\n"
+                + text
+            )
         if hint is not None:
             log.info(
                 "integration_action_sparse_hint",
@@ -626,3 +709,165 @@ async def run_action(app: str, action_id: str, params: dict | None = None) -> st
         app=app, action=action_id, response_chars=len(text),
     )
     return text
+
+
+# Hard limits for `find_in_action`. The agent can tune within these
+# ceilings but never past them: with 60 windows × ~$0.005 per call
+# = ~$0.30 max per find_in_action, an acceptable upper bound.
+_FIND_MAX_ITERATIONS: int = 60
+_FIND_DEFAULT_WINDOW_DAYS: int = 2
+_FIND_DEFAULT_MAX_ITERATIONS: int = 15
+
+
+async def find_in_action(
+    app: str,
+    action_id: str,
+    filter_substring: str,
+    *,
+    base_params: dict | None = None,
+    date_from_param: str = "fromDateTime",
+    date_to_param: str = "toDateTime",
+    window_days: int = _FIND_DEFAULT_WINDOW_DAYS,
+    max_iterations: int = _FIND_DEFAULT_MAX_ITERATIONS,
+    end_iso: str | None = None,
+) -> str:
+    """Iteratively call `run_action` on backward-walking date windows
+    until `filter_substring` matches at least one item, or we exhaust
+    `max_iterations` windows.
+
+    Why this exists: many list-style actions (gong-get-extensive-data,
+    salesforce list-deals, hubspot list-tickets, etc.) don't expose a
+    cursor through Composio/Pipedream; the ONLY way to page is to
+    sweep `fromDateTime`/`toDateTime` (or whatever the date pair is)
+    backwards. Doing that from the LLM costs a tool-call per window
+    and is the #1 driver of multi-dollar agent turns. Doing it
+    server-side here costs nothing in tokens and stops as soon as a
+    match shows up.
+
+    Generic by design:
+      - `date_from_param` / `date_to_param` are explicit: the agent
+        reads them off the action spec (via load_skill / find_actions)
+        and tells us. Defaults match Gong; HubSpot may need
+        `createdAfter`/`createdBefore`, Salesforce `start`/`end`, etc.
+      - `base_params` is merged with the date window per iteration.
+      - `filter_substring` reuses the same deep matcher `run_action`
+        already exposes; no per-app code.
+
+    Returns the textual result of the FIRST window that produces
+    matches (formatted the same way `run_action` formats results,
+    with the `[filter]` annotation and a `[find_in_action]` footer
+    summarizing the sweep). When no window matches, returns a short
+    "not found in N windows" diagnostic so the agent can decide to
+    widen `window_days` or escalate to the user.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    if not filter_substring or not filter_substring.strip():
+        return (
+            "Error: find_in_action requires a non-empty filter_substring. "
+            "Pass the needle (company name, email, account id) you're looking for."
+        )
+    if not date_from_param or not date_to_param:
+        return (
+            "Error: find_in_action needs both date_from_param and "
+            "date_to_param. Read the action spec (load_skill or "
+            "find_actions) to see which date params the action exposes."
+        )
+    if max_iterations < 1:
+        max_iterations = 1
+    if max_iterations > _FIND_MAX_ITERATIONS:
+        log.info(
+            "find_in_action_capped_iterations",
+            app=app, action=action_id,
+            requested=max_iterations, capped=_FIND_MAX_ITERATIONS,
+        )
+        max_iterations = _FIND_MAX_ITERATIONS
+    if window_days < 1:
+        window_days = 1
+
+    # Parse end_iso or default to now (UTC).
+    if end_iso:
+        try:
+            # Accept both `2026-06-02T23:59:59Z` and ISO with offset.
+            normalized = end_iso.replace("Z", "+00:00")
+            cursor_to = datetime.fromisoformat(normalized)
+            if cursor_to.tzinfo is None:
+                cursor_to = cursor_to.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return (
+                f"Error: end_iso ({end_iso!r}) is not a valid ISO-8601 "
+                "datetime. Use e.g. '2026-06-02T23:59:59Z' or omit to "
+                "default to now."
+            )
+    else:
+        cursor_to = datetime.now(timezone.utc)
+
+    base = dict(base_params) if isinstance(base_params, dict) else {}
+    # Strip the date params from base in case the agent included them;
+    # find_in_action owns the date window.
+    base.pop(date_from_param, None)
+    base.pop(date_to_param, None)
+
+    walked = 0
+    last_total = 0
+    for i in range(max_iterations):
+        window_to = cursor_to
+        window_from = cursor_to - timedelta(days=window_days)
+        params = dict(base)
+        params[date_from_param] = window_from.isoformat().replace("+00:00", "Z")
+        params[date_to_param] = window_to.isoformat().replace("+00:00", "Z")
+
+        text = await run_action(
+            app, action_id, params, filter_substring=filter_substring,
+        )
+        walked += 1
+        cursor_to = window_from
+
+        # Parse the [filter] line to know how many matched. The
+        # `run_action` annotation reliably prefixes a line of the
+        # form `[filter] needle='...': N of M items matched`.
+        import re
+        match = re.search(
+            r"\[filter\] needle=.*?: (\d+) of (\d+) items matched", text,
+        )
+        if match:
+            matched = int(match.group(1))
+            total = int(match.group(2))
+            last_total = total
+            if matched > 0:
+                window_label = (
+                    f"{window_from.date().isoformat()} → "
+                    f"{window_to.date().isoformat()}"
+                )
+                log.info(
+                    "find_in_action_hit",
+                    app=app, action=action_id,
+                    needle=filter_substring,
+                    iterations=walked,
+                    window=window_label,
+                    matched=matched, total=total,
+                )
+                return (
+                    f"[find_in_action] hit on iteration {walked}/{max_iterations} "
+                    f"(window {window_label}, "
+                    f"{matched} matched / {total} scanned).\n\n"
+                    + text
+                )
+        else:
+            # Run had no `[filter]` line: probably an error or empty
+            # response shape. Treat as a no-match and continue.
+            last_total = 0
+
+    log.info(
+        "find_in_action_exhausted",
+        app=app, action=action_id,
+        needle=filter_substring,
+        iterations=walked, last_window_total=last_total,
+    )
+    return (
+        f"[find_in_action] no match for needle={filter_substring!r} "
+        f"after sweeping {walked} window(s) of {window_days} day(s) "
+        f"each (back to {cursor_to.date().isoformat()}). "
+        "Consider: widen `window_days`, raise `max_iterations`, or "
+        "ask the user for a different needle / date range."
+    )
