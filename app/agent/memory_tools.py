@@ -109,22 +109,70 @@ async def _remember_handler(scope: str, fact: str) -> str:
     return f"✓ Anotado en {label}: «{fact}»."
 
 
-async def _aprende_workspace_handler() -> str:
-    """Trigger the onboarding scan for the calling workspace. Walks four
-    sources (channels, members, integrations, recent messages) and writes
-    findings to the company + team memory skills.
+async def _aprende_workspace_handler(channel_id: str | None = None) -> str:
+    """Trigger the onboarding scan for the calling workspace.
 
-    Synchronous from the agent's POV: returns the summary text once the
-    scan completes (typically 5-30s depending on workspace size + number
-    of channels Misterr is a member of)."""
+    Two modes:
+      - No `channel_id`: full workspace scan (channels list + members +
+        integrations + top-5-channels-by-size deep dive). Same behavior
+        as the original Phase D tool.
+      - With `channel_id`: deep-scan ONLY that channel (100 messages, up
+        to 10 facts). Used when the user asks "aprende del canal #X" or
+        when Misterr is freshly invited to a channel and wants context.
+
+    Synchronous from the agent's POV: 5-30s for the full scan, 3-8s for
+    the single-channel deep dive.
+    """
     workspace_id = _ctx_workspace_id()
     if workspace_id is None:
         return "Error: no hay contexto de workspace."
 
     # Local import to avoid a circular at module load: onboarding.py
     # depends on app.slack.tokens which transitively touches the agent layer.
-    from app.memory.onboarding import run_onboarding_scan
+    from app.memory.onboarding import run_onboarding_scan, scan_single_channel
 
+    if channel_id:
+        try:
+            result = await scan_single_channel(workspace_id, channel_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "aprende_channel_failed",
+                workspace_id=str(workspace_id),
+                channel_id=channel_id,
+                error=str(exc)[:200],
+            )
+            return (
+                f"Falló el scan del canal {channel_id}. Ya quedó en logs. "
+                "Reintentá en un momento."
+            )
+        if result.get("skipped"):
+            reason = result["skipped"]
+            if reason == "off_topic":
+                return (
+                    f"Skipié #{result.get('channel_name')} porque parece un "
+                    "canal social/off-topic (no extraigo hechos de ahí)."
+                )
+            if reason == "history_failed":
+                return (
+                    f"No pude leer el historial de #{result.get('channel_name') or channel_id}. "
+                    "Probablemente no soy miembro o no tengo permiso "
+                    "(channels:history)."
+                )
+            if reason == "no_token":
+                return "Error: no hay token de bot para este workspace."
+            return f"Scan saltado por: {reason}."
+        if not result.get("facts_written"):
+            return (
+                f"Leí #{result.get('channel_name') or channel_id} "
+                f"({result.get('messages_examined', 0)} mensajes) pero no "
+                "encontré nada durable que valga la pena guardar."
+            )
+        return (
+            f"✓ Scan de #{result['channel_name']}: agregué "
+            f"{result['facts_written']} hechos a memoria de la empresa."
+        )
+
+    # No channel_id -> full workspace scan.
     try:
         summary = await run_onboarding_scan(workspace_id)
     except Exception as exc:  # noqa: BLE001
@@ -162,18 +210,30 @@ register(
     Tool(
         name="aprende_workspace",
         description=(
-            "Trigger a one-time workspace onboarding scan that fills the "
-            "company + team memories with channels, members, integrations, "
-            "and durable facts extracted from recent messages in the bot's "
-            "public channels. Use when the user explicitly asks: 'aprende "
-            "del workspace', '/misterr aprende', 'fai un scan del workspace', "
-            "'do a workspace scan', or similar. Idempotent (re-running just "
-            "re-appends; Phase C compaction folds duplicates). Takes 5-30s. "
-            "Returns a one-line summary of what was written."
+            "Trigger a memory-seeding scan. Two modes:\n"
+            "  - No arg: full workspace scan. Channels list + member roster "
+            "+ integrations + top-5-channels deep dive. Use when the user "
+            "says 'aprende del workspace', '/misterr aprende', 'fai un scan'.\n"
+            "  - With `channel_id`: deep-scan ONLY that channel (100 msgs, "
+            "up to 10 facts). Use when the user asks 'aprende del canal #X', "
+            "'qué se ha hablado en #X', 'dame contexto del canal X'. ALSO "
+            "use this proactively when the conversation reveals you've just "
+            "been invited to a channel and you have no context.\n"
+            "Idempotent (Phase C compaction folds duplicates). Returns a "
+            "one-line summary."
         ),
         input_schema={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "channel_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional Slack channel ID (e.g. 'C1234567'). When "
+                        "set, deep-scans only that channel. When omitted, "
+                        "scans the whole workspace."
+                    ),
+                },
+            },
             "required": [],
         },
         handler=_aprende_workspace_handler,

@@ -51,7 +51,12 @@ from app.config import get_settings
 from app.db.models import IntegrationConnection, SlackUser
 from app.db.session import get_session
 from app.memory import append, seed
-from app.memory.constants import COMPANY_SLUG, TEAM_SLUG
+from app.memory.constants import (
+    COMPANY_SLUG,
+    TEAM_SLUG,
+    channel_slug,
+    is_one_to_one_dm,
+)
 from app.slack.tokens import get_bot_token_by_workspace
 
 log = structlog.get_logger(__name__)
@@ -63,6 +68,18 @@ _langfuse = get_client()
 HISTORY_TOP_CHANNELS: int = 5
 HISTORY_MESSAGES_PER_CHANNEL: int = 20
 HISTORY_FACTS_PER_CHANNEL: int = 5
+
+# Deep-scan bounds when we're focused on ONE channel (e.g. on-join hook).
+# Wider window + more facts, because the cost is bounded to one channel
+# instead of multiplying across N.
+DEEP_MESSAGES_PER_CHANNEL: int = 100
+DEEP_FACTS_PER_CHANNEL: int = 10
+
+# Channels we never deep-scan. Mostly social / off-topic where the scan
+# would just collect noise. Match by lowercase substring on the channel name.
+_DEEP_SCAN_SKIP_NAMES: tuple[str, ...] = (
+    "random", "social", "off-topic", "watercooler", "memes", "fun",
+)
 
 # Cap on how many members + channels we write as `team` observations.
 # A workspace with 200 channels would otherwise spam 200 bullets and
@@ -369,6 +386,250 @@ async def _scan_historical_messages(
     return {"facts_written": written, "channels_scanned": scanned}
 
 
+def _should_skip_deep_scan(channel_name: str | None) -> bool:
+    """Heuristic: skip deep-scanning channels whose name suggests off-topic
+    chatter. Returns True when we should NOT scan."""
+    if not channel_name:
+        return False
+    lower = channel_name.lower()
+    return any(needle in lower for needle in _DEEP_SCAN_SKIP_NAMES)
+
+
+async def scan_single_channel(
+    workspace_id: uuid.UUID, channel_id: str
+) -> dict[str, Any]:
+    """Deep-scan ONE channel: pull the last `DEEP_MESSAGES_PER_CHANNEL`
+    messages, extract up to `DEEP_FACTS_PER_CHANNEL` durable facts via
+    haiku, append them to the `company` memory skill prefixed with the
+    channel name.
+
+    Used both from the agent tool (`aprende_workspace(channel_id=...)`)
+    and from the `member_joined_channel` Slack event handler when the
+    joining member is the bot.
+
+    Observations land in the per-channel memory (`channels/<id>`), NOT
+    in the workspace-wide `company` skill -- so context from #engineering
+    doesn't pollute responses in #product. 1:1 DMs are an exception
+    (they reuse `users/<id>`); calling this with a 1:1 DM channel ID
+    short-circuits with `skipped='one_to_one_dm'`.
+
+    Best-effort: returns a summary dict on success; logs + returns zero
+    counts on any failure (missing token, not-a-member, off-topic-skip,
+    haiku error). Never raises.
+    """
+    if is_one_to_one_dm(channel_id):
+        return {
+            "facts_written": 0,
+            "channel_name": None,
+            "skipped": "one_to_one_dm",
+        }
+
+    # Make sure the channel-specific skill exists before we append.
+    channel_skill = await seed.ensure_channel_skill(workspace_id, channel_id)
+    if channel_skill is None:
+        return {
+            "facts_written": 0,
+            "channel_name": None,
+            "skipped": "seed_failed",
+        }
+    target_slug = channel_skill.name
+
+    pair = await get_bot_token_by_workspace(workspace_id)
+    if not pair:
+        log.warning(
+            "deep_scan_no_bot_token",
+            workspace_id=str(workspace_id),
+            channel_id=channel_id,
+        )
+        return {"facts_written": 0, "channel_name": None, "skipped": "no_token"}
+
+    client = AsyncWebClient(token=pair[0])
+
+    # Fetch channel info first: need the name + purpose for the prompt,
+    # plus we use the name to decide if it's an off-topic skip.
+    try:
+        info_resp = await client.conversations_info(channel=channel_id)
+    except Exception as exc:  # noqa: BLE001
+        log.info(
+            "deep_scan_info_failed",
+            workspace_id=str(workspace_id),
+            channel_id=channel_id,
+            reason=str(exc)[:200],
+        )
+        return {"facts_written": 0, "channel_name": None, "skipped": "info_failed"}
+    info = info_resp.get("channel") or {}
+    channel_name = info.get("name") or ""
+    channel_purpose = (info.get("purpose") or {}).get("value") or ""
+
+    if _should_skip_deep_scan(channel_name):
+        log.info(
+            "deep_scan_off_topic_skipped",
+            workspace_id=str(workspace_id),
+            channel_id=channel_id,
+            channel_name=channel_name,
+        )
+        return {
+            "facts_written": 0,
+            "channel_name": channel_name,
+            "skipped": "off_topic",
+        }
+
+    # Pull recent messages. `conversations.history` is paginated; we cap
+    # at DEEP_MESSAGES_PER_CHANNEL with a single call (Slack accepts up
+    # to 1000 but we want bounded haiku input).
+    try:
+        history = await client.conversations_history(
+            channel=channel_id, limit=DEEP_MESSAGES_PER_CHANNEL
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.info(
+            "deep_scan_history_failed",
+            workspace_id=str(workspace_id),
+            channel_id=channel_id,
+            channel_name=channel_name,
+            reason=str(exc)[:200],
+        )
+        return {
+            "facts_written": 0,
+            "channel_name": channel_name,
+            "skipped": "history_failed",
+        }
+
+    messages = history.get("messages") or []
+    if not messages:
+        return {"facts_written": 0, "channel_name": channel_name, "skipped": "empty"}
+
+    # Reuse the per-channel extractor but override the cap so we get the
+    # wider deep-scan budget. The extractor itself reads
+    # HISTORY_FACTS_PER_CHANNEL from module scope -- we temporarily
+    # rebind it via a wrapper to avoid changing every test that uses the
+    # narrow cap. Cleaner than a parameter on the extractor since the
+    # cap concept only meaningfully changes between shallow and deep modes.
+    facts = await _extract_facts_with_cap(
+        channel_id=channel_id,
+        channel_name=channel_name or channel_id,
+        channel_purpose=channel_purpose,
+        messages=messages,
+        max_facts=DEEP_FACTS_PER_CHANNEL,
+    )
+
+    written = 0
+    for fact in facts:
+        # The fact itself doesn't need a `[#name]` prefix anymore: the
+        # whole skill body IS the channel's memory, so the channel context
+        # is implicit. This keeps each observation shorter + cleaner for
+        # compaction to work with.
+        ok = await append.append_observation(
+            workspace_id,
+            target_slug,
+            text=fact,
+            source="onboarding-scan",
+        )
+        if ok:
+            written += 1
+
+    log.info(
+        "deep_scan_complete",
+        workspace_id=str(workspace_id),
+        channel_id=channel_id,
+        channel_name=channel_name,
+        target_skill=target_slug,
+        facts_extracted=len(facts),
+        facts_written=written,
+    )
+    return {
+        "facts_written": written,
+        "facts_extracted": len(facts),
+        "channel_name": channel_name,
+        "messages_examined": len(messages),
+    }
+
+
+async def _extract_facts_with_cap(
+    *,
+    channel_id: str,
+    channel_name: str,
+    channel_purpose: str,
+    messages: list[dict[str, Any]],
+    max_facts: int,
+) -> list[str]:
+    """Wrapper around `_extract_facts_for_channel` that overrides the
+    per-call cap. The base extractor uses HISTORY_FACTS_PER_CHANNEL; this
+    one lets the deep-scan mode pass DEEP_FACTS_PER_CHANNEL instead.
+
+    Implementation note: we copy the prompt + parse logic here only as
+    far as the cap differs. The model call + response shape is identical."""
+    if not messages:
+        return []
+    formatted: list[str] = []
+    for m in messages:
+        user = m.get("user") or m.get("bot_id") or "unknown"
+        text = (m.get("text") or "").replace("\n", " ").strip()
+        if not text:
+            continue
+        formatted.append(f"<@{user}>: {text[:400]}")
+    if not formatted:
+        return []
+
+    prompt = _FACT_EXTRACTION_PROMPT.format(
+        channel_name=channel_name,
+        channel_purpose=channel_purpose or "(sin propósito)",
+        messages="\n".join(formatted),
+        max_facts=max_facts,
+    )
+    settings = get_settings()
+    model = settings.cheap_model
+    try:
+        with _langfuse.start_as_current_observation(
+            as_type="generation",
+            name="memory:onboarding:deep_extract",
+            model=model,
+            input=prompt,
+        ) as gen:
+            response = await litellm.acompletion(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1200,
+            )
+            raw = (response.choices[0].message.content or "").strip()
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                gen.update(
+                    output=raw,
+                    usage_details={
+                        "input": getattr(usage, "prompt_tokens", 0) or 0,
+                        "output": getattr(usage, "completion_tokens", 0) or 0,
+                    },
+                )
+            else:
+                gen.update(output=raw)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "deep_scan_extract_failed",
+            channel_id=channel_id, error=str(exc)[:200],
+        )
+        return []
+
+    raw = re.sub(r"^```(?:\w+)?\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw).strip()
+    if not raw or raw == "[]":
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        log.info("deep_scan_unparseable", channel_id=channel_id, sample=raw[:200])
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out: list[str] = []
+    for item in parsed:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip()[:480])
+        if len(out) >= max_facts:
+            break
+    return out
+
+
 async def run_onboarding_scan(workspace_id: uuid.UUID) -> dict[str, Any]:
     """Top-level entry. Walks all four sources. Per-source errors are
     logged and skipped; the function always returns a summary dict.
@@ -441,4 +702,4 @@ async def run_onboarding_scan(workspace_id: uuid.UUID) -> dict[str, Any]:
     return summary
 
 
-__all__ = ["run_onboarding_scan"]
+__all__ = ["run_onboarding_scan", "scan_single_channel"]
