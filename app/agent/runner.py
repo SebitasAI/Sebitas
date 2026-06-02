@@ -957,6 +957,29 @@ async def _drive(client, ctx: dict, result: dict, *, lock_handle: ThreadLockHand
     await client.chat_postMessage(
         channel=ctx["channel"], thread_ts=ctx.get("reply_thread_ts"), text=rendered_final,
     )
+
+    # Memory post-pass (slice T-X Phase B). Fire-and-forget: extract durable
+    # facts from this turn and append to the appropriate memory skill. Never
+    # blocks the user-visible reply; errors logged + swallowed inside.
+    # Skipped for the scheduler system actor (no Slack user means no
+    # `users/<id>` skill exists for that scope).
+    try:
+        ws_str = ctx.get("workspace_id")
+        slack_uid = ctx.get("slack_user_id") or ""
+        user_text_for_pass = ctx.get("user_text") or ""
+        if ws_str and slack_uid and not slack_uid.startswith("SYSTEM_"):
+            from app.memory.post_pass import extract_and_persist as _pp_extract
+
+            asyncio.create_task(
+                _pp_extract(
+                    workspace_id=uuid.UUID(ws_str),
+                    slack_user_id=slack_uid,
+                    user_text=user_text_for_pass,
+                    agent_response=final or "",
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("post_pass_spawn_failed", error=str(exc)[:200])
     # Thumbs feedback footer. Only attach to runs that actually did
     # something interesting -- at least one tool call -- so we don't spam
     # a "¿quedaste satisfecho?" prompt under a simple "hola" reply. For
@@ -1219,6 +1242,12 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
         "run_id": run_id, "seed_len": len(seed), "team_id": team_id,
         "workspace_id": str(workspace_id),
         "app_user_id": str(app_user_id),
+        "slack_user_id": slack_user_id,
+        # The raw user text drives the Phase B memory post-pass at end of
+        # turn. Bounded; the post-pass module trims further before sending
+        # to haiku, but we keep the full text in ctx in case other future
+        # hooks need it.
+        "user_text": user_text or "",
         "channel": channel, "conversation_key": conversation_key,
         "reply_thread_ts": reply_thread_ts, "user_ts": user_ts,
         # Same emoji we added at message receipt. _drive removes this on
