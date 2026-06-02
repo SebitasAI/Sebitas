@@ -294,6 +294,15 @@ class ComposioProvider(IntegrationProvider):
         # Write actions where Composio's wrapper strips required fields:
         "METABASE_POST_API_CARD": ("POST", "/api/card", "metabase"),
         "METABASE_CREATE_DASHBOARD_SAVE_COLLECTION": ("CUSTOM_DASHBOARD", "", "metabase"),
+        # METABASE_CREATE_CARD_QUERY1: Composio's wrapper for "re-run the
+        # query saved on this card" hangs until the per-call timeout
+        # (60s by default), then fails with TimeoutError. Observed in a
+        # Simetrik run (2026-06-02): 4+ calls to card_id 20847/20850 all
+        # timed out, the agent kept retrying, eventually hit its iter cap.
+        # Direct path is POST /api/card/{card_id}/query with no body.
+        # CARD_QUERY is a custom method handled in execute_action; the
+        # path here is a template that the handler substitutes.
+        "METABASE_CREATE_CARD_QUERY1": ("CARD_QUERY", "/api/card/{card_id}/query", "metabase"),
         # Read + execute actions: routed here for workspaces with direct
         # credentials but no Composio connected_account (e.g. Simetrik, where
         # we backfilled the API key into integration_connection rather than
@@ -376,7 +385,11 @@ class ComposioProvider(IntegrationProvider):
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        timeout = aiohttp.ClientTimeout(total=30)
+        # Bumped 30 -> 120 (2026-06-02) so card-query re-executions and
+        # dataset queries with non-trivial SQL don't hit our floor before
+        # Metabase has a chance to respond. Metabase itself caps server-
+        # side at a few minutes anyway; 120s is comfortable headroom.
+        timeout = aiohttp.ClientTimeout(total=120)
         # GET passes the dict as query-string params; POST/PUT/DELETE pass it as JSON body.
         kwargs: dict = {"headers": headers}
         if method.upper() == "GET":
@@ -470,6 +483,30 @@ class ComposioProvider(IntegrationProvider):
         )
         return updated if isinstance(updated, dict) else created
 
+    async def _run_card_query(self, creds: tuple[str, str], params: dict) -> dict:
+        """Direct path for METABASE_CREATE_CARD_QUERY1 (re-run a saved
+        card's query and return the result set). Composio's wrapper for
+        this action hangs without producing a response, hitting our
+        per-call timeout repeatedly; HTTP-direct is fast + reliable.
+
+        Metabase endpoint: POST /api/card/{card_id}/query
+        Accepts an empty body to use the card's saved query as-is.
+        For ad-hoc parameters / filters / constraints, callers can pass
+        them through `params`; we forward the body verbatim minus the
+        `card_id` (which goes in the URL).
+        """
+        card_id = params.get("card_id")
+        if not card_id:
+            raise IntegrationError(
+                "validation", status=None,
+                detail="METABASE_CREATE_CARD_QUERY1: missing required `card_id`",
+            )
+        body = {k: v for k, v in (params or {}).items() if k != "card_id"}
+        # Empty body is fine -- Metabase re-runs the saved query.
+        return await self._http_direct_metabase(
+            creds, "POST", f"/api/card/{card_id}/query", body or None,
+        )
+
     def _normalise_metabase_card_body(self, params: dict) -> dict:
         """Ensure POST /api/card's body has every required field at the top
         level. Composio's schema doesn't expose `database_id`, so callers
@@ -503,6 +540,8 @@ class ComposioProvider(IntegrationProvider):
                 try:
                     if method == "CUSTOM_DASHBOARD":
                         result = await self._create_dashboard_two_step(creds, params)
+                    elif method == "CARD_QUERY":
+                        result = await self._run_card_query(creds, params)
                     else:
                         # Per-action body normalisation. POST_API_CARD needs
                         # database_id copied from dataset_query.database; the
