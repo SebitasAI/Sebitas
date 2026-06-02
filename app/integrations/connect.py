@@ -427,13 +427,30 @@ async def periodic_resume_loop(interval_seconds: int = 300) -> None:
 
 
 async def complete(external_user_id: str, app: str, account_id: str | None) -> None:
-    """Mark connected + deactivate the Connect button(s) we posted + resume the
-    paused run. Idempotent: the first of webhook/poll clears the pending run_id;
-    the other becomes a no-op. Works for both providers because the row already
-    carries which provider authorised; we don't need to re-decide here."""
+    """Mark connected + deactivate the Connect button(s) we posted + resume any
+    paused run. Idempotent: a second call with the same account_id no-ops.
+
+    Two flows reach this function:
+      1. Slack DM connect: `start_connect()` set `pending_run_id` to the agent
+         run it paused. On complete, we flip status, persist account_id,
+         deactivate buttons, and resume the run.
+      2. Webapp connect: `/api/integrations/connections` creates a row with
+         `pending_run_id=None` (no agent run to resume). On complete (from
+         webhook OR from `list_integrations` reconciliation), we still need
+         to flip status + persist account_id.
+
+    The earlier dedupe condition was `pending_run_id is None`, which broke
+    flow #2 entirely -- those rows stayed at status='pending' forever
+    because the function early-returned before persisting.
+
+    Now: dedupe is keyed on "is the row already in the target state for
+    this account_id". Buttons + run-resume are scoped to the pending_ctx
+    when it exists, so flow #2's empty ctx silently skips those steps.
+    """
     workspace_id = uuid.UUID(external_user_id)
     ctx = None
     buttons: list[dict] = []
+    was_already_complete = False
     async with get_session() as session:
         row = (
             await session.execute(
@@ -443,16 +460,27 @@ async def complete(external_user_id: str, app: str, account_id: str | None) -> N
                 )
             )
         ).scalar_one_or_none()
-        if row is None or row.pending_run_id is None:
-            return  # nothing pending -> already handled (dedupe)
-        ctx = row.pending_ctx
-        buttons = list((ctx or {}).get("_buttons", [])) if isinstance(ctx, dict) else []
-        row.status = "connected"
-        if account_id:
-            row.pipedream_account_id = account_id
-        row.pending_run_id = None
-        row.pending_ctx = None
-        await session.commit()
+        if row is None:
+            return  # nothing to update -- row vanished or never existed
+        # Idempotency: if already connected with the same account, no-op.
+        if (
+            row.status == "connected"
+            and account_id
+            and row.pipedream_account_id == account_id
+            and row.pending_run_id is None
+        ):
+            was_already_complete = True
+        else:
+            ctx = row.pending_ctx
+            buttons = list((ctx or {}).get("_buttons", [])) if isinstance(ctx, dict) else []
+            row.status = "connected"
+            if account_id:
+                row.pipedream_account_id = account_id
+            row.pending_run_id = None
+            row.pending_ctx = None
+            await session.commit()
+    if was_already_complete:
+        return
     log.info(
         "integration_connected", app=app, workspace_id=external_user_id,
         provider=(row.provider if row else None),
