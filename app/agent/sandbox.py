@@ -71,6 +71,18 @@ async def _get_sandbox(run_id: str) -> AsyncSandbox:
     return sbx
 
 
+def _is_sandbox_gone(exc: Exception) -> bool:
+    """The E2B server returns 502 + 'sandbox was not found' when the
+    underlying VM has timed out and been reaped. We want to recreate
+    transparently in that case, not bubble the error up to the LLM
+    (which sees an opaque traceback and starts looping). The textual
+    match is intentional: TimeoutException is raised for any 5xx, so
+    we need a content check to distinguish 'reaped' from 'genuinely
+    unavailable, retry later'."""
+    msg = str(exc).lower()
+    return "sandbox was not found" in msg or "sandbox not found" in msg
+
+
 async def close_run_sandbox(run_id: str) -> None:
     sbx = _sandboxes.pop(run_id, None)
     if sbx is not None:
@@ -213,16 +225,33 @@ async def _collect_artifacts(sbx: AsyncSandbox, run_id: str, workspace_id: str) 
 
 async def run_code(code: str) -> str:
     """Run Python in the current run's isolated sandbox; upload any files written
-    to OUTPUT_DIR to R2 and return logs + signed artifact links."""
+    to OUTPUT_DIR to Slack (with an R2 backup) and return logs + a summary."""
     run_id = run_id_var.get()
     workspace_id = workspace_id_var.get()
     if not run_id or not workspace_id:
         return "Error: no hay contexto de run/workspace para ejecutar código."
 
     sbx = await _get_sandbox(run_id)
-    execution = await sbx.run_code(code)
+    recreated = False
+    try:
+        execution = await sbx.run_code(code)
+    except Exception as exc:  # noqa: BLE001
+        if not _is_sandbox_gone(exc):
+            raise
+        log.warning("sandbox_reaped_recreating", run_id=run_id, error=str(exc))
+        _sandboxes.pop(run_id, None)
+        sbx = await _get_sandbox(run_id)
+        recreated = True
+        execution = await sbx.run_code(code)
 
     parts: list[str] = []
+    if recreated:
+        parts.append(
+            "Nota: el sandbox anterior expiró (E2B reapea tras inactividad) "
+            "y se creó uno nuevo. Variables, archivos y paquetes instalados "
+            "en llamadas previas a run_code se perdieron. Si tu código "
+            "depende de estado previo, recréalo en este bloque."
+        )
     if execution.error:
         parts.append(f"ERROR {execution.error.name}: {execution.error.value}")
     stdout = "".join(execution.logs.stdout) if execution.logs and execution.logs.stdout else ""
@@ -236,5 +265,11 @@ async def run_code(code: str) -> str:
     if artifact_summary:
         parts.append(artifact_summary)
 
-    log.info("run_code_done", run_id=run_id, artifacts=len(links), error=bool(execution.error))
+    log.info(
+        "run_code_done",
+        run_id=run_id,
+        has_artifacts=bool(artifact_summary),
+        recreated=recreated,
+        error=bool(execution.error),
+    )
     return "\n\n".join(parts) or "(ejecución sin salida)"
