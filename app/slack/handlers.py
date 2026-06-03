@@ -439,6 +439,13 @@ def register_handlers(app: AsyncApp) -> None:
     async def on_connect_url_click(ack):  # noqa: ANN001
         await ack()
 
+    # Billing hard-stop "Ver billing" button. URL is handled client-side
+    # by Slack (opens the web settings page); we only ack the event to
+    # silence Bolt's "Unhandled request" warning.
+    @app.action("billing_open_settings")
+    async def on_billing_open_settings_click(ack):  # noqa: ANN001
+        await ack()
+
     # /misterr slash command + skill install/uninstall actions + edit modal.
     # Kept in its own module since it owns its own in-memory state (preview
     # cache + precursor pending) and doesn't share routing with anything else.
