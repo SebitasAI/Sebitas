@@ -165,6 +165,44 @@ async def _create_automation(
             return (
                 "Para `source=composio` necesito `composio_trigger_slug`."
             )
+        # Composio's trigger upsert REQUIRES the connected_account_id
+        # of the user's already-connected account for the toolkit
+        # this trigger belongs to. Look it up before the network call
+        # so we fail fast with a meaningful error instead of a 404.
+        from sqlalchemy import select
+        from app.db.models import IntegrationConnection
+        from app.db.session import get_session
+
+        connected_account_id: str | None = None
+        # The toolkit slug is encoded in the trigger slug by Composio
+        # convention: `SALESFORCE_NEW_LEAD_TRIGGER` -> `salesforce`,
+        # `HUBSPOT_NEW_CONTACT_TRIGGER` -> `hubspot`. Extract it.
+        toolkit_guess = (
+            composio_trigger_slug.split("_", 1)[0].lower()
+            if composio_trigger_slug else ""
+        )
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    select(IntegrationConnection).where(
+                        IntegrationConnection.workspace_id == workspace_id,
+                        IntegrationConnection.app == toolkit_guess,
+                        IntegrationConnection.provider == "composio",
+                        IntegrationConnection.status == "connected",
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is not None:
+                connected_account_id = row.pipedream_account_id  # column is a legacy name; stores Composio id for composio rows
+
+        if not connected_account_id:
+            return (
+                f"No hay una conexión activa para `{toolkit_guess}` "
+                "en este workspace. Pide al usuario que conecte la "
+                "integración primero (con `conectar "
+                f"{toolkit_guess}`) y vuelve a intentar la automation."
+            )
+
         try:
             webhook_url = trig.composio_webhook_url(str(new_id))
             external_trigger_id = await trig.provision_composio_trigger(
@@ -172,6 +210,7 @@ async def _create_automation(
                 user_id=str(workspace_id),
                 config=composio_config or {},
                 webhook_url=webhook_url,
+                connected_account_id=connected_account_id,
             )
             metadata.setdefault("trigger_slug", composio_trigger_slug)
             metadata.setdefault("config", composio_config or {})
