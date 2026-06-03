@@ -9,7 +9,9 @@
 
 import Link from "next/link";
 
-const GET_STARTED_HREF = "/signup";
+import { APP_SIGN_UP_URL } from "@/lib/app-url";
+
+const GET_STARTED_HREF = APP_SIGN_UP_URL;
 const SALES_HREF = "mailto:sales@misterr.ai?subject=Misterr%20Enterprise";
 
 const nf = new Intl.NumberFormat("en-US");
