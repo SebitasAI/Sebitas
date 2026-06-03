@@ -362,7 +362,14 @@ async def start_connect(client, ctx: dict, app: str) -> None:
 async def _poll(external_user_id: str, app: str, provider_name: str) -> None:
     """Fallback: poll the chosen provider until the account appears, then
     resume. Each provider's account-listing shape is different but
-    `match_account_for_app` normalises that."""
+    `match_account_for_app` normalises that.
+
+    On timeout we surface a visible failure in Slack: the original
+    Connect-X button(s) are replaced with a red ":x: No pude conectar
+    a X" message + instruction to retry. Without this, a failed OAuth
+    (user abandoned, provider error page, expired link) leaves the
+    button live in the channel and the user has no signal that the
+    attempt is dead."""
     s = get_settings()
     provider = (
         get_composio_provider() if provider_name == "composio"
@@ -381,6 +388,48 @@ async def _poll(external_user_id: str, app: str, provider_name: str) -> None:
             await complete(external_user_id, app, acc.get("id"))
             return
     log.info("connect_poll_timeout", app=app, provider=provider_name)
+    await _mark_connect_failed(external_user_id, app)
+
+
+async def _mark_connect_failed(external_user_id: str, app: str) -> None:
+    """Called when a connect attempt exhausts its poll window without
+    completing. Fetches the buttons from the pending row, replaces them
+    with a failure message in Slack, and clears the row so the next
+    `conectar X` from the user mints a fresh attempt rather than
+    short-circuiting on the stale `pending` row.
+
+    Idempotent: if the row was already cleaned up (raced with
+    `complete()` or with `_row_is_zombie_pending` deletion), the
+    update is a no-op."""
+    workspace_id = uuid.UUID(external_user_id)
+    buttons: list[dict] = []
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                select(IntegrationConnection).where(
+                    IntegrationConnection.workspace_id == workspace_id,
+                    IntegrationConnection.app == app,
+                    IntegrationConnection.status == "pending",
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return  # already cleaned up (success raced, or zombie sweep)
+        ctx = row.pending_ctx if isinstance(row.pending_ctx, dict) else {}
+        buttons = list(ctx.get("_buttons", []))
+        # Don't delete the row outright; flip it to a state the next
+        # connect attempt can replace. Leaving status='pending' would
+        # let the zombie TTL handle it, but flipping to 'disconnected'
+        # tells the next request_integration() to mint fresh
+        # immediately (see start_connect's prior-row branching).
+        row.status = "disconnected"
+        row.pending_run_id = None
+        row.pending_ctx = None
+        await session.commit()
+    log.info("connect_marked_failed", app=app, workspace_id=external_user_id)
+    await _deactivate_connect_buttons(
+        workspace_id, app, buttons, outcome="failed",
+    )
 
 
 async def resume_pending_polls() -> int:
@@ -511,37 +560,89 @@ async def complete(external_user_id: str, app: str, account_id: str | None) -> N
     # Deactivate every Connect-X button we posted for this app. Each was a
     # separate chat_postMessage (one per request_integration). On success we
     # chat_update them to a passive "connected" line, no buttons.
-    if buttons:
-        from slack_sdk.web.async_client import AsyncWebClient
-
-        # Per-workspace token (multi-tenant install). We resolve from the
-        # connection row's workspace_id; without a token we just skip the
-        # button deactivation (cosmetic) -- not a hard failure.
-        from app.slack.tokens import get_bot_token_by_workspace
-        ws_pair = await get_bot_token_by_workspace(workspace_id)
-        if not ws_pair:
-            log.warning("connect_complete_no_token", workspace_id=external_user_id)
-            slack = None
-        else:
-            slack = AsyncWebClient(token=ws_pair[0])
-        if slack is None:
-            buttons = []  # skip the loop below; just resume the run
-        for b in buttons:
-            ch, ts = b.get("channel"), b.get("ts")
-            if not ch or not ts:
-                continue
-            try:
-                await slack.chat_update(
-                    channel=ch, ts=ts,
-                    text=f"Conectado a {app}.",
-                    blocks=[{"type": "section", "text": {"type": "mrkdwn",
-                        "text": f":white_check_mark: *Conectado a {app}.* Sigo con tu pedido."}}],
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("connect_button_deactivate_failed", app=app, ts=ts, error=str(exc))
+    await _deactivate_connect_buttons(
+        workspace_id, app, buttons, outcome="connected",
+    )
 
     if ctx:
         from app.agent.runner import resume_after_connect  # lazy: avoid import cycle
         # Strip UI bookkeeping from the resume ctx -- it's not part of the run.
         resume_ctx = {k: v for k, v in ctx.items() if not k.startswith("_")}
         await resume_after_connect(resume_ctx)
+
+
+# --------------------------------------------------------------------------- #
+# Button state transitions
+# --------------------------------------------------------------------------- #
+
+
+async def _deactivate_connect_buttons(
+    workspace_id: uuid.UUID,
+    app: str,
+    buttons: list[dict],
+    *,
+    outcome: str,
+) -> None:
+    """Replace each previously-posted Connect-X button in Slack with a
+    passive status line. Idempotent (skips silently when there are no
+    buttons or no bot token); each chat_update wrapped so one Slack
+    error doesn't break the others.
+
+    Why a single helper for both outcomes: the success and failure
+    UIs are symmetric (same buttons, same channel/ts pairs, different
+    status text). Keeping them in one place means we can never forget
+    to update both paths when the message format changes.
+
+    `outcome` values:
+      - "connected": replace with green check + "Sigo con tu pedido."
+        (Misterr resumes the paused run immediately after.)
+      - "failed": replace with red X + instruction to ask again.
+        The user types `conectar X` again, the agent calls
+        request_integration which mints a fresh link.
+    """
+    if not buttons:
+        return
+    from slack_sdk.web.async_client import AsyncWebClient
+
+    from app.slack.tokens import get_bot_token_by_workspace
+    ws_pair = await get_bot_token_by_workspace(workspace_id)
+    if not ws_pair:
+        log.warning(
+            "connect_button_update_no_token",
+            workspace_id=str(workspace_id), outcome=outcome,
+        )
+        return
+    slack = AsyncWebClient(token=ws_pair[0])
+
+    if outcome == "connected":
+        text = f"Conectado a {app}."
+        markdown = (
+            f":white_check_mark: *Conectado a {app}.* Sigo con tu pedido."
+        )
+    elif outcome == "failed":
+        text = f"No se pudo conectar a {app}."
+        markdown = (
+            f":x: *No pude conectar a {app}.* Si quieres reintentarlo, "
+            f"pídeme `conectar {app}` de nuevo."
+        )
+    else:
+        log.warning(
+            "connect_button_update_unknown_outcome",
+            app=app, outcome=outcome,
+        )
+        return
+
+    for b in buttons:
+        ch, ts = b.get("channel"), b.get("ts")
+        if not ch or not ts:
+            continue
+        try:
+            await slack.chat_update(
+                channel=ch, ts=ts, text=text,
+                blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": markdown}}],
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "connect_button_deactivate_failed",
+                app=app, ts=ts, outcome=outcome, error=str(exc),
+            )
