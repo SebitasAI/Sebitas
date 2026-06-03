@@ -20,10 +20,18 @@ const MENUS: Record<string, { label: string; href: string }[]> = {
   ],
 };
 
-// CTA targets: placeholders; point to real app/contact URLs when ready.
+// CTA targets. The marketing site lives on the apex (`misterr.ai`); the
+// app lives at `app.misterr.ai` and owns the Clerk-backed `/sign-in` and
+// `/sign-up` routes. Both buttons are absolute URLs so the navigation
+// is unambiguous regardless of where this website is hosted.
+//
+// `NEXT_PUBLIC_APP_URL` lets prod / staging override the default
+// without a code change. Default points at the production app host.
+const APP_URL =
+  process.env.NEXT_PUBLIC_APP_URL ?? "https://app.misterr.ai";
 const TALK_TO_SALES = "mailto:sales@misterr.ai";
-const LOGIN_HREF = "/login";
-const GET_STARTED_HREF = "/signup";
+const LOGIN_HREF = `${APP_URL}/sign-in`;
+const GET_STARTED_HREF = `${APP_URL}/sign-up`;
 
 const linkText =
   "font-[family-name:var(--font-inter)] text-[16px] font-normal leading-[19.2px] tracking-[-0.24px] text-[#4a4a4a] whitespace-nowrap";

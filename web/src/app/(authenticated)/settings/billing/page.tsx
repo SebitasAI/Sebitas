@@ -66,7 +66,7 @@ export default function SettingsBillingPage() {
   const overviewQuery = useQuery<BillingOverview>({
     queryKey: ["billing", "overview"],
     queryFn: async () => {
-      const token = await getToken();
+      const token = await getToken({ template: "backend" });
       if (!token) throw new Error("No Clerk token");
       return billingApi.overview(token);
     },
@@ -75,7 +75,7 @@ export default function SettingsBillingPage() {
   const ledgerQuery = useQuery<LedgerEntry[]>({
     queryKey: ["billing", "ledger"],
     queryFn: async () => {
-      const token = await getToken();
+      const token = await getToken({ template: "backend" });
       if (!token) throw new Error("No Clerk token");
       return billingApi.ledger(token, null, 20);
     },
@@ -102,7 +102,7 @@ export default function SettingsBillingPage() {
     setErrorMsg(null);
     setBusyPlan(plan.name);
     try {
-      const token = await getToken();
+      const token = await getToken({ template: "backend" });
       if (!token) throw new Error("No Clerk token");
       const { url } = await billingApi.checkout(plan.name, cycle, token);
       window.location.href = url;
@@ -120,7 +120,7 @@ export default function SettingsBillingPage() {
     setErrorMsg(null);
     setPortalBusy(true);
     try {
-      const token = await getToken();
+      const token = await getToken({ template: "backend" });
       if (!token) throw new Error("No Clerk token");
       const { url } = await billingApi.portal(token);
       window.location.href = url;
@@ -163,9 +163,9 @@ export default function SettingsBillingPage() {
 
             {!overview.is_unlimited && (
               <>
-                <div className="mt-8 flex items-center justify-between">
+                <div id="planes" className="mt-8 flex items-center justify-between scroll-mt-20">
                   <h2 className="text-sm font-medium text-[var(--color-ink-deep)]">
-                    Planes
+                    Elegí tu plan
                   </h2>
                   <CycleToggle value={cycle} onChange={setCycle} />
                 </div>
@@ -177,30 +177,17 @@ export default function SettingsBillingPage() {
                   </div>
                 )}
 
-                <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                  {overview.available_plans.map((plan) => (
-                    <PlanCard
-                      key={plan.name}
-                      plan={plan}
-                      cycle={cycle}
-                      currentPlan={overview.plan}
-                      stripeConfigured={overview.stripe_configured}
-                      busy={busyPlan === plan.name}
-                      onSelect={() => startCheckout(plan)}
-                    />
-                  ))}
-                </div>
+                <CreditSliderPicker
+                  cycle={cycle}
+                  availablePlans={overview.available_plans}
+                  currentPlan={overview.plan}
+                  stripeConfigured={overview.stripe_configured}
+                  busy={busyPlan}
+                  onSelect={(plan) => startCheckout(plan)}
+                />
               </>
             )}
 
-            <LedgerSection
-              entries={ledgerQuery.data ?? []}
-              loading={ledgerQuery.isLoading}
-              onRefresh={() => {
-                void overviewQuery.refetch();
-                void ledgerQuery.refetch();
-              }}
-            />
           </>
         )}
       </PageBody>
@@ -262,6 +249,15 @@ function CurrentPlanCard({
             {portalBusy ? "Abriendo…" : "Administrar"}
           </button>
         )}
+        {!overview.has_active_subscription && !overview.is_unlimited && (
+          <a
+            href="#planes"
+            className="inline-flex items-center gap-1.5 rounded-md bg-[var(--color-ink-deep)] px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            Upgrade
+          </a>
+        )}
       </div>
 
       {!overview.is_unlimited && (
@@ -321,6 +317,278 @@ function CycleToggle({
       >
         Anual <span className="opacity-70">(-20%)</span>
       </button>
+    </div>
+  );
+}
+
+
+// ── Per-tier credit sliders (Krea-style, one slider per tier) ─────────── //
+
+// Each tier owns its own range of (credits, price) discrete points. The
+// slider inside a tier card snaps to those points. Tiers stay separate
+// cards so the customer compares ranges side by side.
+//
+// Pricing: $2.50 USD / 1,000 credits across all tiers. With the 5x
+// SALES_COST_MULTIPLIER unchanged, real LLM cost is $0.50 / 1k credits
+// and gross margin is 80%.
+type TierPoint = { credits: number; price: number };
+type TierDef = {
+  name: string; // matches PlanOption.name (starter / pro / scale / business / enterprise)
+  display: string;
+  description: string;
+  badge?: string;
+  popular?: boolean; // adds the "Most popular" tag
+  points: TierPoint[];
+  // Index inside `points` that the slider lands on when the page first
+  // renders. Defaults to 0 (cheapest). For Pro we anchor on the
+  // "Most popular" price as the recommended pick.
+  defaultIndex: number;
+};
+
+const TIER_DEFS: TierDef[] = [
+  {
+    name: "starter",
+    display: "Starter",
+    description: "Para equipos chicos probando el agente.",
+    badge: "Small-sized companies",
+    points: [
+      { credits: 40_000, price: 100 },
+      { credits: 80_000, price: 200 },
+      { credits: 125_000, price: 300 },
+    ],
+    defaultIndex: 0,
+  },
+  {
+    name: "pro",
+    display: "Pro",
+    description: "Para equipos que automatizan day-to-day.",
+    popular: true,
+    points: [
+      { credits: 160_000, price: 400 },
+      { credits: 200_000, price: 500 },
+      { credits: 300_000, price: 750 },
+      { credits: 400_000, price: 1_000 },
+    ],
+    defaultIndex: 2, // 300k / $750 = "Most popular" anchor
+  },
+  {
+    name: "scale",
+    display: "Scale",
+    description: "Para empresas mid-market con varios workspaces.",
+    badge: "Medium-sized companies",
+    points: [
+      { credits: 600_000, price: 1_500 },
+      { credits: 800_000, price: 2_000 },
+      { credits: 1_200_000, price: 3_000 },
+      { credits: 1_600_000, price: 4_000 },
+      { credits: 2_000_000, price: 5_000 },
+    ],
+    defaultIndex: 0,
+  },
+  {
+    name: "business",
+    display: "Business",
+    description: "Para empresas con SLA, SSO y compliance.",
+    points: [
+      { credits: 3_000_000, price: 7_500 },
+      { credits: 4_000_000, price: 10_000 },
+      { credits: 5_000_000, price: 12_500 },
+      { credits: 6_000_000, price: 15_000 },
+      { credits: 8_000_000, price: 20_000 },
+      { credits: 10_000_000, price: 25_000 },
+    ],
+    defaultIndex: 0,
+  },
+  {
+    name: "enterprise",
+    display: "Enterprise",
+    description: "Para volumen alto con descuento + integraciones custom.",
+    badge: "Enterprise",
+    points: [
+      { credits: 12_000_000, price: 30_000 },
+      { credits: 14_000_000, price: 35_000 },
+      { credits: 16_000_000, price: 40_000 },
+      { credits: 18_000_000, price: 45_000 },
+      { credits: 20_000_000, price: 50_000 },
+    ],
+    defaultIndex: 0,
+  },
+];
+
+// Universal features. Every paid tier gets all five (per user spec
+// 2026-06-02). Higher tiers add SSO / RBAC / audit_log / SLA via
+// FEATURE_MATRIX server-side but those aren't surfaced in the slider
+// cards.
+const UNIVERSAL_FEATURES = [
+  "Slack-native agent in threads + mentions",
+  "Persistent workspace context",
+  "Integrations + tool execution",
+  "Scheduled tasks & crons (reports, audits, proactive check-ins)",
+  "Drafts + artifacts (updates, tickets/docs where supported)",
+];
+
+
+function CreditSliderPicker({
+  cycle,
+  availablePlans,
+  currentPlan,
+  stripeConfigured,
+  busy,
+  onSelect,
+}: {
+  cycle: BillingCycle;
+  availablePlans: PlanOption[];
+  currentPlan: string;
+  stripeConfigured: boolean;
+  busy: string | null;
+  onSelect: (plan: PlanOption) => void;
+}) {
+  return (
+    <>
+      <div className="mt-4 grid gap-3 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
+        {TIER_DEFS.map((tier) => (
+          <TierSliderCard
+            key={tier.name}
+            tier={tier}
+            cycle={cycle}
+            availablePlans={availablePlans}
+            currentPlan={currentPlan}
+            stripeConfigured={stripeConfigured}
+            busy={busy}
+            onSelect={onSelect}
+          />
+        ))}
+      </div>
+    </>
+  );
+}
+
+
+function TierSliderCard({
+  tier,
+  cycle,
+  availablePlans,
+  currentPlan,
+  stripeConfigured,
+  busy,
+  onSelect,
+}: {
+  tier: TierDef;
+  cycle: BillingCycle;
+  availablePlans: PlanOption[];
+  currentPlan: string;
+  stripeConfigured: boolean;
+  busy: string | null;
+  onSelect: (plan: PlanOption) => void;
+}) {
+  const [index, setIndex] = useState<number>(tier.defaultIndex);
+  const point = tier.points[index];
+  const monthlyPrice = cycle === "annual" ? point.price * 0.8 : point.price;
+  const annualTotal = point.price * 12 * 0.8;
+
+  // Map this tier to its backend-served PlanOption so checkout uses the
+  // matching Stripe price_id. The price displayed on the slider may
+  // differ from the tier's floor; the backend currently bills the floor
+  // (next slice: per-quantity Stripe metering).
+  const plan = availablePlans.find((p) => p.name === tier.name);
+  const isCurrent = currentPlan === tier.name;
+  const isBusy = !!busy && busy === tier.name;
+  const checkoutAvailable =
+    !!plan &&
+    stripeConfigured &&
+    (cycle === "monthly" ? plan.has_monthly_checkout : plan.has_annual_checkout);
+  const disabled = !checkoutAvailable || isBusy || isCurrent || !plan;
+  const isEnterprise = tier.name === "enterprise";
+
+  const tagClass = tier.popular
+    ? "bg-orange-500 text-white"
+    : "bg-neutral-100 text-neutral-700";
+
+  const cardBorder = tier.popular
+    ? "border-orange-500 shadow-[0_2px_0_0_rgba(255,82,0,0.4)]"
+    : "border-[var(--color-border)]";
+
+  return (
+    <div className={`flex flex-col rounded-xl border ${cardBorder} bg-white p-4`}>
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-base font-semibold text-[var(--color-ink-deep)]">
+          {tier.display}
+        </h3>
+        {tier.popular && (
+          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${tagClass}`}>
+            Most popular
+          </span>
+        )}
+        {!tier.popular && tier.badge && (
+          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${tagClass}`}>
+            {tier.badge}
+          </span>
+        )}
+      </div>
+
+      <p className="mt-1 text-xs text-neutral-500">{tier.description}</p>
+
+      <div className="mt-4">
+        <p className="text-2xl font-semibold text-[var(--color-ink-deep)]">
+          {USD_FORMAT.format(Math.round(monthlyPrice))}
+          <span className="ml-1 text-xs font-normal text-neutral-500">/mes</span>
+        </p>
+        {cycle === "annual" && (
+          <p className="text-[11px] text-neutral-500">
+            {USD_FORMAT.format(Math.round(annualTotal))} al año
+          </p>
+        )}
+        <p className="mt-0.5 text-xs font-medium text-[var(--color-ink-deep)]">
+          {formatCredits(point.credits)} créditos / mes
+        </p>
+      </div>
+
+      <div className="mt-4">
+        <input
+          type="range"
+          min={0}
+          max={tier.points.length - 1}
+          step={1}
+          value={index}
+          onChange={(e) => setIndex(Number(e.target.value))}
+          aria-label={`Créditos por mes en ${tier.display}`}
+          className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-neutral-200 accent-[var(--color-ink-deep)]"
+        />
+        <div className="mt-1 flex justify-between text-[10px] text-neutral-400">
+          <span>{formatCredits(tier.points[0].credits)}</span>
+          <span>{formatCredits(tier.points[tier.points.length - 1].credits)}</span>
+        </div>
+      </div>
+
+      <button
+        onClick={() => plan && onSelect(plan)}
+        disabled={disabled}
+        className={`mt-auto pt-4`}
+      >
+        <span
+          className={`inline-flex w-full items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium ${
+            isCurrent
+              ? "bg-neutral-200 text-neutral-600"
+              : tier.popular
+                ? "bg-orange-500 text-white hover:bg-orange-600"
+                : "bg-[var(--color-ink-deep)] text-white hover:opacity-90"
+          } disabled:cursor-not-allowed disabled:opacity-40`}
+        >
+          {isCurrent
+            ? "Plan actual"
+            : isBusy
+              ? "Redirigiendo…"
+              : isEnterprise
+                ? "Hablar con sales"
+                : (
+                  <>
+                    <Sparkles className="h-3.5 w-3.5" />
+                    Get {tier.display}
+                  </>
+                )}
+        </span>
+      </button>
+
     </div>
   );
 }
