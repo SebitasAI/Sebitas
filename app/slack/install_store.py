@@ -143,6 +143,25 @@ class MisterrInstallationStore(AsyncInstallationStore):
                     team_id=team_id,
                     error=str(exc),
                 )
+        # Welcome DM to the installer. Idempotent across reinstalls
+        # (the welcome module's conditional UPDATE wins exactly once).
+        # Best-effort: if Slack rejects the post or the workspace has
+        # no usable token at this point, we log and move on rather
+        # than failing the install.
+        if installer_uid:
+            try:
+                from app.slack.welcome import maybe_send_welcome_dm
+                await maybe_send_welcome_dm(
+                    workspace_id=ws_id,
+                    installer_slack_user_id=installer_uid,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "workspace_install_welcome_dm_errored",
+                    workspace_id=str(ws_id),
+                    team_id=team_id,
+                    error=str(exc)[:200],
+                )
 
     async def async_save_bot(self, bot: Bot) -> None:
         # Bolt sometimes saves just the bot (e.g. after a token rotation). The

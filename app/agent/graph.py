@@ -21,7 +21,51 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from app.agent.claude import call_claude
-from app.agent.context import workspace_id_var
+
+
+# --------------------------------------------------------------------------- #
+# Tool failure sanitization (Capa 1 — structural confidentiality)
+# --------------------------------------------------------------------------- #
+
+# Sanitized message returned to the LLM whenever a tool handler raises an
+# exception. The full exception + class + tool name are preserved in logs
+# and Langfuse for debugging, but NEVER appear in the tool_result string
+# the LLM consumes. This is structural defense: the LLM cannot leak
+# internal infra ("sandbox", "broker returned 500", "code execution
+# environment is down") to the end user when it doesn't have that info
+# in its context window in the first place.
+#
+# Why a single neutral string for all exceptions: the alternative
+# (per-exception-type messages) gives the LLM enough signal to invent a
+# narrative around the failure ("the database is slow", "the auth
+# expired"). The whole point is to NOT give it that signal -- the LLM
+# should plan its next move from the FACT that it failed, not from the
+# WHY. The user is in control of the retry, not the LLM forecasting an
+# infra recovery.
+_SANITIZED_FAILURE_MESSAGE = (
+    "No pude completar esta acción ahora mismo. "
+    "Avísame cuando quieras que reintente."
+)
+
+
+def _sanitize_handler_exception(
+    tool_name: str, exc: BaseException, *, logger=None
+) -> str:
+    """Convert a tool handler exception into a user-safe, LLM-safe
+    string. Full exception detail is logged for debugging (structlog +
+    Langfuse span level=ERROR set by the caller); the return value is
+    a fixed neutral message with no tool name, no exception class, no
+    stacktrace, no infra terminology."""
+    (logger or log).warning(
+        "tool_handler_exception_sanitized",
+        tool=tool_name,
+        error_class=type(exc).__name__,
+        error=str(exc)[:400],
+    )
+    return _SANITIZED_FAILURE_MESSAGE
+import json
+
+from app.agent.context import agent_max_iter_var, workspace_id_var
 from app.agent.tools import get_tool
 from app.config import get_settings
 from app.integrations import gateway
@@ -72,21 +116,126 @@ def _tool_use_blocks(message: dict) -> list[dict]:
     return [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
 
 
+# --------------------------------------------------------------------------- #
+# Iteration-cap protections (Tiers 1, 2, 3 of "agent never fails mid-task")
+# --------------------------------------------------------------------------- #
+#
+# Three independent safeguards keep the agent loop honest:
+#
+#   Tier 1 (soft wrap-up): when iterations is within `WRAP_UP_THRESHOLD` of
+#       the cap, `_agent_node` injects a transient user-role hint into the
+#       message list for THIS Claude call -- "te quedan N turns, escribí
+#       la respuesta final ahora sin llamar más tools si tenés data". The
+#       hint is NOT persisted into state (the LangGraph accumulator only
+#       sees the assistant response). Cheap, prevents the worst failure
+#       mode (terminating with a tool_use block as last message).
+#
+#   Tier 2 (loop break): if the assistant has issued the same (tool, input)
+#       signature N consecutive times across the last 3 turns, `_tools_node`
+#       refuses to run that call again and returns a synthetic tool_result
+#       telling the agent it's stuck. Protects against runaway cost on
+#       buggy skills + gives the agent a clear signal to change approach.
+#
+#   Tier 3 (project-mode cap): `_route_after_agent` reads the cap from the
+#       contextvar (set by the runner based on prompt complexity) instead
+#       of the static settings value. Big projects get 60 iterations
+#       instead of 35.
+#
+# Together: a complex workflow gets headroom (Tier 3), receives a nudge
+# before it ends (Tier 1), and can't burn iterations in a loop (Tier 2).
+
+WRAP_UP_THRESHOLD = 3      # remaining iters at which we inject the nudge
+LOOP_REPETITION_LIMIT = 3  # same call N times in a row = stuck
+
+
+def _effective_cap() -> int:
+    """The iteration cap for the current run. Falls back to settings
+    if no per-run override was set."""
+    override = agent_max_iter_var.get()
+    if override and override > 0:
+        return override
+    return get_settings().agent_max_iterations
+
+
+def _signature_of(tool_use_block: dict) -> str:
+    """Canonical (name, sorted-input-json) signature for loop detection."""
+    name = tool_use_block.get("name", "")
+    inp = tool_use_block.get("input") or {}
+    try:
+        inp_json = json.dumps(inp, sort_keys=True, default=str)
+    except Exception:
+        inp_json = str(inp)
+    return f"{name}|{inp_json}"
+
+
+def _recent_repeat_count(messages: list[dict], signature: str) -> int:
+    """How many of the last 3 assistant turns issued this exact signature
+    (any tool_use block in the turn matches). 3 = stuck loop."""
+    assistant_turns = [m for m in messages if m.get("role") == "assistant"]
+    if len(assistant_turns) < LOOP_REPETITION_LIMIT:
+        return 0
+    count = 0
+    for turn in assistant_turns[-LOOP_REPETITION_LIMIT:]:
+        if any(_signature_of(tu) == signature for tu in _tool_use_blocks(turn)):
+            count += 1
+    return count
+
+
+def _wrap_up_hint(remaining: int) -> dict:
+    """Inline user-role hint that nudges the agent to finish."""
+    return {
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    f"[Wrap-up hint: te quedan {remaining} iteraciones antes "
+                    "del cap. Si ya tenés data suficiente, escribí AHORA la "
+                    "respuesta final al usuario en texto, sin llamar más tools. "
+                    "Si te falta algo crítico, priorizá 1 tool call y después "
+                    "el resumen. NUNCA termines con un bloque tool_use sin "
+                    "texto -- siempre cerrá con una respuesta que el usuario "
+                    "pueda leer.]"
+                ),
+            }
+        ],
+    }
+
+
 async def _agent_node(state: AgentState) -> dict:
-    response = await call_claude(state["messages"])
+    iters = state.get("iterations", 0)
+    cap = _effective_cap()
+    messages_for_claude = list(state["messages"])
+
+    # Tier 1: when within WRAP_UP_THRESHOLD of the cap, append a
+    # transient hint. Not added to the persisted state so the next turn
+    # (if any) doesn't see a stale hint, and so the model's response
+    # isn't structured as a reply-to-hint but as a normal turn.
+    if iters > 0 and (cap - iters) <= WRAP_UP_THRESHOLD:
+        messages_for_claude.append(_wrap_up_hint(max(0, cap - iters)))
+        log.info(
+            "agent_wrap_up_hint_injected",
+            iters=iters,
+            cap=cap,
+            remaining=cap - iters,
+        )
+
+    response = await call_claude(messages_for_claude)
     # Store as plain dicts so the checkpointer can serialize them, and so thinking
     # block signatures are preserved across turns (required for tool use).
     content = [block.model_dump() for block in response.content]
     return {
         "messages": [{"role": "assistant", "content": content}],
-        "iterations": state.get("iterations", 0) + 1,
+        "iterations": iters + 1,
     }
 
 
 def _route_after_agent(state: AgentState):
     last = state["messages"][-1]
     if last.get("role") == "assistant" and _tool_use_blocks(last):
-        if state.get("iterations", 0) < get_settings().agent_max_iterations:
+        # Tier 3: use the per-run cap (possibly bumped by the runner for
+        # project-mode prompts) instead of the static settings value.
+        if state.get("iterations", 0) < _effective_cap():
             return "tools"
     return END
 
@@ -154,9 +303,44 @@ async def _tools_node(state: AgentState) -> dict:
         tool = get_tool(tu["name"])
         block = {"type": "tool_result", "tool_use_id": tu["id"]}
         if tool is None:
-            return {**block, "content": f"Error: tool desconocida {tu['name']!r}", "is_error": True}
+            # Tool registry miss -- the model invoked something we don't
+            # expose. Log the offending name for diagnostics but DO NOT
+            # echo it back to the LLM (which would feed straight into a
+            # user-visible "I tried to call run_code but it doesn't
+            # exist" leak).
+            log.warning("tool_unknown_sanitized", requested=tu.get("name"))
+            return {**block, "content": _SANITIZED_FAILURE_MESSAGE, "is_error": True}
         if risk[tu["id"]] and decision != "approve":
             return {**block, "content": "Rechazado por el usuario; no se ejecutó."}
+        # Tier 2: loop detection. Refuse to execute the same (name, input)
+        # signature if it has appeared in each of the last LOOP_REPETITION_LIMIT
+        # assistant turns. Returns a synthetic tool_result so the agent
+        # sees an explicit "you're looping" signal -- it can either change
+        # approach on the next turn or write a final text response with
+        # the data it already has. Either path is better than burning
+        # iterations on the same failed call.
+        repeat_count = _recent_repeat_count(
+            state["messages"], _signature_of(tu)
+        )
+        if repeat_count >= LOOP_REPETITION_LIMIT:
+            log.warning(
+                "agent_loop_detected",
+                tool=tool.name,
+                repeat_count=repeat_count,
+                input_keys=list((tu.get("input") or {}).keys()),
+            )
+            return {
+                **block,
+                "content": (
+                    f"⚠️ Loop detectado: llamaste `{tool.name}` con los "
+                    f"mismos parámetros {repeat_count}+ turns seguidos. "
+                    "No ejecuto esta llamada de nuevo para no desperdiciar "
+                    "iteraciones. Cambiá enfoque (otros params, otra tool, "
+                    "u otra estrategia) O escribí la respuesta final al "
+                    "usuario con la data que ya tenés."
+                ),
+                "is_error": True,
+            }
         # Per-tool Langfuse tags. We add a coarse `tool:<name>` plus,
         # where it makes sense, a more specific `app:<app>` (run_action)
         # or `skill:<name>` (load_skill) so the Langfuse UI can answer
@@ -191,7 +375,12 @@ async def _tools_node(state: AgentState) -> dict:
                     span.update(output=result)
             return {**block, "content": result}
         except Exception as exc:  # noqa: BLE001
-            log.warning("tool_failed", tool=tu["name"], error=str(exc))
+            # Capa 1 sanitization: the raw exception (which may contain
+            # provider names, container/sandbox identifiers, stack
+            # traces, etc.) NEVER reaches the LLM. The neutral
+            # `_SANITIZED_FAILURE_MESSAGE` does; the full exception
+            # is kept in structlog + Langfuse for debugging.
+            sanitized = _sanitize_handler_exception(tu["name"], exc)
             # Surface the failure in the Langfuse UI. v3 way: set the
             # current span's level to ERROR + add a `tool_failed:<name>`
             # tag via propagate_attributes scoped to the failure-handling
@@ -205,7 +394,7 @@ async def _tools_node(state: AgentState) -> dict:
                     )
             except Exception:  # noqa: BLE001
                 pass
-            return {**block, "content": f"Error ejecutando {tu['name']}: {exc}", "is_error": True}
+            return {**block, "content": sanitized, "is_error": True}
 
     # Independent tool calls in a turn run concurrently.
     results = await asyncio.gather(*[_run(tu) for tu in tool_uses])

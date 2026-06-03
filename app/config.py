@@ -63,20 +63,56 @@ class Settings(BaseSettings):
     # workflows (e.g. create N Metabase cards + assemble a dashboard, which
     # needs SQL validation + per-card POST + dashboard POST). The loop
     # terminated mid-write, leaving 'voy a crear las cards...' as final text
-    # with no cards created. 25 leaves headroom for the longest realistic
-    # workflow without giving the LLM unbounded rope.
-    agent_max_iterations: int = 25
+    # with no cards created.
+    #
+    # Bumped 25 -> 35 (2026-06-02) after observing a Simetrik trace where
+    # the agent hit the cap mid-task and ended with `[tool_use]` as the
+    # last assistant block (no final text). The trace had ~50 tool calls
+    # spread across 25 LLM turns -- the new BI training skill made the
+    # agent more exploratory (more "think" turns with fewer tools per
+    # turn), so 25 wasn't enough headroom for a realistic
+    # gong-pull + metabase-query + dashboard-build workflow.
+    #
+    # 35 is the standard ceiling. Anything beyond is still capped to
+    # prevent runaway loops, but ~95th-percentile real workflows fit
+    # inside.
+    agent_max_iterations: int = 35
+
+    # Project-mode ceiling. The runner detects "project-style" prompts
+    # (length + keywords like "presentación", "análisis completo",
+    # "auditoría", "competitive analysis", etc.) and sets this higher
+    # cap on the contextvar for THAT run. Covers the long tail of
+    # Viktor-style "Full Project" workflows (12-page competitive
+    # analysis PDF, multi-source audit) that don't fit in 35 turns.
+    # Loop detection in graph.py protects the higher cap from runaway
+    # cost on buggy skills.
+    agent_max_iterations_project: int = 60
 
     # E2B sandbox (the SDK also reads E2B_API_KEY from the environment).
+    # Sandbox lifetime is measured from creation; 300s (5 min) was the
+    # original default and turned out to be too short for real agent
+    # runs -- on long Simetrik sessions the LLM would do several
+    # composio/slack tool calls between two `run_code` calls, the
+    # E2B VM got reaped during the gap, and the second `run_code`
+    # failed with a 502 "sandbox was not found". 1800s (30 min)
+    # covers the 95th-percentile session; sandbox.py also catches
+    # the reap error and recreates transparently as a safety net.
     e2b_api_key: str | None = None
-    e2b_timeout_seconds: int = 300
+    e2b_timeout_seconds: int = 1800
 
     # Cloudflare R2 (S3-compatible) for artifacts + skill packages.
     r2_account_id: str | None = None
     r2_access_key_id: str | None = None
     r2_secret_access_key: str | None = None
     r2_bucket: str | None = None
-    artifact_url_expiry: int = 3600  # signed-URL lifetime (seconds)
+    # Signed-URL lifetime for R2 artifacts. Bumped from 1h -> 7d on
+    # 2026-06-02: the prior value made shareable links die before the
+    # customer's day was over, and Misterr's primary delivery path now
+    # uploads files DIRECTLY to Slack (see app/agent/sandbox.py) so
+    # this URL is only a fallback for re-reading on later agent turns +
+    # the rare case Slack upload fails. 7d covers multi-day threads
+    # without giving non-Slack consumers an indefinite token.
+    artifact_url_expiry: int = 604800  # 7 days
     # Slack file ingest limits. The per-file generic cap covers images / PDFs /
     # text / audio. Video gets a separate, much larger cap because we don't
     # send the raw video anywhere -- we extract audio (typically <10% of the
@@ -169,6 +205,27 @@ class Settings(BaseSettings):
     # middleware splits on commas. The default covers local dev on the
     # Doppler-configured port 3002.
     frontend_origins: str = "http://localhost:3002,http://localhost:3001"
+
+    # Public base URL of the Misterr web app. Used by the billing
+    # hard-stop message in Slack to deep-link the user to the
+    # billing / upgrade page. Prod overrides this in Doppler;
+    # default targets the public domain so a misconfigured dev
+    # workspace at least points somewhere real.
+    web_base_url: str = "https://misterr.app"
+
+    # Stripe (Slice 2). Both keys are optional so a dev / prd
+    # environment without billing wired up still boots; the webhook
+    # endpoint returns 503 and the stripe_client raises a clear
+    # "billing not configured" error if these are unset. Test mode
+    # keys are fine in prd until we flip to live (Stripe distinguishes
+    # test vs live by key prefix, not environment).
+    stripe_api_key: str | None = None
+    stripe_webhook_secret: str | None = None
+    # Optional: stripe_price_id map keyed by `<plan>_<cycle>` (e.g.
+    # `starter_monthly`). Populated by the setup script and read by
+    # the Checkout endpoint to resolve plan name -> Stripe price.
+    # When unset, the Checkout endpoint won't expose paid tiers.
+    stripe_price_ids_json: str | None = None
 
     # Platform admins for /admin endpoints (slice T-8). Comma-separated
     # emails. A user authenticates with Clerk like everyone else; admin

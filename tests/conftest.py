@@ -35,6 +35,31 @@ os.environ.setdefault("R2_ACCESS_KEY_ID", "test")
 os.environ.setdefault("R2_SECRET_ACCESS_KEY", "test")
 os.environ.setdefault("R2_BUCKET", "test-bucket")
 
+# Hard-isolate Langfuse from the test process. Tests deliberately raise
+# inside patched paths (`RuntimeError("boom")` etc.) to exercise error
+# handling. Without this block, running `doppler run -- pytest` (with
+# prod LANGFUSE_* env vars in scope) sends those fixture exceptions to
+# the prod Langfuse project, polluting telemetry and confusing the
+# dashboards. We unconditionally OVERRIDE (not setdefault) the relevant
+# keys so the SDK initializes as a no-op regardless of host env. Devs
+# wanting to test against a real Langfuse project can opt in by setting
+# `LANGFUSE_TEST_ENABLED=true` before `pytest`.
+if os.environ.get("LANGFUSE_TEST_ENABLED", "").lower() not in ("1", "true", "yes"):
+    # `LANGFUSE_ENABLED=false` disables the SDK entirely (no OTel
+    # exporter init, no background flush). Setting it BEFORE
+    # `langfuse.get_client()` is imported anywhere is mandatory.
+    os.environ["LANGFUSE_ENABLED"] = "false"
+    # Belt-and-braces: also clear the credentials so any code path
+    # that bypasses the enabled-flag check still has no way to
+    # authenticate to prod.
+    for _k in (
+        "LANGFUSE_PUBLIC_KEY",
+        "LANGFUSE_SECRET_KEY",
+        "LANGFUSE_HOST",
+        "LANGFUSE_BASE_URL",
+    ):
+        os.environ[_k] = ""
+
 import uuid  # noqa: E402
 from typing import Any  # noqa: E402
 from unittest.mock import AsyncMock  # noqa: E402

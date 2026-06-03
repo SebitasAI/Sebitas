@@ -39,6 +39,52 @@ log = structlog.get_logger(__name__)
 _langfuse = get_client()
 
 
+# ---------------------------------------------------------------------------
+# Project-mode detector (Tier 3 of the iter-cap protection)
+# ---------------------------------------------------------------------------
+# Big multi-step asks ("competitive analysis us vs X/Y/Z, 12-page PDF",
+# "audita el pipeline + reporte para el CEO") need more iterations than
+# the default cap. The runner detects these from the seed text and pushes
+# a higher cap onto the contextvar that graph.py reads via `_effective_cap`.
+# Keyword-based, not perfect, but cheap and covers the typical phrasings.
+# Combined with loop detection (Tier 2) the higher cap doesn't add cost
+# risk -- runaway loops still get caught.
+
+_PROJECT_KEYWORDS_RE = re.compile(
+    r"\b("
+    r"presentaci[óo]n|"
+    r"an[áa]lisis (?:completo|profundo|exhaustivo|detallado|comparativo)|"
+    r"reporte (?:completo|detallado|ejecutivo|para el board)|"
+    r"informe (?:completo|detallado|ejecutivo)|"
+    r"competitive analysis|an[áa]lisis competitivo|"
+    r"auditor[íi]a|audita(?:r|me)?|"
+    r"investigaci[óo]n (?:profunda|exhaustiva)|"
+    r"dashboard (?:completo|nuevo|de cero|integral)|"
+    r"deck|pitch deck|board deck|"
+    r"benchmark|benchmarking|"
+    r"proyecto"
+    r")\b",
+    re.IGNORECASE,
+)
+_PROJECT_PROMPT_MIN_CHARS = 200
+
+
+def _detect_project_iter_cap(seed_text: str | None) -> int:
+    """Return a per-run iter cap override (settings.agent_max_iterations_project)
+    when the seed looks like a project-scale ask, otherwise 0 (meaning
+    "no override, use the standard cap").
+
+    Heuristic: length threshold (short prompts are never projects) AND
+    at least one project keyword. False positives are cheap (the agent
+    just gets more headroom); false negatives cost us in incomplete
+    runs, so we err generous on the keyword list."""
+    if not seed_text or len(seed_text) < _PROJECT_PROMPT_MIN_CHARS:
+        return 0
+    if not _PROJECT_KEYWORDS_RE.search(seed_text):
+        return 0
+    return get_settings().agent_max_iterations_project
+
+
 # Per-run parent-ref contextvar. Set by callers that own a parent row
 # (scheduler -> scheduled_task; automation router -> automation) BEFORE
 # they call run_agent. At finalize time we read this and stamp the
@@ -1079,6 +1125,38 @@ async def _persist_agent_run(
             finished_at=_dt.now(_tz.utc),
         )
         session.add(run)
+        # Flush so `run.id` is materialized -- the ledger row references
+        # it. Stays in the same transaction as the debit, so a write
+        # failure rolls both back together. Critical: we must NEVER
+        # have an agent_run row without its matching ledger debit, or
+        # the customer effectively used credits we didn't subtract.
+        await session.flush()
+
+        # Debit credits for this run. Skipped for `unlimited` and
+        # `enterprise` plans inside the repo helper. `credits_to_debit`
+        # uses sales_cost_usd at the 1 credit = $0.001 ratio (i.e. *1000).
+        # Failures here are logged but don't roll back the agent_run
+        # row -- delivery has already happened upstream and the customer
+        # got their reply; we'd rather under-bill once than crash a
+        # reply path that already succeeded.
+        try:
+            from app.billing import repository as _billing_repo  # lazy
+            credits_to_debit = sales_cost * 1000.0
+            await _billing_repo.debit_for_agent_run(
+                session,
+                workspace_id=workspace_id,
+                agent_run_id=run.id,
+                sales_cost_usd=sales_cost,
+                credits_to_debit=credits_to_debit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "billing_debit_failed",
+                workspace_id=str(workspace_id),
+                agent_run_id=str(run.id),
+                error=str(exc)[:200],
+            )
+
         await session.commit()
 
 
@@ -1402,6 +1480,48 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
         attachments=attachments_records,
     )
 
+    # Billing pre-flight: block runs for workspaces out of credits. Plans
+    # in BYPASS_CREDIT_CHECK (unlimited, enterprise) trivially pass. We
+    # run this AFTER persisting the user message (so memory + history are
+    # intact for when they upgrade) but BEFORE seed + skills + LLM (so we
+    # don't burn the user's last credits on a run we know we'll block).
+    try:
+        from app.billing import repository as _billing_repo  # lazy
+        from app.billing import slack_messages as _billing_msgs
+        from app.db.session import get_session as _get_session
+        async with _get_session() as _bs:
+            _verdict = await _billing_repo.preflight_check(_bs, workspace_id)
+        if not _verdict.allowed:
+            log.info(
+                "billing_preflight_blocked",
+                workspace_id=str(workspace_id),
+                plan=_verdict.plan,
+                balance=_verdict.balance_credits,
+            )
+            payload = _billing_msgs.out_of_credits_message(
+                _verdict.plan, _verdict.balance_credits
+            )
+            try:
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=reply_thread_ts or user_ts,
+                    text=payload["text"],
+                    blocks=payload["blocks"],
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("billing_preflight_post_failed", error=str(exc)[:200])
+            await _remove_reaction(client, channel, user_ts, reaction_name)
+            return
+    except Exception as exc:  # noqa: BLE001
+        # Pre-flight must NEVER block a workspace because of an
+        # internal error. Log and continue -- worst case we under-bill
+        # this run, never worse than blocking a paying customer.
+        log.warning(
+            "billing_preflight_errored",
+            workspace_id=str(workspace_id),
+            error=str(exc)[:200],
+        )
+
     # Build the seed user content: blocks first (so the model "reads" attachments
     # before the question), then text last. Plain string for the no-attachment path.
     if file_blocks:
@@ -1435,6 +1555,21 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
     identity_text = await _build_calling_user_identity_block(
         workspace_id, slack_user_id
     )
+
+    # Tier 3 of the iter-cap protection: detect "project-style" prompts
+    # (length + keywords). The runner pushes a higher per-run cap onto
+    # the contextvar so genuinely large workflows (12-page competitive
+    # PDFs, multi-source audits) don't terminate mid-tool_use. Loop
+    # detection in graph.py keeps the higher cap from runaway cost.
+    iter_override = _detect_project_iter_cap(full_text)
+    if iter_override:
+        log.info(
+            "agent_run_project_mode",
+            run_id=run_id,
+            cap=iter_override,
+            prompt_chars=len(full_text or ""),
+        )
+
     set_run_context(
         workspace_id=str(workspace_id), run_id=run_id,
         skills_context=skills_context, channel_roster=channel_roster_text,
@@ -1443,6 +1578,7 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
         calling_channel=channel or "",
         calling_conversation_key=conversation_key or "",
         calling_reply_thread_ts=reply_thread_ts or "",
+        agent_max_iter_override=iter_override,
     )
     ctx = {
         "run_id": run_id, "seed_len": len(seed), "team_id": team_id,

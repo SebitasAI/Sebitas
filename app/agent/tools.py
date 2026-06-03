@@ -150,7 +150,31 @@ register(Tool(
 # skill's SKILL.md tells the agent HOW to use these, but ships no code itself.
 # --------------------------------------------------------------------------- #
 
-async def _run_code(code: str) -> str:
+async def _run_code(code: str | None = None, **_extra) -> str:
+    """Wrapper around the sandbox `run_code` tool.
+
+    Defensive against two failure modes observed in production traces:
+
+    1. **Empty `code` argument.** The LLM occasionally emits a tool_use
+       block with `input={}` (no `code` field) -- a model error, not a
+       valid tool call. Without a default, the handler raised
+       `TypeError: _run_code() missing 1 required positional argument`,
+       which the graph caught but surfaced verbatim to the LLM. The
+       LLM then retried with the same empty input, burning iterations
+       (Antiff trace 609ae11250e0, 2026-06-02). We now return a clear
+       error string so the LLM knows what to fix.
+
+    2. **Unexpected extra keys.** Some LLM tool_use blocks include
+       fields the schema doesn't declare (extra metadata, partial
+       schema misunderstanding). `**_extra` absorbs them so the call
+       doesn't raise on unknown kwargs; the actual sandbox run still
+       only sees the validated `code` string."""
+    if not code or not (code.strip()):
+        return (
+            "Error: el parámetro `code` está vacío. Pasá el código Python "
+            "que querés ejecutar (string). Ejemplo: "
+            "`{\"code\": \"import pandas as pd\\nprint(pd.__version__)\"}`."
+        )
     return await _sandbox_run_code(code)
 
 
@@ -346,10 +370,9 @@ async def _disconnect_integration(app: str) -> str:
 register(Tool(
     name="disconnect_integration",
     description=(
-        "Disconnect an integration: deletes the connected account at the provider "
-        "(via Pipedream) and marks it as disconnected for this workspace. "
+        "Disconnect an integration: removes the connection from this workspace. "
         "Idempotent (no-op if not connected). Use when the user says "
-        "'desconectá X / quitá X / sacá la conexión de X / disconnect X'."
+        "'desconecta X / quita X / saca la conexión de X / disconnect X'."
     ),
     input_schema={
         "type": "object",

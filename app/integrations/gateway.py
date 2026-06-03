@@ -276,7 +276,123 @@ def _caller_app_user_id_from_ctx() -> uuid.UUID | None:
 
 
 async def is_connected(workspace_id: uuid.UUID, app: str) -> bool:
-    return await _connection(workspace_id, app) is not None
+    """True iff the workspace has a usable connected row for `app`.
+
+    First checks the local DB. If no `connected` row is found but there
+    IS a prior attempt (any non-connected row for this app), reaches out
+    to the provider once to check whether the account actually exists
+    upstream. If it does, flips the row to connected and returns True.
+
+    Why this self-heals: a Pipedream / Composio OAuth flow can complete
+    successfully upstream while our local DB never finds out -- the
+    inbound webhook can miss for a long list of reasons (signature
+    mismatch, public_base_url pointing at the wrong env, network blip,
+    Pipedream not retrying past 5xx, polling task killed by a deploy
+    mid-flight). Without inline reconciliation the agent stays stuck
+    in a re-prompt loop ("conectá X" → user does it → "conectá X"
+    again next turn). With it, the second turn self-heals.
+
+    The reconciliation is rate-limited to once per `RECONCILE_TTL_SECONDS`
+    per (workspace, app) so chatty agent runs (which call this many
+    times per LLM turn while routing tool calls) don't hammer the
+    provider. The TTL is short enough that "user clicked, returned to
+    Slack" reconciles within the user's next turn."""
+    if await _connection(workspace_id, app) is not None:
+        return True
+    if await _try_reconcile(workspace_id, app):
+        return await _connection(workspace_id, app) is not None
+    return False
+
+
+RECONCILE_TTL_SECONDS = 60.0
+_recent_reconciles: dict[tuple[str, str], float] = {}
+
+
+async def _try_reconcile(workspace_id: uuid.UUID, app: str) -> bool:
+    """Ask the provider whether the account actually exists upstream and
+    flip the local row to `connected` if so. Returns True on a flip,
+    False otherwise. Idempotent + rate-limited. Never raises -- network
+    / provider errors fail closed so the caller still returns its
+    pre-reconciliation answer."""
+    import time as _time
+
+    key = (str(workspace_id), app)
+    now = _time.monotonic()
+    last = _recent_reconciles.get(key, 0.0)
+    if now - last < RECONCILE_TTL_SECONDS:
+        return False
+    _recent_reconciles[key] = now
+
+    # Only bother provider if the workspace previously attempted to
+    # connect this app. A naked `is_connected` against an app the user
+    # never asked for should NOT trigger provider lookups.
+    async with get_session() as session:
+        any_row = (
+            await session.execute(
+                select(IntegrationConnection).where(
+                    IntegrationConnection.workspace_id == workspace_id,
+                    IntegrationConnection.app == app,
+                )
+            )
+        ).scalars().first()
+    if any_row is None:
+        return False
+
+    try:
+        provider, _ = await provider_for_app(workspace_id, app)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "reconcile_provider_resolve_failed", app=app, error=str(exc)[:200]
+        )
+        return False
+    try:
+        accounts = await provider.list_accounts(str(workspace_id))
+    except IntegrationError as e:
+        log.warning(
+            "reconcile_list_accounts_failed",
+            app=app, kind=e.kind, status=e.status,
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "reconcile_list_accounts_errored", app=app, error=str(exc)[:200]
+        )
+        return False
+
+    acc = provider.match_account_for_app(accounts, app)
+    if not acc:
+        return False
+    acc_id = acc.get("id") or acc.get("account_id")
+    if not acc_id:
+        return False
+    try:
+        problems = await provider.validate_connection(str(workspace_id), acc_id)
+    except IntegrationError:
+        return False
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "reconcile_validate_errored", app=app, error=str(exc)[:200]
+        )
+        return False
+    if problems:
+        return False
+
+    # complete() is idempotent: flips status, resumes any paused run.
+    # Same import-inside-fn dance as `list_integrations` to break the
+    # connect.py <-> gateway.py module cycle.
+    from app.integrations import connect as _connect
+    try:
+        await _connect.complete(str(workspace_id), app, acc_id)
+        log.info(
+            "is_connected_reconciled",
+            app=app, workspace_id=str(workspace_id), account_id=acc_id,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "reconcile_complete_failed", app=app, error=str(exc)[:200]
+        )
+        return False
 
 
 async def list_integrations() -> str:

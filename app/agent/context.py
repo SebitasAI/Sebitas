@@ -53,6 +53,15 @@ calling_conversation_key_var: contextvars.ContextVar[str] = contextvars.ContextV
 calling_reply_thread_ts_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "calling_reply_thread_ts", default=""
 )
+# Per-run override of `Settings.agent_max_iterations`. The runner picks
+# the seed text apart: long / project-style prompts (Tier 3 of the
+# iter-cap protection) get a higher ceiling so genuinely large workflows
+# can complete instead of dying mid-tool_use. A value of 0 means
+# "no override, use the settings default". `set_run_context` resets it
+# between runs so a previous project-mode bump can't leak.
+agent_max_iter_var: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "agent_max_iter", default=0
+)
 
 
 def set_run_context(
@@ -66,6 +75,7 @@ def set_run_context(
     calling_channel: str = "",
     calling_conversation_key: str = "",
     calling_reply_thread_ts: str = "",
+    agent_max_iter_override: int = 0,
 ) -> None:
     workspace_id_var.set(workspace_id)
     app_user_id_var.set(app_user_id)
@@ -76,3 +86,4 @@ def set_run_context(
     calling_channel_var.set(calling_channel)
     calling_conversation_key_var.set(calling_conversation_key)
     calling_reply_thread_ts_var.set(calling_reply_thread_ts)
+    agent_max_iter_var.set(agent_max_iter_override)

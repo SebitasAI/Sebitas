@@ -1,4 +1,6 @@
 import Link from "next/link";
+
+import { APP_SIGN_UP_URL } from "@/lib/app-url";
 import Header from "./Header";
 import Testimonials from "./Testimonials";
 import WhatMisterrDoes from "./WhatMisterrDoes";
@@ -53,7 +55,7 @@ const SlackIcon = () => (
 );
 
 const GetStartedFree = () => (
-  <Link href="/signup" className="group flex items-center shrink-0">
+  <Link href={APP_SIGN_UP_URL} className="group flex items-center shrink-0">
     <div className="flex h-[48px] flex-col items-start justify-center rounded-[12px] bg-[#626262] pb-[4px] shrink-0 transition-transform active:translate-y-[2px] group-hover:bg-[#cfcfcf]">
       <div className="flex flex-[1_0_0] min-h-px min-w-[119px] items-center justify-center gap-[10px] rounded-[12px] bg-[#191919] px-[17.58px] transition-colors group-hover:bg-white">
         <SlackIcon />

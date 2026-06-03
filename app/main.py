@@ -25,6 +25,7 @@ from app.api.integrations import router as integrations_router
 from app.api.admin import router as admin_router
 from app.api.automations import router as automations_router
 from app.api.scheduled_tasks import router as scheduled_tasks_router
+from app.api.billing import router as billing_api_router
 from app.api.skills import router as skills_router
 from app.api.usage import router as usage_router
 from app.api.team import router as team_router
@@ -32,6 +33,7 @@ from app.auth.clerk_provisioning import provision_and_backfill_all_workspaces
 from app.integrations.webhook import router as pipedream_webhook_router
 from app.logging import configure_logging
 from app.automations.webhooks import router as automation_webhooks_router
+from app.billing.webhooks import router as billing_webhooks_router
 from app.memory.compaction import run_compaction_loop as run_memory_compaction_loop
 from app.follow_ups.worker import run_follow_up_loop
 from app.follow_ups.integration_sweeper import run_integration_sweep_loop
@@ -162,6 +164,14 @@ async def lifespan(_: FastAPI):
         # `## Usage notes` section across refreshes.
         catalog_sweep_task = asyncio.create_task(run_catalog_sweep_loop())
 
+        # Billing monthly reset (Slice 2). Annual subs only fire one
+        # Stripe invoice per year; this loop fills in the 11 intermediate
+        # months by resetting credit balances ~once every 30 days per
+        # active annual workspace. Monthly subs ride the
+        # invoice.payment_succeeded webhook in `webhook_handlers.py`.
+        from app.billing.monthly_reset import run_monthly_reset_loop
+        billing_reset_task = asyncio.create_task(run_monthly_reset_loop())
+
         # Clerk Organizations backfill (slice T-5). Idempotent: for each
         # installed workspace without a clerk_org_id, provision one and
         # link existing AppUsers as members. Once all rows are linked this
@@ -187,6 +197,7 @@ async def lifespan(_: FastAPI):
             follow_up_task.cancel()
             integration_sweep_task.cancel()
             catalog_sweep_task.cancel()
+            billing_reset_task.cancel()
             try:
                 await handler.close_async()
             except Exception as exc:  # noqa: BLE001
@@ -218,7 +229,9 @@ app.include_router(web_api_router)
 app.include_router(scheduled_tasks_router)
 app.include_router(automations_router)
 app.include_router(automation_webhooks_router)
+app.include_router(billing_webhooks_router)
 app.include_router(usage_router)
+app.include_router(billing_api_router)
 app.include_router(skills_router)
 app.include_router(admin_router)
 app.include_router(team_router)

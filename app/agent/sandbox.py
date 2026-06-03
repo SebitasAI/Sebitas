@@ -1,17 +1,46 @@
 """E2B code sandbox, one per agent run (keyed by run_id), reused across all
 run_code calls in that run and destroyed when the run ends. Never shared across
-runs or tenants. Files written to OUTPUT_DIR are uploaded to R2 under the
-workspace prefix and returned as signed links.
+runs or tenants.
+
+Artifacts (files written to OUTPUT_DIR) are handled in two layers:
+
+1. **Slack upload** (user-facing). When the run has Slack thread context
+   (channel + thread_ts in contextvars), every artifact is uploaded to
+   Slack via files_upload_v2 directly into the user's thread. Slack
+   hosts files indefinitely -- no expiration -- and the customer sees
+   a native file preview right in the conversation. The tool result
+   tells the LLM "I posted these files to Slack" so the LLM has no
+   reason to hallucinate a download link.
+
+2. **R2 backup** (system-facing). Same bytes are also uploaded to R2
+   under the workspace prefix so future agent runs can re-read the
+   artifact via signed URL (used for attachment re-hydration in
+   `app/slack/files.py`). Signed URL lifetime bumped from 1h to 7d
+   (see `Settings.artifact_url_expiry`) so threads spanning a few days
+   don't break.
+
+When Slack context is missing (non-Slack invocations: maybe a future
+CLI / API path), we fall back to surfacing the R2 signed URL in the
+tool result. That keeps the local-dev flow working without Slack.
 """
 
 from __future__ import annotations
 
+import uuid as _uuid
+
 import structlog
 from e2b_code_interpreter import AsyncSandbox
+from slack_sdk.web.async_client import AsyncWebClient
 
-from app.agent.context import run_id_var, workspace_id_var
+from app.agent.context import (
+    calling_channel_var,
+    calling_reply_thread_ts_var,
+    run_id_var,
+    workspace_id_var,
+)
 from app.artifacts import r2
 from app.config import get_settings
+from app.slack.tokens import get_bot_token_by_workspace
 
 log = structlog.get_logger(__name__)
 
@@ -42,6 +71,18 @@ async def _get_sandbox(run_id: str) -> AsyncSandbox:
     return sbx
 
 
+def _is_sandbox_gone(exc: Exception) -> bool:
+    """The E2B server returns 502 + 'sandbox was not found' when the
+    underlying VM has timed out and been reaped. We want to recreate
+    transparently in that case, not bubble the error up to the LLM
+    (which sees an opaque traceback and starts looping). The textual
+    match is intentional: TimeoutException is raised for any 5xx, so
+    we need a content check to distinguish 'reaped' from 'genuinely
+    unavailable, retry later'."""
+    msg = str(exc).lower()
+    return "sandbox was not found" in msg or "sandbox not found" in msg
+
+
 async def close_run_sandbox(run_id: str) -> None:
     sbx = _sandboxes.pop(run_id, None)
     if sbx is not None:
@@ -52,40 +93,165 @@ async def close_run_sandbox(run_id: str) -> None:
             log.warning("sandbox_close_failed", run_id=run_id, error=str(exc))
 
 
-async def _collect_artifacts(sbx: AsyncSandbox, run_id: str, workspace_id: str) -> list[str]:
+async def _slack_client_for_workspace(workspace_id: str) -> AsyncWebClient | None:
+    """Build an AsyncWebClient with the workspace's bot token, or None
+    if we can't (no workspace context, no install, decryption failed).
+    Used by `_collect_artifacts` to upload files directly to the
+    user's Slack thread without going through R2 presigned URLs."""
+    if not workspace_id:
+        return None
+    try:
+        ws_uuid = _uuid.UUID(workspace_id)
+    except (ValueError, TypeError):
+        return None
+    pair = await get_bot_token_by_workspace(ws_uuid)
+    if pair is None:
+        return None
+    return AsyncWebClient(token=pair[0])
+
+
+async def _collect_artifacts(sbx: AsyncSandbox, run_id: str, workspace_id: str) -> str:
+    """Walk OUTPUT_DIR, upload each file to Slack (and R2 backup),
+    return a single text block summarising what was posted.
+
+    Returns "" if there are no artifacts -- caller treats that as
+    "no artifact section to append" rather than an empty 'Artifacts:'
+    header.
+
+    Critical behavior: the returned text intentionally does NOT
+    include R2 signed URLs when Slack upload succeeds. The LLM uses
+    this text to write its final user-facing reply; if URLs were
+    included, the LLM sometimes copies them ("aquí el link") AND the
+    Slack file is already in the thread -- duplication + the URL is
+    7-day expiring, worse than the Slack-hosted file. By telling the
+    LLM "I posted these to Slack" without exposing a URL, the final
+    reply naturally points at the Slack file ("subí el PDF arriba")
+    instead of fabricating a download link."""
     try:
         entries = await sbx.files.list(OUTPUT_DIR)
     except Exception:
-        return []
-    links: list[str] = []
+        return ""
+
+    slack_channel = calling_channel_var.get() or ""
+    slack_thread_ts = calling_reply_thread_ts_var.get() or ""
+    slack_client = (
+        await _slack_client_for_workspace(workspace_id)
+        if slack_channel
+        else None
+    )
+
+    posted_to_slack: list[str] = []
+    r2_only_links: list[str] = []
+
     for entry in entries:
         path = getattr(entry, "path", None) or f"{OUTPUT_DIR}/{getattr(entry, 'name', '')}"
         name = getattr(entry, "name", path.rsplit("/", 1)[-1])
         try:
             data = await sbx.files.read(path, format="bytes")
         except Exception:
-            continue  # likely a directory
+            # Usually a directory, sometimes a binary the SDK refuses
+            # to deliver. Either way: skip and continue.
+            continue
+
+        # R2 upload (backup for re-hydration on later agent turns).
+        # Best-effort: a failed R2 upload doesn't break Slack delivery.
         key = f"{workspace_id}/{run_id}/{name}"
         try:
-            url = await r2.upload_and_sign(key, data, _content_type(name))
-            links.append(f"• {name}: {url}")
+            await r2.put_bytes(key, data, _content_type(name))
         except Exception as exc:  # noqa: BLE001
-            log.warning("artifact_upload_failed", name=name, error=str(exc))
-    return links
+            log.warning("artifact_r2_upload_failed", name=name, error=str(exc))
+
+        # Slack upload (user-facing, permanent).
+        slack_ok = False
+        if slack_client is not None:
+            try:
+                upload_kwargs: dict = {
+                    "channel": slack_channel,
+                    "content": data,
+                    "filename": name,
+                    "title": name,
+                }
+                if slack_thread_ts:
+                    upload_kwargs["thread_ts"] = slack_thread_ts
+                resp = await slack_client.files_upload_v2(**upload_kwargs)
+                if isinstance(resp, dict):
+                    slack_ok = bool(resp.get("ok"))
+                else:
+                    slack_ok = bool(getattr(resp, "data", {}).get("ok", True))
+                if not slack_ok:
+                    err = (
+                        resp.get("error") if isinstance(resp, dict) else "unknown"
+                    )
+                    log.warning(
+                        "slack_artifact_upload_rejected", name=name, error=err
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "slack_artifact_upload_failed", name=name, error=str(exc)
+                )
+
+        if slack_ok:
+            posted_to_slack.append(name)
+        else:
+            # Fallback to R2 signed URL when Slack upload didn't land.
+            # The LLM may include this URL in its reply -- acceptable
+            # because there's no Slack file otherwise.
+            try:
+                url = await r2.presigned_get(key)
+                r2_only_links.append(f"• {name}: {url}")
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "artifact_presign_failed", name=name, error=str(exc)
+                )
+
+    parts: list[str] = []
+    if posted_to_slack:
+        parts.append(
+            "Subí los siguientes archivos al thread de Slack (permanentes, "
+            "sin expiración, ya visibles para el usuario):\n"
+            + "\n".join(f"• {n}" for n in posted_to_slack)
+            + "\n\nNo construyas un link de descarga en tu respuesta -- el "
+            "archivo ya está adjunto en el thread. Solo refierete a él por "
+            "nombre."
+        )
+    if r2_only_links:
+        parts.append(
+            "Links firmados de descarga (válidos 7 días) -- el upload directo "
+            "a Slack no funcionó para estos archivos:\n"
+            + "\n".join(r2_only_links)
+        )
+    return "\n\n".join(parts)
 
 
 async def run_code(code: str) -> str:
     """Run Python in the current run's isolated sandbox; upload any files written
-    to OUTPUT_DIR to R2 and return logs + signed artifact links."""
+    to OUTPUT_DIR to Slack (with an R2 backup) and return logs + a summary."""
     run_id = run_id_var.get()
     workspace_id = workspace_id_var.get()
     if not run_id or not workspace_id:
         return "Error: no hay contexto de run/workspace para ejecutar código."
 
     sbx = await _get_sandbox(run_id)
-    execution = await sbx.run_code(code)
+    recreated = False
+    try:
+        execution = await sbx.run_code(code)
+    except Exception as exc:  # noqa: BLE001
+        if not _is_sandbox_gone(exc):
+            raise
+        log.warning("sandbox_reaped_recreating", run_id=run_id, error=str(exc))
+        _sandboxes.pop(run_id, None)
+        sbx = await _get_sandbox(run_id)
+        recreated = True
+        execution = await sbx.run_code(code)
 
     parts: list[str] = []
+    if recreated:
+        parts.append(
+            "Nota: el sandbox anterior expiró (E2B reapea tras inactividad) "
+            "y se creó uno nuevo. Variables, archivos y paquetes instalados "
+            "en llamadas previas a run_code se perdieron. Si tu código "
+            "depende de estado previo, recréalo en este bloque."
+        )
     if execution.error:
         parts.append(f"ERROR {execution.error.name}: {execution.error.value}")
     stdout = "".join(execution.logs.stdout) if execution.logs and execution.logs.stdout else ""
@@ -95,9 +261,15 @@ async def run_code(code: str) -> str:
     if stderr:
         parts.append(f"stderr:\n{stderr.strip()}")
 
-    links = await _collect_artifacts(sbx, run_id, workspace_id)
-    if links:
-        parts.append("Artifacts (links firmados):\n" + "\n".join(links))
+    artifact_summary = await _collect_artifacts(sbx, run_id, workspace_id)
+    if artifact_summary:
+        parts.append(artifact_summary)
 
-    log.info("run_code_done", run_id=run_id, artifacts=len(links), error=bool(execution.error))
+    log.info(
+        "run_code_done",
+        run_id=run_id,
+        has_artifacts=bool(artifact_summary),
+        recreated=recreated,
+        error=bool(execution.error),
+    )
     return "\n\n".join(parts) or "(ejecución sin salida)"

@@ -3,12 +3,13 @@ import Header from "../Header";
 import Footer from "../Footer";
 import PriceCalculator from "./PriceCalculator";
 import CreditsValue from "./CreditsValue";
+import TierLadder from "./TierLadder";
 import Faq from "./Faq";
 
 export const metadata: Metadata = {
   title: "Pricing | Misterr",
   description:
-    "Usage-based pricing for Misterr. Estimate your monthly credits and cost with the interactive calculator.",
+    "Misterr pricing: empezá gratis con 50,000 créditos/mes. Pagás $1 por cada 1,000 créditos. Sin per-user, sin sorpresas.",
 };
 
 export default function PricingPage() {
@@ -22,8 +23,8 @@ export default function PricingPage() {
           Pricing that scales with you
         </h1>
         <p className="max-w-[560px] font-[family-name:var(--font-inter)] text-[18px] font-medium leading-[1.45] tracking-[-0.4px] text-[#626262]">
-          Pay only for what Misterr actually does. $2.50 per 1,000 credits. Move
-          the slider to estimate your month.
+          Empezá gratis con 50,000 créditos al mes. Pagás $1 por cada 1,000
+          créditos extra. Sin per-user, sin sorpresas.
         </p>
       </section>
 
@@ -31,6 +32,9 @@ export default function PricingPage() {
       <section className="flex w-full flex-col items-center bg-white px-[24px] pb-[60px] pt-[16px]">
         <PriceCalculator />
       </section>
+
+      {/* 5-tier ladder + Enterprise */}
+      <TierLadder />
 
       {/* What your credits get done */}
       <CreditsValue />
