@@ -39,6 +39,52 @@ log = structlog.get_logger(__name__)
 _langfuse = get_client()
 
 
+# ---------------------------------------------------------------------------
+# Project-mode detector (Tier 3 of the iter-cap protection)
+# ---------------------------------------------------------------------------
+# Big multi-step asks ("competitive analysis us vs X/Y/Z, 12-page PDF",
+# "audita el pipeline + reporte para el CEO") need more iterations than
+# the default cap. The runner detects these from the seed text and pushes
+# a higher cap onto the contextvar that graph.py reads via `_effective_cap`.
+# Keyword-based, not perfect, but cheap and covers the typical phrasings.
+# Combined with loop detection (Tier 2) the higher cap doesn't add cost
+# risk -- runaway loops still get caught.
+
+_PROJECT_KEYWORDS_RE = re.compile(
+    r"\b("
+    r"presentaci[óo]n|"
+    r"an[áa]lisis (?:completo|profundo|exhaustivo|detallado|comparativo)|"
+    r"reporte (?:completo|detallado|ejecutivo|para el board)|"
+    r"informe (?:completo|detallado|ejecutivo)|"
+    r"competitive analysis|an[áa]lisis competitivo|"
+    r"auditor[íi]a|audita(?:r|me)?|"
+    r"investigaci[óo]n (?:profunda|exhaustiva)|"
+    r"dashboard (?:completo|nuevo|de cero|integral)|"
+    r"deck|pitch deck|board deck|"
+    r"benchmark|benchmarking|"
+    r"proyecto"
+    r")\b",
+    re.IGNORECASE,
+)
+_PROJECT_PROMPT_MIN_CHARS = 200
+
+
+def _detect_project_iter_cap(seed_text: str | None) -> int:
+    """Return a per-run iter cap override (settings.agent_max_iterations_project)
+    when the seed looks like a project-scale ask, otherwise 0 (meaning
+    "no override, use the standard cap").
+
+    Heuristic: length threshold (short prompts are never projects) AND
+    at least one project keyword. False positives are cheap (the agent
+    just gets more headroom); false negatives cost us in incomplete
+    runs, so we err generous on the keyword list."""
+    if not seed_text or len(seed_text) < _PROJECT_PROMPT_MIN_CHARS:
+        return 0
+    if not _PROJECT_KEYWORDS_RE.search(seed_text):
+        return 0
+    return get_settings().agent_max_iterations_project
+
+
 # Per-run parent-ref contextvar. Set by callers that own a parent row
 # (scheduler -> scheduled_task; automation router -> automation) BEFORE
 # they call run_agent. At finalize time we read this and stamp the
@@ -1435,6 +1481,21 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
     identity_text = await _build_calling_user_identity_block(
         workspace_id, slack_user_id
     )
+
+    # Tier 3 of the iter-cap protection: detect "project-style" prompts
+    # (length + keywords). The runner pushes a higher per-run cap onto
+    # the contextvar so genuinely large workflows (12-page competitive
+    # PDFs, multi-source audits) don't terminate mid-tool_use. Loop
+    # detection in graph.py keeps the higher cap from runaway cost.
+    iter_override = _detect_project_iter_cap(full_text)
+    if iter_override:
+        log.info(
+            "agent_run_project_mode",
+            run_id=run_id,
+            cap=iter_override,
+            prompt_chars=len(full_text or ""),
+        )
+
     set_run_context(
         workspace_id=str(workspace_id), run_id=run_id,
         skills_context=skills_context, channel_roster=channel_roster_text,
@@ -1443,6 +1504,7 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
         calling_channel=channel or "",
         calling_conversation_key=conversation_key or "",
         calling_reply_thread_ts=reply_thread_ts or "",
+        agent_max_iter_override=iter_override,
     )
     ctx = {
         "run_id": run_id, "seed_len": len(seed), "team_id": team_id,

@@ -63,9 +63,30 @@ class Settings(BaseSettings):
     # workflows (e.g. create N Metabase cards + assemble a dashboard, which
     # needs SQL validation + per-card POST + dashboard POST). The loop
     # terminated mid-write, leaving 'voy a crear las cards...' as final text
-    # with no cards created. 25 leaves headroom for the longest realistic
-    # workflow without giving the LLM unbounded rope.
-    agent_max_iterations: int = 25
+    # with no cards created.
+    #
+    # Bumped 25 -> 35 (2026-06-02) after observing a Simetrik trace where
+    # the agent hit the cap mid-task and ended with `[tool_use]` as the
+    # last assistant block (no final text). The trace had ~50 tool calls
+    # spread across 25 LLM turns -- the new BI training skill made the
+    # agent more exploratory (more "think" turns with fewer tools per
+    # turn), so 25 wasn't enough headroom for a realistic
+    # gong-pull + metabase-query + dashboard-build workflow.
+    #
+    # 35 is the standard ceiling. Anything beyond is still capped to
+    # prevent runaway loops, but ~95th-percentile real workflows fit
+    # inside.
+    agent_max_iterations: int = 35
+
+    # Project-mode ceiling. The runner detects "project-style" prompts
+    # (length + keywords like "presentación", "análisis completo",
+    # "auditoría", "competitive analysis", etc.) and sets this higher
+    # cap on the contextvar for THAT run. Covers the long tail of
+    # Viktor-style "Full Project" workflows (12-page competitive
+    # analysis PDF, multi-source audit) that don't fit in 35 turns.
+    # Loop detection in graph.py protects the higher cap from runaway
+    # cost on buggy skills.
+    agent_max_iterations_project: int = 60
 
     # E2B sandbox (the SDK also reads E2B_API_KEY from the environment).
     e2b_api_key: str | None = None
