@@ -199,9 +199,47 @@ class PipedreamProvider(IntegrationProvider):
         return await self._call(pd.create_connect_token(external_user_id, webhook_uri=webhook_uri))
 
     def match_account_for_app(self, accounts: list[dict], app: str) -> dict | None:
+        """Map an upstream account back to the workspace's app slug.
+
+        Pipedream stores accounts under their **canonical** name_slug
+        (e.g. `salesforce_rest_api`, `google_sheets`, `hubspot_v3`). The
+        user, however, typically asks "conectar salesforce" -- short
+        slug. `create_connect_token` already calls `resolve_app_slug`
+        so the OAuth flow lands in the right Pipedream app, but the
+        resulting account upstream keeps the canonical compound slug.
+        Without a matching lookup, the poll fallback (and
+        `is_connected`'s reconciler) can't find the account it just
+        created.
+
+        Match in three passes, picking the first hit:
+          1. Exact `name_slug` / `name` == user slug.
+          2. Prefix: `<user_slug>_*` (handles `salesforce` ->
+             `salesforce_rest_api`, `google` -> `google_sheets`, etc.).
+          3. Token: `<user_slug>` appears as a `_`-separated token
+             anywhere in the canonical slug.
+
+        Stays sync so we don't reshape every caller's signature; the
+        resolver's network round-trip isn't needed here because we
+        already have the account list in memory."""
+        needle = (app or "").lower().strip()
+        if not needle:
+            return None
+        # Pass 1: exact (cheap, covers slugs that don't need resolving).
         for a in accounts:
             ao = a.get("app") or {}
             if (ao.get("name_slug") or ao.get("name")) == app:
+                return a
+        # Pass 2: `<app>_*` -- compound slug starting with the user slug.
+        for a in accounts:
+            ao = a.get("app") or {}
+            ns = (ao.get("name_slug") or "").lower()
+            if ns.startswith(needle + "_"):
+                return a
+        # Pass 3: `<app>` as one of the canonical slug's tokens.
+        for a in accounts:
+            ao = a.get("app") or {}
+            ns = (ao.get("name_slug") or "").lower()
+            if needle in ns.split("_"):
                 return a
         return None
 
