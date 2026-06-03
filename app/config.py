@@ -213,6 +213,20 @@ class Settings(BaseSettings):
     # workspace at least points somewhere real.
     web_base_url: str = "https://misterr.app"
 
+    # Stripe (Slice 2). Both keys are optional so a dev / prd
+    # environment without billing wired up still boots; the webhook
+    # endpoint returns 503 and the stripe_client raises a clear
+    # "billing not configured" error if these are unset. Test mode
+    # keys are fine in prd until we flip to live (Stripe distinguishes
+    # test vs live by key prefix, not environment).
+    stripe_api_key: str | None = None
+    stripe_webhook_secret: str | None = None
+    # Optional: stripe_price_id map keyed by `<plan>_<cycle>` (e.g.
+    # `starter_monthly`). Populated by the setup script and read by
+    # the Checkout endpoint to resolve plan name -> Stripe price.
+    # When unset, the Checkout endpoint won't expose paid tiers.
+    stripe_price_ids_json: str | None = None
+
     # Platform admins for /admin endpoints (slice T-8). Comma-separated
     # emails. A user authenticates with Clerk like everyone else; admin
     # status is a separate check against this list (case-insensitive
