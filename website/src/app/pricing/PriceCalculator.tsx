@@ -2,26 +2,30 @@
 
 import { useState } from "react";
 
-// TODO pricing: the $2.50 / 1,000-credit rate is copied from a competitor as a starting point (v1).
-// The real cost to serve and the credits-per-task amount are NOT confirmed. Validate with real data
-// before treating these numbers as final. The 50 credits/task default is a placeholder.
+// Pricing math derives from the same source-of-truth as the runtime billing
+// system (see app/billing/plans.py). 1 credit = $0.001 USD sales price; 5x
+// markup on real LLM cost lands at 80% gross margin.
+//
+// Slider range covers Free floor (50,000 credits = $50 sales value, given
+// away) all the way to Business ceiling (10M credits = $10,000/mo). Anything
+// above that is Enterprise (contract, no slider).
 
 // ── Pricing model (tweak here, in one place) ────────────────────────────────
 const CONFIG = {
-  costPerCredit: 0.0025, // USD per credit ($2.50 per 1,000 credits)
-  ratePer1000: 2.5, // USD per 1,000 credits (display)
+  costPerCredit: 0.001, // USD per credit ($1.00 per 1,000 credits)
+  ratePer1000: 1.0, // USD per 1,000 credits (display)
   included: {
-    usd: 50, // included in the base plan / mo
-    credits: 20000, // included credits / mo
+    usd: 50, // value of the perpetual Free tier / mo
+    credits: 50000, // Free tier credits / mo (matches FREE_TIER_CREDITS_PER_MONTH)
   },
   slider: {
-    min: 20000,
-    max: 2000000,
-    step: 10000,
-    initial: 40000,
+    min: 50000, // = Free tier ceiling
+    max: 10000000, // = Business tier ceiling
+    step: 50000,
+    initial: 200000, // ~= mid-Starter, the most likely "I'm exploring" landing
   },
   defaultCreditsPerTask: 50, // placeholder, sets the margin, not the rate
-  salesHref: "#enterprise", // contact / sales flow (Enterprise)
+  salesHref: "mailto:sales@misterr.ai?subject=Misterr%20Enterprise",
 };
 
 // en-US thousands separator, always integers.
