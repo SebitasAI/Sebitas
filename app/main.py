@@ -25,6 +25,7 @@ from app.api.integrations import router as integrations_router
 from app.api.admin import router as admin_router
 from app.api.automations import router as automations_router
 from app.api.scheduled_tasks import router as scheduled_tasks_router
+from app.api.billing import router as billing_api_router
 from app.api.skills import router as skills_router
 from app.api.usage import router as usage_router
 from app.api.team import router as team_router
@@ -230,6 +231,7 @@ app.include_router(automations_router)
 app.include_router(automation_webhooks_router)
 app.include_router(billing_webhooks_router)
 app.include_router(usage_router)
+app.include_router(billing_api_router)
 app.include_router(skills_router)
 app.include_router(admin_router)
 app.include_router(team_router)
