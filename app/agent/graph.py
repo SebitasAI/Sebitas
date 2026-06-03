@@ -21,6 +21,48 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from app.agent.claude import call_claude
+
+
+# --------------------------------------------------------------------------- #
+# Tool failure sanitization (Capa 1 — structural confidentiality)
+# --------------------------------------------------------------------------- #
+
+# Sanitized message returned to the LLM whenever a tool handler raises an
+# exception. The full exception + class + tool name are preserved in logs
+# and Langfuse for debugging, but NEVER appear in the tool_result string
+# the LLM consumes. This is structural defense: the LLM cannot leak
+# internal infra ("sandbox", "broker returned 500", "code execution
+# environment is down") to the end user when it doesn't have that info
+# in its context window in the first place.
+#
+# Why a single neutral string for all exceptions: the alternative
+# (per-exception-type messages) gives the LLM enough signal to invent a
+# narrative around the failure ("the database is slow", "the auth
+# expired"). The whole point is to NOT give it that signal -- the LLM
+# should plan its next move from the FACT that it failed, not from the
+# WHY. The user is in control of the retry, not the LLM forecasting an
+# infra recovery.
+_SANITIZED_FAILURE_MESSAGE = (
+    "No pude completar esta acción ahora mismo. "
+    "Avísame cuando quieras que reintente."
+)
+
+
+def _sanitize_handler_exception(
+    tool_name: str, exc: BaseException, *, logger=None
+) -> str:
+    """Convert a tool handler exception into a user-safe, LLM-safe
+    string. Full exception detail is logged for debugging (structlog +
+    Langfuse span level=ERROR set by the caller); the return value is
+    a fixed neutral message with no tool name, no exception class, no
+    stacktrace, no infra terminology."""
+    (logger or log).warning(
+        "tool_handler_exception_sanitized",
+        tool=tool_name,
+        error_class=type(exc).__name__,
+        error=str(exc)[:400],
+    )
+    return _SANITIZED_FAILURE_MESSAGE
 import json
 
 from app.agent.context import agent_max_iter_var, workspace_id_var
@@ -261,7 +303,13 @@ async def _tools_node(state: AgentState) -> dict:
         tool = get_tool(tu["name"])
         block = {"type": "tool_result", "tool_use_id": tu["id"]}
         if tool is None:
-            return {**block, "content": f"Error: tool desconocida {tu['name']!r}", "is_error": True}
+            # Tool registry miss -- the model invoked something we don't
+            # expose. Log the offending name for diagnostics but DO NOT
+            # echo it back to the LLM (which would feed straight into a
+            # user-visible "I tried to call run_code but it doesn't
+            # exist" leak).
+            log.warning("tool_unknown_sanitized", requested=tu.get("name"))
+            return {**block, "content": _SANITIZED_FAILURE_MESSAGE, "is_error": True}
         if risk[tu["id"]] and decision != "approve":
             return {**block, "content": "Rechazado por el usuario; no se ejecutó."}
         # Tier 2: loop detection. Refuse to execute the same (name, input)
@@ -327,7 +375,12 @@ async def _tools_node(state: AgentState) -> dict:
                     span.update(output=result)
             return {**block, "content": result}
         except Exception as exc:  # noqa: BLE001
-            log.warning("tool_failed", tool=tu["name"], error=str(exc))
+            # Capa 1 sanitization: the raw exception (which may contain
+            # provider names, container/sandbox identifiers, stack
+            # traces, etc.) NEVER reaches the LLM. The neutral
+            # `_SANITIZED_FAILURE_MESSAGE` does; the full exception
+            # is kept in structlog + Langfuse for debugging.
+            sanitized = _sanitize_handler_exception(tu["name"], exc)
             # Surface the failure in the Langfuse UI. v3 way: set the
             # current span's level to ERROR + add a `tool_failed:<name>`
             # tag via propagate_attributes scoped to the failure-handling
@@ -341,7 +394,7 @@ async def _tools_node(state: AgentState) -> dict:
                     )
             except Exception:  # noqa: BLE001
                 pass
-            return {**block, "content": f"Error ejecutando {tu['name']}: {exc}", "is_error": True}
+            return {**block, "content": sanitized, "is_error": True}
 
     # Independent tool calls in a turn run concurrently.
     results = await asyncio.gather(*[_run(tu) for tu in tool_uses])
