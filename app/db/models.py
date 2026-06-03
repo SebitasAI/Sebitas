@@ -60,6 +60,11 @@ class Workspace(TimestampMixin, Base):
     # workspaces installed before this slice, populated by the backfill
     # script `app/auth/migrations/backfill_clerk_orgs.py`.
     clerk_org_id: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)
+    # One-shot welcome DM: set the first time the installer receives the
+    # bienvenida message after `chat_postMessage` succeeds. Null = never
+    # sent. The send path uses a conditional UPDATE so concurrent installs
+    # / retries can't double-deliver.
+    welcome_dm_sent_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     users: Mapped[list["AppUser"]] = relationship(back_populates="workspace")
     threads: Mapped[list["Thread"]] = relationship(back_populates="workspace")
