@@ -14,3 +14,17 @@ export const APP_URL =
 
 export const APP_SIGN_IN_URL = `${APP_URL}/sign-in`;
 export const APP_SIGN_UP_URL = `${APP_URL}/sign-up`;
+
+// Google Calendar Appointment Scheduling page for sales chats. Every
+// "Talk to sales" / "Hablar con sales" CTA across the marketing site
+// links here (opened in a new tab via target="_blank"). Replaces the
+// previous `mailto:sales@misterr.ai` flow.
+//
+// Override via NEXT_PUBLIC_BOOK_SALES_URL if/when we move off Google
+// Calendar (e.g. to Cal.com or Calendly). The Google URL doubles as
+// a popup-style booking widget when clicked, so we don't need to
+// embed Google's script tag globally -- the URL alone gives the same
+// scheduling UX in a new tab.
+export const BOOK_SALES_URL =
+  process.env.NEXT_PUBLIC_BOOK_SALES_URL ??
+  "https://calendar.google.com/calendar/appointments/schedules/AcZssZ3YyieoxXJ31fHz8KGKaCY46XrQFcs9xtbNRuVqiy3hIRuHOTcN8m7ERXgIWmNS2N6EVyYsaZ0N?gv=true";
