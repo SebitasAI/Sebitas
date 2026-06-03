@@ -17,8 +17,7 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: "What happens when I run out of credits?",
-    a: "Misterr pauses new work until you top up, so you never get a surprise bill. You can buy more credits at the same flat rate or upgrade your plan anytime, and Misterr picks right back up.",
-    // TODO: confirm the actual end-of-credits UX (hard stop vs. finish-current-task-then-pause). Copy must match real behavior.
+    a: "Misterr stops responding to new messages until your next monthly reset, and it posts a Slack message with a link to upgrade your plan. No surprise bills, no automatic top-ups: you only pay for the plan you're on. Free tier resets to 50,000 credits at the start of each month.",
   },
   {
     q: "Do unused credits roll over?",
@@ -34,11 +33,11 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: "How does billing work?",
-    a: "Billing is monthly. You're charged at the start of each cycle for your plan's credits.",
+    a: "Pick monthly or annual. Monthly bills you at the start of each cycle; annual is paid upfront with a 20% discount and credits reset every month inside the year. Credits don't roll over.",
   },
   {
     q: "How much does a credit cost?",
-    a: "Every credit costs the same flat rate, with no hidden tiers and no pricing games. (Large teams and high-volume customers get custom volume pricing. See Enterprise below.)",
+    a: "$1.00 per 1,000 credits, the same flat rate across all plans. Anual subscriptions get 20% off. (Large teams and high-volume customers get custom volume pricing. See Enterprise below.)",
   },
   {
     q: "Is there a per-seat charge?",
@@ -66,9 +65,8 @@ const FAQS: { q: string; a: string }[] = [
     a: "Every integration we offer is included on all plans at no extra cost. Don't see the tool you use? Request it and we'll prioritize it.",
   },
   {
-    q: "Is the free trial really free?",
-    a: "Yes. You can get started for free, no credit card required.",
-    // TODO: define the exact free offering (how many credits / how long) and update this answer to match.
+    q: "Is the free tier really free?",
+    a: "Yes, and it's perpetual: 50,000 credits per month, no credit card, no time limit. Use it as long as you want; upgrade only when you outgrow it.",
   },
   {
     q: "Can I cancel anytime?",
