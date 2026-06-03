@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useRef, useState } from "react";
 import type { ReactNode } from "react";
 
+import { APP_SIGN_UP_URL } from "@/lib/app-url";
+
 // TODO use cases: each feature is a public capability claim: only keep what Misterr does well TODAY.
 // Finance especially: never imply autonomous money movement; keep it draft/flag/chase + approval.
 // If a tab can't hold 4 distinct, true features, fold it into Other rather than padding it.
@@ -280,7 +282,7 @@ export default function UseCases() {
         </div>
 
         <Link
-          href="/signup"
+          href={APP_SIGN_UP_URL}
           className="flex h-[48px] w-fit items-center justify-center rounded-[12px] bg-[#ff5200] px-[28px] font-[family-name:var(--font-geist)] text-[16px] font-semibold text-white transition-colors hover:bg-[#ff6a23]"
         >
           Start for free

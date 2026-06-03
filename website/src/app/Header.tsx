@@ -20,18 +20,12 @@ const MENUS: Record<string, { label: string; href: string }[]> = {
   ],
 };
 
-// CTA targets. The marketing site lives on the apex (`misterr.ai`); the
-// app lives at `app.misterr.ai` and owns the Clerk-backed `/sign-in` and
-// `/sign-up` routes. Both buttons are absolute URLs so the navigation
-// is unambiguous regardless of where this website is hosted.
-//
-// `NEXT_PUBLIC_APP_URL` lets prod / staging override the default
-// without a code change. Default points at the production app host.
-const APP_URL =
-  process.env.NEXT_PUBLIC_APP_URL ?? "https://app.misterr.ai";
+import { APP_SIGN_IN_URL, APP_SIGN_UP_URL } from "@/lib/app-url";
+
+// CTA targets. See `src/lib/app-url.ts` for the single source of truth.
 const TALK_TO_SALES = "mailto:sales@misterr.ai";
-const LOGIN_HREF = `${APP_URL}/sign-in`;
-const GET_STARTED_HREF = `${APP_URL}/sign-up`;
+const LOGIN_HREF = APP_SIGN_IN_URL;
+const GET_STARTED_HREF = APP_SIGN_UP_URL;
 
 const linkText =
   "font-[family-name:var(--font-inter)] text-[16px] font-normal leading-[19.2px] tracking-[-0.24px] text-[#4a4a4a] whitespace-nowrap";
