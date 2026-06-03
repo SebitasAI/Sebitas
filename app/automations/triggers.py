@@ -199,57 +199,101 @@ async def provision_composio_trigger(
     user_id: str,
     config: dict[str, Any],
     webhook_url: str,
+    connected_account_id: str | None = None,
 ) -> str:
     """Create a Composio trigger instance pointing at `webhook_url`.
-    Returns the trigger instance id. Composio's webhook signing uses
-    an account-wide secret (already in Doppler as
-    `composio_webhook_secret`), so we don't need to store a per-
-    trigger key.
 
-    `trigger_slug` identifies the trigger type (e.g.
-    `langfuse_score_created`). `user_id` is our external user id =
-    workspace id, matching the existing Composio integration.
+    Correct upstream contract (verified 2026-06-03 against prod):
 
-    TODO(verify-upstream): request body shape inferred from the
-    Composio Triggers v3 docs. Confirm against a real deploy."""
+      POST /api/v3/trigger_instances/{TRIGGER_SLUG}/upsert
+      body: {connected_account_id, trigger_config}
+
+    The previous path (`/api/v3/triggers/instance`) returns 404 with
+    an HTML body, which our previous error handler then tried to
+    decode as JSON and crashed with `ContentTypeError`. Two fixes
+    here:
+
+      1. Use the correct path.
+      2. Read the response as text first, then parse JSON only when
+         the Content-Type is `application/json`. Surface HTML / empty
+         bodies as a structured `TriggerProvisioningError` instead of
+         leaking a JSON decode error to the agent.
+
+    `connected_account_id` is REQUIRED by Composio: a trigger
+    instance is always scoped to an already-connected account, not
+    to a free-floating user id. Callers must look up the user's
+    Composio connection for the trigger's toolkit and pass its id.
+    """
     settings = get_settings()
     api_key = getattr(settings, "composio_api_key", None)
     if not api_key:
         raise TriggerProvisioningError(
-            "composio_api_key no configurada en Doppler."
+            "composio_api_key no configurada."
+        )
+    if not connected_account_id:
+        raise TriggerProvisioningError(
+            "Para crear este trigger necesito el id de la cuenta "
+            f"conectada del usuario en Composio para `{trigger_slug}`. "
+            "Confirma que el usuario tiene la integración conectada "
+            "antes de crear la automation."
         )
     headers = {
         "x-api-key": api_key,
         "Content-Type": "application/json",
     }
     body = {
-        "trigger_slug": trigger_slug,
-        "user_id": user_id,
-        "trigger_config": config,
-        "webhook_url": webhook_url,
+        "connected_account_id": connected_account_id,
+        "trigger_config": dict(config) if config else {},
     }
-    url = f"{_COMPOSIO_API_BASE}/api/v3/triggers/instance"
+    if webhook_url:
+        # Composio's docs list `webhook_url` as optional on upsert
+        # (project-level webhook can be used instead). We pass it
+        # anyway so per-trigger webhook overrides work.
+        body["webhook_url"] = webhook_url
+
+    url = (
+        f"{_COMPOSIO_API_BASE}/api/v3/trigger_instances/"
+        f"{trigger_slug}/upsert"
+    )
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=body, headers=headers) as resp:
-            data = await resp.json()
+            text = await resp.text()
+            ct = (resp.headers.get("content-type") or "").lower()
+            if "application/json" in ct:
+                try:
+                    data = __import__("json").loads(text) if text else {}
+                except Exception:  # noqa: BLE001
+                    data = {}
+            else:
+                data = {}
             if resp.status >= 400:
+                # Prefer the structured `error.message` Composio sends
+                # when content-type is JSON; fall back to the raw text
+                # prefix when it's HTML / unknown so the dev still sees
+                # something useful in the agent reply.
+                err_msg = (
+                    data.get("error", {}).get("message")
+                    if isinstance(data, dict) else None
+                ) or (text[:200] if text else "(empty body)")
                 raise TriggerProvisioningError(
-                    f"Composio trigger create failed ({resp.status}): {data}"
+                    f"Composio trigger create failed ({resp.status}): {err_msg}"
                 )
     trigger_id = (
         data.get("id")
         or data.get("trigger_id")
+        or data.get("triggerInstanceId")
         or data.get("data", {}).get("id")
     )
     if not trigger_id:
         raise TriggerProvisioningError(
             f"Composio returned unexpected shape on trigger create: "
-            f"keys={list(data.keys())}"
+            f"keys={list(data.keys()) if isinstance(data, dict) else type(data).__name__}"
         )
     log.info(
         "composio_trigger_provisioned",
         trigger_id=trigger_id,
         trigger_slug=trigger_slug,
+        connected_account_id=connected_account_id,
     )
     return trigger_id
 
@@ -261,7 +305,7 @@ async def delete_composio_trigger(trigger_id: str) -> bool:
     if not api_key:
         return False
     headers = {"x-api-key": api_key}
-    url = f"{_COMPOSIO_API_BASE}/api/v3/triggers/instance/{trigger_id}"
+    url = f"{_COMPOSIO_API_BASE}/api/v3/trigger_instances/manage/{trigger_id}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.delete(url, headers=headers) as resp:
