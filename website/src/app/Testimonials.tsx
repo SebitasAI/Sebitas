@@ -14,30 +14,35 @@ type Testimonial = {
   linkedinUrl: string;
 };
 
-// Obvious placeholders so nothing ships by accident. Replace with real,
-// permissioned quotes (or hide the section) before launch.
+// ILLUSTRATIVE SAMPLES: fictional names, invented quotes/metrics for design only.
+// These are NOT real customers. Do NOT ship them as real endorsements (see the FTC TODO above).
+// Replace with real, permissioned quotes (and real photo + LinkedIn) before launch, or hide the
+// section. Photo and LinkedIn are intentionally left empty so no fake face or dead link is shown.
 const TESTIMONIALS: Testimonial[] = [
   {
-    savedMetric: "[verified metric]",
-    quote: "[Real customer quote about Misterr]",
-    name: "[Full name]",
-    role: "[Role]",
+    savedMetric: "3 hrs/week",
+    quote:
+      "Misterr summarizes my whole #support channel and drafts the follow-ups. It saves me about 3 hours a week, all from Slack.",
+    name: "Marco Ferreira",
+    role: "Support Lead",
     photoUrl: "",
     linkedinUrl: "",
   },
   {
-    savedMetric: "[verified metric]",
-    quote: "[A second real, on-product quote from a Misterr customer]",
-    name: "[Full name]",
-    role: "[Role]",
+    savedMetric: "6 doc pages",
+    quote:
+      "I asked Misterr to update our docs after a release and it had a clean preview ready before my coffee. I genuinely love it.",
+    name: "Lena Whitfield",
+    role: "Engineering Manager",
     photoUrl: "",
     linkedinUrl: "",
   },
   {
-    savedMetric: "[verified metric]",
-    quote: "[A third permissioned quote about what Misterr shipped]",
-    name: "[Full name]",
-    role: "[Role]",
+    savedMetric: "an afternoon",
+    quote:
+      "Gave Misterr a one-line brief and got back a board-ready PDF, not a wall of text. It saved me a whole afternoon.",
+    name: "Priya Anand",
+    role: "Chief of Staff",
     photoUrl: "",
     linkedinUrl: "",
   },
