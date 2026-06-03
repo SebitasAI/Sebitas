@@ -37,6 +37,11 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
+
+# Make `app.*` importable when the script is run directly (without
+# `python -m`). Repo root is the parent of this `scripts/` directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import stripe
 
