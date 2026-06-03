@@ -206,6 +206,13 @@ class Settings(BaseSettings):
     # Doppler-configured port 3002.
     frontend_origins: str = "http://localhost:3002,http://localhost:3001"
 
+    # Public base URL of the Misterr web app. Used by the billing
+    # hard-stop message in Slack to deep-link the user to the
+    # billing / upgrade page. Prod overrides this in Doppler;
+    # default targets the public domain so a misconfigured dev
+    # workspace at least points somewhere real.
+    web_base_url: str = "https://misterr.app"
+
     # Platform admins for /admin endpoints (slice T-8). Comma-separated
     # emails. A user authenticates with Clerk like everyone else; admin
     # status is a separate check against this list (case-insensitive

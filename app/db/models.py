@@ -1007,3 +1007,160 @@ class AgentRun(Base):
     finished_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class WorkspaceBillingPlan(Base):
+    """Per-workspace billing tier + slider state. One row per workspace.
+
+    See migration 0031 docstring for the plan taxonomy. The runner reads
+    `plan` on pre-flight to decide whether to enforce the balance check
+    (skipped when plan = 'unlimited'). Stripe webhook in Slice 2 owns
+    writes to this table; for now it's only touched by the backfill in
+    migration 0031 and a future repository helper for ledger reconciliation.
+    """
+
+    __tablename__ = "workspace_billing_plan"
+    __table_args__ = (
+        CheckConstraint(
+            "plan IN ('free', 'starter', 'pro', 'scale', 'business', 'enterprise', 'unlimited')",
+            name="ck_billing_plan_plan",
+        ),
+        CheckConstraint(
+            "billing_cycle IS NULL OR billing_cycle IN ('monthly', 'annual')",
+            name="ck_billing_plan_cycle",
+        ),
+    )
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspace.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    plan: Mapped[str] = mapped_column(String(24), nullable=False, default="free")
+    billing_cycle: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    credits_per_month: Mapped[float] = mapped_column(
+        Numeric(14, 3), nullable=False, default=50_000
+    )
+    price_usd_monthly: Mapped[float] = mapped_column(
+        Numeric(12, 2), nullable=False, default=0
+    )
+    current_period_start: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    current_period_end: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cancel_at_period_end: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    canceled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class CreditBalance(Base):
+    """Per-workspace current credit balance. Hot path: read on every
+    Slack message (pre-flight) and written after every successful
+    agent run (debit). Kept narrow on purpose."""
+
+    __tablename__ = "credit_balance"
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspace.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    balance_credits: Mapped[float] = mapped_column(
+        Numeric(14, 3), nullable=False, default=0
+    )
+    last_reset_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class CreditLedger(Base):
+    """Append-only audit trail for every credit balance change.
+
+    `balance_after_credits` is the running balance snapshot at the time
+    the row was written, which lets us reconstruct the balance at any
+    moment without summing the full ledger. `agent_run_id` is a soft
+    reference (no FK) so dropping old agent_run rows for retention
+    doesn't cascade-delete ledger entries.
+    """
+
+    __tablename__ = "credit_ledger"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('debit_agent_run', 'monthly_reset', 'plan_change_credit', "
+            "'plan_change_debit', 'admin_adjustment', 'initial_grant')",
+            name="ck_credit_ledger_kind",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspace.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    delta_credits: Mapped[float] = mapped_column(Numeric(14, 3), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    agent_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    sales_cost_usd: Mapped[float | None] = mapped_column(
+        Numeric(12, 6), nullable=True
+    )
+    balance_after_credits: Mapped[float] = mapped_column(
+        Numeric(14, 3), nullable=False
+    )
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class StripeSubscription(Base):
+    """Thin local mirror of Stripe state per workspace. Populated by
+    the Stripe webhook handler in Slice 2. Empty until then."""
+
+    __tablename__ = "stripe_subscription"
+    __table_args__ = (
+        CheckConstraint(
+            "status IS NULL OR status IN ('active', 'past_due', 'canceled', "
+            "'incomplete', 'incomplete_expired', 'trialing', 'unpaid', 'paused')",
+            name="ck_stripe_subscription_status",
+        ),
+    )
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspace.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    stripe_customer_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    stripe_subscription_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    stripe_price_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

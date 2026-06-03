@@ -1125,6 +1125,38 @@ async def _persist_agent_run(
             finished_at=_dt.now(_tz.utc),
         )
         session.add(run)
+        # Flush so `run.id` is materialized -- the ledger row references
+        # it. Stays in the same transaction as the debit, so a write
+        # failure rolls both back together. Critical: we must NEVER
+        # have an agent_run row without its matching ledger debit, or
+        # the customer effectively used credits we didn't subtract.
+        await session.flush()
+
+        # Debit credits for this run. Skipped for `unlimited` and
+        # `enterprise` plans inside the repo helper. `credits_to_debit`
+        # uses sales_cost_usd at the 1 credit = $0.001 ratio (i.e. *1000).
+        # Failures here are logged but don't roll back the agent_run
+        # row -- delivery has already happened upstream and the customer
+        # got their reply; we'd rather under-bill once than crash a
+        # reply path that already succeeded.
+        try:
+            from app.billing import repository as _billing_repo  # lazy
+            credits_to_debit = sales_cost * 1000.0
+            await _billing_repo.debit_for_agent_run(
+                session,
+                workspace_id=workspace_id,
+                agent_run_id=run.id,
+                sales_cost_usd=sales_cost,
+                credits_to_debit=credits_to_debit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "billing_debit_failed",
+                workspace_id=str(workspace_id),
+                agent_run_id=str(run.id),
+                error=str(exc)[:200],
+            )
+
         await session.commit()
 
 
@@ -1447,6 +1479,48 @@ async def _run_agent_impl(*, client, team_id, slack_user_id, channel, user_text,
         team_id, channel, conversation_key, slack_user_id, full_text, user_ts,
         attachments=attachments_records,
     )
+
+    # Billing pre-flight: block runs for workspaces out of credits. Plans
+    # in BYPASS_CREDIT_CHECK (unlimited, enterprise) trivially pass. We
+    # run this AFTER persisting the user message (so memory + history are
+    # intact for when they upgrade) but BEFORE seed + skills + LLM (so we
+    # don't burn the user's last credits on a run we know we'll block).
+    try:
+        from app.billing import repository as _billing_repo  # lazy
+        from app.billing import slack_messages as _billing_msgs
+        from app.db.session import get_session as _get_session
+        async with _get_session() as _bs:
+            _verdict = await _billing_repo.preflight_check(_bs, workspace_id)
+        if not _verdict.allowed:
+            log.info(
+                "billing_preflight_blocked",
+                workspace_id=str(workspace_id),
+                plan=_verdict.plan,
+                balance=_verdict.balance_credits,
+            )
+            payload = _billing_msgs.out_of_credits_message(
+                _verdict.plan, _verdict.balance_credits
+            )
+            try:
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=reply_thread_ts or user_ts,
+                    text=payload["text"],
+                    blocks=payload["blocks"],
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("billing_preflight_post_failed", error=str(exc)[:200])
+            await _remove_reaction(client, channel, user_ts, reaction_name)
+            return
+    except Exception as exc:  # noqa: BLE001
+        # Pre-flight must NEVER block a workspace because of an
+        # internal error. Log and continue -- worst case we under-bill
+        # this run, never worse than blocking a paying customer.
+        log.warning(
+            "billing_preflight_errored",
+            workspace_id=str(workspace_id),
+            error=str(exc)[:200],
+        )
 
     # Build the seed user content: blocks first (so the model "reads" attachments
     # before the question), then text last. Plain string for the no-attachment path.
