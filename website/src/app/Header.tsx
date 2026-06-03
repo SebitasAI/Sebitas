@@ -20,10 +20,14 @@ const MENUS: Record<string, { label: string; href: string }[]> = {
   ],
 };
 
-import { APP_SIGN_IN_URL, APP_SIGN_UP_URL } from "@/lib/app-url";
+import {
+  APP_SIGN_IN_URL,
+  APP_SIGN_UP_URL,
+  BOOK_SALES_URL,
+} from "@/lib/app-url";
 
 // CTA targets. See `src/lib/app-url.ts` for the single source of truth.
-const TALK_TO_SALES = "mailto:sales@misterr.ai";
+const TALK_TO_SALES = BOOK_SALES_URL;
 const LOGIN_HREF = APP_SIGN_IN_URL;
 const GET_STARTED_HREF = APP_SIGN_UP_URL;
 
@@ -146,6 +150,7 @@ export default function Header() {
               face="bg-white"
               hover="hover:bg-[#f1f1f1]"
               text="text-[#191919]"
+              external
             >
               Talk to sales
             </CtaButton>
@@ -183,6 +188,7 @@ function CtaButton({
   hover,
   text,
   children,
+  external,
 }: {
   href: string;
   shadow: string;
@@ -190,10 +196,16 @@ function CtaButton({
   hover: string;
   text: string;
   children: React.ReactNode;
+  // When true, opens in a new tab with rel="noopener". Used by the Talk
+  // to sales button so the booking widget pops up without losing the
+  // user's place on the landing.
+  external?: boolean;
 }) {
   return (
     <a
       href={href}
+      target={external ? "_blank" : undefined}
+      rel={external ? "noopener noreferrer" : undefined}
       className={`flex h-full flex-col items-start justify-center rounded-[12px] ${shadow} pb-[4px] transition-transform active:translate-y-[2px]`}
     >
       <div

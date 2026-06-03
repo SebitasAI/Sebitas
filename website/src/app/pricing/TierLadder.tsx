@@ -9,10 +9,10 @@
 
 import Link from "next/link";
 
-import { APP_SIGN_UP_URL } from "@/lib/app-url";
+import { APP_SIGN_UP_URL, BOOK_SALES_URL } from "@/lib/app-url";
 
 const GET_STARTED_HREF = APP_SIGN_UP_URL;
-const SALES_HREF = "mailto:sales@misterr.ai?subject=Misterr%20Enterprise";
+const SALES_HREF = BOOK_SALES_URL;
 
 const nf = new Intl.NumberFormat("en-US");
 const fmt = (n: number) => nf.format(Math.round(n));
@@ -24,7 +24,7 @@ type Tier = {
   creditsLabel: string;
   blurb: string;
   features: string[];
-  cta: { label: string; href: string };
+  cta: { label: string; href: string; external?: boolean };
   highlight?: boolean; // visual emphasis (the recommended tier)
 };
 
@@ -114,7 +114,7 @@ const TIERS: Tier[] = [
       "Retención y compliance a medida",
       "Descuento por volumen",
     ],
-    cta: { label: "Hablar con Sales", href: SALES_HREF },
+    cta: { label: "Hablar con Sales", href: SALES_HREF, external: true },
   },
 ];
 
@@ -194,6 +194,8 @@ function TierCard({ tier }: { tier: Tier }) {
 
       <Link
         href={tier.cta.href}
+        target={tier.cta.external ? "_blank" : undefined}
+        rel={tier.cta.external ? "noopener noreferrer" : undefined}
         className={`mt-auto inline-flex items-center justify-center rounded-full px-[16px] py-[10px] font-[family-name:var(--font-inter)] text-[14px] font-semibold tracking-[-0.2px] transition ${
           isHighlight
             ? "bg-[#ff5200] text-white hover:bg-[#e64a00]"

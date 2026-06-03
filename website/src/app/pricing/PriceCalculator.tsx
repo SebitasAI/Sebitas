@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 
+import { BOOK_SALES_URL } from "@/lib/app-url";
+
 // Pricing math derives from the same source-of-truth as the runtime billing
 // system (see app/billing/plans.py). 1 credit = $0.001 USD sales price; 5x
 // markup on real LLM cost lands at 80% gross margin.
@@ -25,7 +27,7 @@ const CONFIG = {
     initial: 200000, // ~= mid-Starter, the most likely "I'm exploring" landing
   },
   defaultCreditsPerTask: 50, // placeholder, sets the margin, not the rate
-  salesHref: "mailto:sales@misterr.ai?subject=Misterr%20Enterprise",
+  salesHref: BOOK_SALES_URL,
 };
 
 // en-US thousands separator, always integers.
@@ -91,6 +93,8 @@ export default function PriceCalculator() {
           </p>
           <a
             href={CONFIG.salesHref}
+            target="_blank"
+            rel="noopener noreferrer"
             className="font-[family-name:var(--font-inter)] text-[18px] font-semibold text-[#ff5200] underline-offset-4 hover:underline"
           >
             Talk to sales →
