@@ -89,8 +89,16 @@ class Settings(BaseSettings):
     agent_max_iterations_project: int = 60
 
     # E2B sandbox (the SDK also reads E2B_API_KEY from the environment).
+    # Sandbox lifetime is measured from creation; 300s (5 min) was the
+    # original default and turned out to be too short for real agent
+    # runs -- on long Simetrik sessions the LLM would do several
+    # composio/slack tool calls between two `run_code` calls, the
+    # E2B VM got reaped during the gap, and the second `run_code`
+    # failed with a 502 "sandbox was not found". 1800s (30 min)
+    # covers the 95th-percentile session; sandbox.py also catches
+    # the reap error and recreates transparently as a safety net.
     e2b_api_key: str | None = None
-    e2b_timeout_seconds: int = 300
+    e2b_timeout_seconds: int = 1800
 
     # Cloudflare R2 (S3-compatible) for artifacts + skill packages.
     r2_account_id: str | None = None
