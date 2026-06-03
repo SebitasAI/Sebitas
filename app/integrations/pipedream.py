@@ -87,7 +87,19 @@ async def list_accounts(external_user_id: str) -> list[dict]:
 
 
 async def search_actions(app: str, query: str | None = None) -> list[dict]:
-    params = {"app": app}
+    """List Pipedream's actions for a given app.
+
+    Resolves our user-friendly slug to Pipedream's `name_slug` first.
+    Without this, queries for apps whose slug diverges from Pipedream's
+    (salesforce -> salesforce_rest_api, slack -> slack_bot, etc.) return
+    0 actions and downstream code mistakenly believes the app has no
+    catalog -- which is the same root cause as the connect-link bug
+    fixed in `_mint_connect_link` (PR #122). Single boundary fix here
+    means catalog_skills, gateway.find_actions, and the daily sweeper
+    are all auto-corrected without per-caller plumbing.
+    """
+    resolved = await resolve_app_slug(app)
+    params = {"app": resolved}
     if query:
         params["q"] = query
     async with aiohttp.ClientSession() as session:
