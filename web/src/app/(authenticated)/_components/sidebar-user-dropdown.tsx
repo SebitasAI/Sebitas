@@ -44,7 +44,7 @@ export function SidebarUserDropdown({
     user?.fullName ??
     user?.firstName ??
     user?.primaryEmailAddress?.emailAddress?.split("@")[0] ??
-    "Cuenta";
+    "Account";
   const email = user?.primaryEmailAddress?.emailAddress ?? "";
   const imageUrl = user?.imageUrl ?? null;
 
@@ -116,7 +116,7 @@ export function SidebarUserDropdown({
                 className="flex w-full items-center gap-2.5 px-4 py-2 text-sm transition-colors hover:bg-[var(--color-surface-fog)]"
               >
                 <UserIcon />
-                <span>Cuenta</span>
+                <span>Account</span>
               </Link>
             </li>
             <li>
@@ -126,7 +126,7 @@ export function SidebarUserDropdown({
                 className="flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm transition-colors hover:bg-[var(--color-surface-fog)]"
               >
                 <SignOutIcon />
-                <span>Cerrar sesión</span>
+                <span>Sign out</span>
               </button>
             </li>
           </ul>

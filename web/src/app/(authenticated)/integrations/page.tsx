@@ -142,8 +142,7 @@ function IntegrationsBody() {
   return (
     <div className="flex flex-col gap-5">
       <p className="text-sm text-neutral-500">
-        Conecta las apps que usas y deja que Misterr ejecute tareas en
-        ellas.
+        Connect the apps you use and let Misterr run tasks in them.
       </p>
 
       <SearchBar value={search} onChange={setSearch} />
@@ -204,7 +203,7 @@ function SearchBar({ value, onChange }: { value: string; onChange: (v: string) =
         type="search"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="Buscar en el catálogo de integraciones"
+        placeholder="Search the integrations catalog"
         className="w-full rounded-lg border border-[var(--color-border)] bg-white py-2 pl-9 pr-3 text-sm text-[var(--color-ink-deep)] placeholder:text-neutral-400 focus:border-[#FF5200] focus:outline-none focus:ring-1 focus:ring-[#FF5200]/30"
       />
     </label>
@@ -280,10 +279,10 @@ function EmptyState({
   tab: Tab;
   connectedOnly: boolean;
 }) {
-  let msg = "No hay integraciones en el catálogo.";
-  if (search.trim()) msg = `Nada matchea "${search}".`;
-  else if (connectedOnly) msg = "No tenés cuentas conectadas todavía.";
-  else if (tab === "popular") msg = "No hay populares en este momento.";
+  let msg = "No integrations in the catalog.";
+  if (search.trim()) msg = `Nothing matches "${search}".`;
+  else if (connectedOnly) msg = "You don't have any connected accounts yet.";
+  else if (tab === "popular") msg = "No popular integrations right now.";
   return (
     <div className="rounded-lg border border-dashed border-[var(--color-border)] bg-white py-10 text-center text-sm text-neutral-500">
       {msg}
@@ -294,7 +293,7 @@ function EmptyState({
 function ErrorBox({ message }: { message: string }) {
   return (
     <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-      No pude cargar el catálogo: {message}
+      Couldn't load the catalog: {message}
     </div>
   );
 }
@@ -354,15 +353,15 @@ const LoadMoreSentinel = React.forwardRef<
     >
       <span className="inline-flex size-6 animate-spin items-center justify-center rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-ink-deep)]" />
       <p className="text-xs text-neutral-500">
-        Mostrando <span className="font-medium text-[var(--color-ink-deep)]">{shown.toLocaleString()}</span> de{" "}
-        <span className="font-medium text-[var(--color-ink-deep)]">{total.toLocaleString()}</span> integraciones
+        Showing <span className="font-medium text-[var(--color-ink-deep)]">{shown.toLocaleString()}</span> of{" "}
+        <span className="font-medium text-[var(--color-ink-deep)]">{total.toLocaleString()}</span> integrations
       </p>
       <button
         type="button"
         onClick={onLoadMore}
         className="rounded-md border border-[var(--color-border)] bg-white px-3 py-1.5 text-xs font-medium text-[var(--color-ink-deep)] hover:bg-neutral-50"
       >
-        Cargar {nextBatch} más
+        Load {nextBatch} more
       </button>
     </div>
   );

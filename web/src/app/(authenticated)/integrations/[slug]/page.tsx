@@ -118,8 +118,8 @@ function Body({ slug }: { slug: string }) {
           </ul>
         ) : (connectionsQuery.data?.connections.length ?? 0) === 0 ? (
           <div className="rounded-lg border border-dashed border-[var(--color-border)] bg-white py-10 text-center text-sm text-neutral-500">
-            No tenés cuentas conectadas todavía. Click "Connect another account"
-            para empezar.
+            You don&apos;t have any connected accounts yet. Click &quot;Connect another account&quot;
+            to get started.
           </div>
         ) : (
           <ul className="rounded-lg border border-[var(--color-border)] bg-white">
@@ -143,7 +143,7 @@ function Body({ slug }: { slug: string }) {
                   <button
                     type="button"
                     onClick={() => {
-                      if (confirm(`Desconectar ${c.account_label || c.app}?`)) {
+                      if (confirm(`Disconnect ${c.account_label || c.app}?`)) {
                         removeMut.mutate(c.id);
                       }
                     }}
@@ -261,7 +261,7 @@ function ConnectModal({
           Connect a new {app?.name ?? slug} account
         </h2>
         <p className="mt-1 text-xs text-neutral-500">
-          Te vamos a redirigir al login de {app?.name ?? slug} para autorizar Misterr.
+          We&apos;ll redirect you to {app?.name ?? slug} to authorize Misterr.
         </p>
 
         <label className="mt-4 block text-xs text-neutral-600">
@@ -284,7 +284,7 @@ function ConnectModal({
           <ScopeRadio
             value="private"
             label="Private (only me)"
-            description="Solo vos podés usar esta cuenta desde Slack o desde tasks scheduled tuyas."
+            description="Only you can use this account from Slack or from your scheduled tasks."
             checked={scope === "private"}
             onChange={() => setScope("private")}
           />
@@ -293,8 +293,8 @@ function ConnectModal({
             label="Team-wide"
             description={
               isAdmin
-                ? "Cualquiera en el workspace puede usarla. Solo admins pueden crear esta opción."
-                : "Solo admins pueden crear cuentas team-wide."
+                ? "Anyone in the workspace can use it. Only admins can create this option."
+                : "Only admins can create team-wide accounts."
             }
             checked={scope === "team"}
             onChange={() => setScope("team")}

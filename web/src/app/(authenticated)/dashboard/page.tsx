@@ -98,7 +98,7 @@ export default function DashboardPage() {
       <PageHeader title="Home" Icon={HomeIcon} />
       <PageBody>
         <h1 className="text-xl font-semibold tracking-tight text-[var(--color-ink-deep)]">
-          Hola, {firstName} <span aria-hidden>👋</span>
+          Hi, {firstName} <span aria-hidden>👋</span>
         </h1>
 
         <div className="mt-5 grid gap-3 sm:grid-cols-3">
@@ -201,18 +201,18 @@ function OnboardingChecklist({
   // so the checklist starts at 1/4 instead of 0/4 -- gives a sense of
   // progress on first paint.
   const steps = [
-    { label: "Instalá Misterr en tu Slack workspace", done: true },
+    { label: "Install Misterr on your Slack workspace", done: true },
     {
-      label: "Conectá tu primera integración",
+      label: "Connect your first integration",
       done: integrationsCount > 0,
       href: "/integrations",
     },
     {
-      label: "Hablale a Misterr en Slack (primer agent run)",
+      label: "Talk to Misterr on Slack (first agent run)",
       done: activityCount > 0,
     },
     {
-      label: "Programá tu primera scheduled task",
+      label: "Schedule your first task",
       done: scheduledCount > 0,
       href: "/scheduled-tasks",
     },
@@ -233,7 +233,7 @@ function OnboardingChecklist({
             Setup
           </h2>
           <p className="mt-1 text-xs text-neutral-500">
-            Completá estos pasos para que Misterr esté listo en tu workspace.
+            Finish these steps to get Misterr ready in your workspace.
           </p>
         </div>
         <span className="rounded-full bg-orange-50 px-2.5 py-1 text-[11px] font-semibold text-orange-700">
@@ -279,7 +279,7 @@ function OnboardingChecklist({
                 href={s.href}
                 className="inline-flex shrink-0 items-center gap-1 rounded-md border border-[var(--color-border)] bg-white px-2.5 py-1 text-[11px] font-medium text-neutral-700 hover:bg-neutral-50"
               >
-                Empezar
+                Get started
                 <ArrowRight className="size-3" />
               </Link>
             )}
@@ -304,17 +304,17 @@ function ActivityPanel({
         <div>
           <h2 className="flex items-center gap-2 text-base font-semibold text-[var(--color-ink-deep)]">
             <Activity className="size-4" />
-            Actividad reciente
+            Recent activity
           </h2>
           <p className="mt-1 text-xs text-neutral-500">
-            Últimas 10 conversaciones del equipo con Misterr.
+            Last 10 team conversations with Misterr.
           </p>
         </div>
         <Link
           href="/usage"
           className="inline-flex items-center gap-1 text-xs font-medium text-neutral-600 hover:text-[var(--color-ink-deep)]"
         >
-          Ver todo
+          View all
           <ArrowRight className="size-3" />
         </Link>
       </div>
@@ -334,7 +334,7 @@ function ActivityPanel({
           <div className="rounded-md border border-dashed border-[var(--color-border)] bg-neutral-50 p-6 text-center">
             <Sparkles className="mx-auto size-5 text-neutral-400" />
             <p className="mt-2 text-xs text-neutral-500">
-              Cuando alguien le hable a Misterr en Slack, va a aparecer acá.
+              When someone talks to Misterr on Slack, it&apos;ll show up here.
             </p>
           </div>
         )}
@@ -372,7 +372,7 @@ function ActivityRowItem({ row }: { row: ActivityResponse["rows"][number] }) {
         </p>
         <p className="mt-0.5 text-[11px] text-neutral-400">
           {formatDistanceToNow(new Date(row.started_at), { addSuffix: true })}
-          {row.credits > 0 && ` · ${fmt(row.credits)} créditos`}
+          {row.credits > 0 && ` · ${fmt(row.credits)} credits`}
           {row.status === "failed" && (
             <span className="ml-1 rounded bg-red-50 px-1 text-red-600">
               error

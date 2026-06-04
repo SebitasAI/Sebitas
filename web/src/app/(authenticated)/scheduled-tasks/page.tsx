@@ -201,8 +201,8 @@ function ScheduledTasksBody() {
   return (
     <div className="flex flex-col gap-5">
       <p className="text-sm text-neutral-500">
-        Las tasks se crean o modifican hablándole a Misterr por chat. Acá podés
-        verlas y pausarlas / reanudarlas.
+        Tasks are created or modified by chatting with Misterr. Here you can
+        view them and pause or resume them.
       </p>
 
       <SearchBar value={search} onChange={setSearch} />
@@ -213,7 +213,7 @@ function ScheduledTasksBody() {
         <SkeletonList />
       ) : tasksQuery.isError ? (
         <ErrorState
-          message={(tasksQuery.error as Error)?.message ?? "Error desconocido"}
+          message={(tasksQuery.error as Error)?.message ?? "Unknown error"}
           onRetry={() => tasksQuery.refetch()}
         />
       ) : visible.length === 0 ? (
@@ -257,7 +257,7 @@ function SearchBar({
         type="search"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="Buscar tasks por nombre"
+        placeholder="Search tasks by name"
         className="w-full rounded-lg border border-[var(--color-border)] bg-white py-2 pl-9 pr-3 text-sm text-[var(--color-ink-deep)] placeholder:text-neutral-400 focus:border-[#FF5200] focus:outline-none focus:ring-1 focus:ring-[#FF5200]/30"
       />
     </label>
@@ -334,14 +334,14 @@ function EmptyState({
 }) {
   let message: string;
   if (search.trim()) {
-    message = `No hay tasks que matcheen "${search}".`;
+    message = `No tasks match "${search}".`;
   } else if (tab === "mine") {
-    message = "Todavía no creaste tasks. Decile a Misterr en Slack que arme una.";
+    message = "You haven't created any tasks yet. Ask Misterr on Slack to set one up.";
   } else if (tab === "system") {
     message =
-      "No hay system tasks configuradas en este workspace. Esto es raro; el seeder debería haberlas creado al instalar el bot.";
+      "No system tasks configured in this workspace. That's unusual; the seeder should have created them when the bot was installed.";
   } else {
-    message = "No hay tasks en este workspace todavía.";
+    message = "No tasks in this workspace yet.";
   }
   return (
     <div className="rounded-lg border border-dashed border-[var(--color-border)] bg-white py-10 text-center text-sm text-neutral-500">
@@ -359,14 +359,14 @@ function ErrorState({
 }) {
   return (
     <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-      <div className="font-medium">No pude cargar las scheduled tasks.</div>
+      <div className="font-medium">Couldn't load scheduled tasks.</div>
       <div className="mt-1 text-xs text-red-600">{message}</div>
       <button
         type="button"
         onClick={onRetry}
         className="mt-3 rounded-md border border-red-300 bg-white px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
       >
-        Reintentar
+        Retry
       </button>
     </div>
   );
@@ -410,7 +410,7 @@ function TaskCard({
 
   const lastRunRelative = task.last_run_at
     ? formatDistanceToNow(new Date(task.last_run_at), { addSuffix: true })
-    : "nunca";
+    : "never";
 
   const createdRelative = formatDistanceToNow(new Date(task.created_at), {
     addSuffix: true,
@@ -487,7 +487,7 @@ function TaskCard({
 
           {task.last_run_error ? (
             <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-2 text-[11px] text-red-700">
-              <span className="font-medium">Último error:</span>{" "}
+              <span className="font-medium">Last error:</span>{" "}
               {task.last_run_error}
             </div>
           ) : null}
@@ -515,17 +515,17 @@ function RunHistoryPanel({
   return (
     <div className="mt-3 border-t border-[var(--color-border)] pt-3">
       <div className="text-[10px] font-medium uppercase tracking-wide text-neutral-500">
-        Historial de ejecuciones
+        Run history
       </div>
       {isLoading ? (
-        <div className="mt-1 text-[11px] text-neutral-500">Cargando…</div>
+        <div className="mt-1 text-[11px] text-neutral-500">Loading…</div>
       ) : isError ? (
         <div className="mt-1 text-[11px] text-red-600">
-          No pude cargar el historial.
+          Couldn't load history.
         </div>
       ) : !runs || runs.length === 0 ? (
         <div className="mt-1 text-[11px] text-neutral-500">
-          Sin ejecuciones registradas todavía.
+          No runs recorded yet.
         </div>
       ) : (
         <ul className="mt-1 flex flex-col gap-2">
@@ -582,7 +582,7 @@ function RunItem({ run }: { run: ScheduledTaskRun }) {
               {run.error}
             </pre>
           ) : (
-            <span className="text-neutral-400">(sin output)</span>
+            <span className="text-neutral-400">(no output)</span>
           )}
         </div>
       ) : null}
@@ -632,7 +632,7 @@ function ScopeBadge({ scope }: { scope: ScheduledTask["scope"] }) {
 }
 
 function OneShotBadge({ completed }: { completed: boolean }) {
-  const label = completed ? "Completada" : "Una vez";
+  const label = completed ? "Completed" : "One-shot";
   const cls = completed
     ? "bg-emerald-100 text-emerald-700"
     : "bg-violet-100 text-violet-700";
@@ -648,7 +648,7 @@ function OneShotBadge({ completed }: { completed: boolean }) {
 function PausedBadge({ until }: { until: string | null }) {
   return (
     <span className="inline-flex items-center rounded-full bg-yellow-100 px-2 py-0.5 text-[10px] font-medium text-yellow-700">
-      {until ? `Pausada hasta ${until.slice(0, 10)}` : "Pausada"}
+      {until ? `Paused until ${until.slice(0, 10)}` : "Paused"}
     </span>
   );
 }
@@ -696,8 +696,8 @@ function PauseToggle({
         type="button"
         onClick={onResume}
         className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border border-[var(--color-border)] bg-white text-neutral-600 transition-colors hover:bg-[var(--color-surface-fog)] hover:text-[#FF5200]"
-        aria-label="Reanudar task"
-        title="Reanudar"
+        aria-label="Resume task"
+        title="Resume"
       >
         <Play className="size-4" strokeWidth={1.75} />
       </button>
@@ -713,9 +713,9 @@ function PauseToggle({
           setMode("menu");
         }}
         className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border border-[var(--color-border)] bg-white text-neutral-600 transition-colors hover:bg-[var(--color-surface-fog)] hover:text-[#FF5200]"
-        aria-label="Pausar task"
+        aria-label="Pause task"
         aria-expanded={open}
-        title="Pausar"
+        title="Pause"
       >
         <Pause className="size-4" strokeWidth={1.75} />
       </button>
@@ -738,20 +738,20 @@ function PauseToggle({
                   setOpen(false);
                 }}
               >
-                Pausar indefinidamente
+                Pause indefinitely
               </button>
               <button
                 type="button"
                 className="block w-full px-3 py-2 text-left text-[var(--color-ink-deep)] hover:bg-[var(--color-surface-fog)]"
                 onClick={() => setMode("until")}
               >
-                Pausar hasta…
+                Pause until…
               </button>
             </div>
           ) : (
             <div className="flex flex-col gap-2 p-3 text-sm">
               <label className="flex flex-col gap-1 text-xs text-neutral-600">
-                Reanudar el
+                Resume on
                 <input
                   type="date"
                   value={date}
@@ -770,7 +770,7 @@ function PauseToggle({
                     setDate("");
                   }}
                 >
-                  Cancelar
+                  Cancel
                 </button>
                 <button
                   type="button"
@@ -785,7 +785,7 @@ function PauseToggle({
                     }
                   }}
                 >
-                  Pausar
+                  Pause
                 </button>
               </div>
             </div>
