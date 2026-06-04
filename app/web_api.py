@@ -76,7 +76,7 @@ async def list_workspaces_for_user(request: Request, email: str):
                 "id": str(w.id),
                 "name": w.name or w.slack_team_id,
                 "slackTeamId": w.slack_team_id,
-                "iconUrl": None,
+                "iconUrl": w.slack_team_icon_url,
                 "primaryEmail": needle,
             }
             for w in workspaces

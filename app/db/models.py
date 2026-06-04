@@ -54,6 +54,11 @@ class Workspace(TimestampMixin, Base):
     # Channel where Misterr was installed. System tasks post here by default;
     # null until the installer picks (or admin sets it manually). Migration 0017.
     bot_home_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Slack team icon URL (returned by `team.info` after install). Drives
+    # the WorkspaceSelector avatar in the web sidebar. Migration 0033.
+    # Populated by the install handler on first install + refreshed by
+    # the roster sweep so renames / logo changes propagate within a day.
+    slack_team_icon_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Clerk Organization id (e.g. "org_2abc...") backing this Slack workspace's
     # team membership. 1:1 mapping enforced by UNIQUE. Created automatically
     # on first install (when the installer has a Clerk user); for legacy
