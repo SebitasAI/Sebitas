@@ -137,7 +137,7 @@ export default function Header() {
           })}
 
           <Link
-            href="#security"
+            href="/security"
             className="flex h-[39px] items-center rounded-[12px] px-[16px]"
           >
             <p className={linkText}>Security</p>
