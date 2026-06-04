@@ -158,7 +158,7 @@ function OverviewTab({ range }: { range: DateRange }) {
   if (q.isError)
     return (
       <ErrorState
-        message={(q.error as Error)?.message ?? "Error desconocido"}
+        message={(q.error as Error)?.message ?? "Unknown error"}
         onRetry={() => q.refetch()}
       />
     );
@@ -423,7 +423,7 @@ function TopList({
       </div>
       {rows.length === 0 ? (
         <div className="py-6 text-center text-xs text-neutral-500">
-          Sin actividad en el rango seleccionado.
+          No activity in the selected range.
         </div>
       ) : (
         <ul className="flex flex-col gap-2">
@@ -496,7 +496,7 @@ function TeamTab({ range }: { range: DateRange }) {
   if (q.isError)
     return (
       <ErrorState
-        message={(q.error as Error)?.message ?? "Error desconocido"}
+        message={(q.error as Error)?.message ?? "Unknown error"}
         onRetry={() => q.refetch()}
       />
     );
@@ -579,7 +579,7 @@ function TeamTab({ range }: { range: DateRange }) {
             {filtered.length === 0 ? (
               <tr>
                 <td colSpan={5} className="px-4 py-8 text-center text-sm text-neutral-500">
-                  Sin actividad en el rango seleccionado.
+                  No activity in the selected range.
                 </td>
               </tr>
             ) : null}
@@ -612,7 +612,7 @@ function ActivityTab({ range }: { range: DateRange }) {
   if (q.isError)
     return (
       <ErrorState
-        message={(q.error as Error)?.message ?? "Error desconocido"}
+        message={(q.error as Error)?.message ?? "Unknown error"}
         onRetry={() => q.refetch()}
       />
     );
@@ -668,7 +668,7 @@ function ActivityTab({ range }: { range: DateRange }) {
             {q.data.rows.length === 0 ? (
               <tr>
                 <td colSpan={4} className="px-4 py-8 text-center text-sm text-neutral-500">
-                  Sin actividad en el rango seleccionado.
+                  No activity in the selected range.
                 </td>
               </tr>
             ) : null}
@@ -767,7 +767,7 @@ function ScheduledTasksTab({ range }: { range: DateRange }) {
   if (q.isError)
     return (
       <ErrorState
-        message={(q.error as Error)?.message ?? "Error desconocido"}
+        message={(q.error as Error)?.message ?? "Unknown error"}
         onRetry={() => q.refetch()}
       />
     );
@@ -821,7 +821,7 @@ function ScheduledTasksTab({ range }: { range: DateRange }) {
             {q.data.rows.length === 0 ? (
               <tr>
                 <td colSpan={5} className="px-4 py-8 text-center text-sm text-neutral-500">
-                  Sin tareas en el rango seleccionado.
+                  No tasks in the selected range.
                 </td>
               </tr>
             ) : null}
@@ -897,14 +897,14 @@ function ErrorState({
 }) {
   return (
     <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-      <div className="font-medium">No pude cargar Usage.</div>
+      <div className="font-medium">Couldn't load Usage.</div>
       <div className="mt-1 text-xs text-red-600">{message}</div>
       <button
         type="button"
         onClick={onRetry}
         className="mt-3 rounded-md border border-red-300 bg-white px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
       >
-        Reintentar
+        Retry
       </button>
     </div>
   );

@@ -120,8 +120,8 @@ function NoOrgState({ provisioning }: { provisioning: boolean }) {
   return (
     <div className="rounded-lg border border-dashed border-[var(--color-border)] bg-white py-10 text-center text-sm text-neutral-500">
       {provisioning
-        ? "Configurando tu organización..."
-        : "No tenés una organización activa todavía. Si acabás de instalar Misterr en Slack, esperá unos segundos y refrescá."}
+        ? "Setting up your organization..."
+        : "You don't have an active organization yet. If you just installed Misterr on Slack, wait a few seconds and refresh."}
     </div>
   );
 }

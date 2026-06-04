@@ -801,8 +801,8 @@ function PauseToggle({
         type="button"
         onClick={onResume}
         className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border border-[var(--color-border)] bg-white text-neutral-600 transition-colors hover:bg-[var(--color-surface-fog)] hover:text-[#FF5200]"
-        aria-label="Reanudar automation"
-        title="Reanudar"
+        aria-label="Resume automation"
+        title="Resume"
       >
         <Play className="size-4" strokeWidth={1.75} />
       </button>
@@ -813,8 +813,8 @@ function PauseToggle({
       type="button"
       onClick={onPause}
       className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border border-[var(--color-border)] bg-white text-neutral-600 transition-colors hover:bg-[var(--color-surface-fog)] hover:text-[#FF5200]"
-      aria-label="Pausar automation"
-      title="Pausar"
+      aria-label="Pause automation"
+      title="Pause"
     >
       <Pause className="size-4" strokeWidth={1.75} />
     </button>

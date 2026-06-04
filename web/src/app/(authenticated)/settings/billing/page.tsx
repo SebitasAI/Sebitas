@@ -92,7 +92,7 @@ export default function SettingsBillingPage() {
       void overviewQuery.refetch();
       void ledgerQuery.refetch();
     } else if (result === "cancel") {
-      setErrorMsg("Cancelaste el checkout. No se hizo ningún cargo.");
+      setErrorMsg("You cancelled checkout. No charge was made.");
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -110,7 +110,7 @@ export default function SettingsBillingPage() {
       setErrorMsg(
         err instanceof Error
           ? err.message
-          : "No pudimos iniciar el checkout. Intenta de nuevo.",
+          : "We couldn't start checkout. Try again.",
       );
       setBusyPlan(null);
     }
@@ -128,7 +128,7 @@ export default function SettingsBillingPage() {
       setErrorMsg(
         err instanceof Error
           ? err.message
-          : "No pudimos abrir el portal de Stripe.",
+          : "We couldn't open the Stripe portal.",
       );
       setPortalBusy(false);
     }
@@ -165,15 +165,15 @@ export default function SettingsBillingPage() {
               <>
                 <div id="planes" className="mt-8 flex items-center justify-between scroll-mt-20">
                   <h2 className="text-sm font-medium text-[var(--color-ink-deep)]">
-                    Elegí tu plan
+                    Choose your plan
                   </h2>
                   <CycleToggle value={cycle} onChange={setCycle} />
                 </div>
 
                 {!overview.stripe_configured && (
                   <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                    Billing no está configurado en este ambiente. Las opciones
-                    de upgrade están deshabilitadas.
+                    Billing is not configured in this environment. Upgrade
+                    options are disabled.
                   </div>
                 )}
 
@@ -220,7 +220,7 @@ function CurrentPlanCard({
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-wider text-neutral-500">
-            Plan actual
+            Current plan
           </p>
           <p className={`mt-1 text-xl font-semibold ${accent.accent}`}>
             {overview.plan_display_name}
@@ -228,14 +228,14 @@ function CurrentPlanCard({
           </p>
           {overview.is_unlimited && (
             <p className="mt-1 text-xs text-neutral-500">
-              Plan interno sin medición de créditos.
+              Internal plan without credit metering.
             </p>
           )}
           {!overview.is_unlimited && (
             <p className="mt-1 text-xs text-neutral-500">
               {overview.plan === "free"
-                ? "50,000 créditos/mes. Renovación automática mensual."
-                : `${formatCredits(overview.credits_per_month)} créditos/mes a ${USD_FORMAT.format(overview.price_usd_monthly)}/mes`}
+                ? "50,000 credits/month. Auto-renews monthly."
+                : `${formatCredits(overview.credits_per_month)} credits/month at ${USD_FORMAT.format(overview.price_usd_monthly)}/mo`}
             </p>
           )}
         </div>
@@ -246,7 +246,7 @@ function CurrentPlanCard({
             className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-white px-3 py-1.5 text-xs font-medium text-[var(--color-ink-deep)] hover:bg-neutral-50 disabled:opacity-50"
           >
             <ExternalLink className="h-3.5 w-3.5" />
-            {portalBusy ? "Abriendo…" : "Administrar"}
+            {portalBusy ? "Opening…" : "Manage"}
           </button>
         )}
         {!overview.has_active_subscription && !overview.is_unlimited && (
@@ -263,7 +263,7 @@ function CurrentPlanCard({
       {!overview.is_unlimited && (
         <div className="mt-4">
           <div className="flex items-center justify-between text-xs text-neutral-500">
-            <span>Créditos disponibles este mes</span>
+            <span>Credits available this month</span>
             <span className="font-medium text-[var(--color-ink-deep)]">
               {formatCredits(overview.balance_credits)} / {formatCredits(overview.credits_per_month)}
             </span>
@@ -279,7 +279,7 @@ function CurrentPlanCard({
 
       {overview.cancel_at_period_end && overview.current_period_end && (
         <p className="mt-3 text-xs text-amber-700">
-          Tu suscripción se cancela el{" "}
+          Your subscription cancels on{" "}
           {new Date(overview.current_period_end).toLocaleDateString()}.
         </p>
       )}
@@ -305,7 +305,7 @@ function CycleToggle({
             : "text-neutral-600 hover:bg-neutral-50"
         }`}
       >
-        Mensual
+        Monthly
       </button>
       <button
         onClick={() => onChange("annual")}
@@ -315,7 +315,7 @@ function CycleToggle({
             : "text-neutral-600 hover:bg-neutral-50"
         }`}
       >
-        Anual <span className="opacity-70">(-20%)</span>
+        Annual <span className="opacity-70">(-20%)</span>
       </button>
     </div>
   );
@@ -349,7 +349,7 @@ const TIER_DEFS: TierDef[] = [
   {
     name: "starter",
     display: "Starter",
-    description: "Para equipos chicos probando el agente.",
+    description: "For small teams trying the agent.",
     badge: "Small-sized companies",
     points: [
       { credits: 40_000, price: 100 },
@@ -361,7 +361,7 @@ const TIER_DEFS: TierDef[] = [
   {
     name: "pro",
     display: "Pro",
-    description: "Para equipos que automatizan day-to-day.",
+    description: "For teams automating day-to-day work.",
     popular: true,
     points: [
       { credits: 160_000, price: 400 },
@@ -374,7 +374,7 @@ const TIER_DEFS: TierDef[] = [
   {
     name: "scale",
     display: "Scale",
-    description: "Para empresas mid-market con varios workspaces.",
+    description: "For mid-market companies with multiple workspaces.",
     badge: "Medium-sized companies",
     points: [
       { credits: 600_000, price: 1_500 },
@@ -388,7 +388,7 @@ const TIER_DEFS: TierDef[] = [
   {
     name: "business",
     display: "Business",
-    description: "Para empresas con SLA, SSO y compliance.",
+    description: "For companies with SLA, SSO, and compliance needs.",
     points: [
       { credits: 3_000_000, price: 7_500 },
       { credits: 4_000_000, price: 10_000 },
@@ -402,7 +402,7 @@ const TIER_DEFS: TierDef[] = [
   {
     name: "enterprise",
     display: "Enterprise",
-    description: "Para volumen alto con descuento + integraciones custom.",
+    description: "For high volume with discounts and custom integrations.",
     badge: "Enterprise",
     points: [
       { credits: 12_000_000, price: 30_000 },
@@ -531,15 +531,15 @@ function TierSliderCard({
       <div className="mt-4">
         <p className="text-2xl font-semibold text-[var(--color-ink-deep)]">
           {USD_FORMAT.format(Math.round(monthlyPrice))}
-          <span className="ml-1 text-xs font-normal text-neutral-500">/mes</span>
+          <span className="ml-1 text-xs font-normal text-neutral-500">/mo</span>
         </p>
         {cycle === "annual" && (
           <p className="text-[11px] text-neutral-500">
-            {USD_FORMAT.format(Math.round(annualTotal))} al año
+            {USD_FORMAT.format(Math.round(annualTotal))} per year
           </p>
         )}
         <p className="mt-0.5 text-xs font-medium text-[var(--color-ink-deep)]">
-          {formatCredits(point.credits)} créditos / mes
+          {formatCredits(point.credits)} credits / month
         </p>
       </div>
 
@@ -551,7 +551,7 @@ function TierSliderCard({
           step={1}
           value={index}
           onChange={(e) => setIndex(Number(e.target.value))}
-          aria-label={`Créditos por mes en ${tier.display}`}
+          aria-label={`Credits per month for ${tier.display}`}
           className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-neutral-200 accent-[var(--color-ink-deep)]"
         />
         <div className="mt-1 flex justify-between text-[10px] text-neutral-400">
@@ -575,11 +575,11 @@ function TierSliderCard({
           } disabled:cursor-not-allowed disabled:opacity-40`}
         >
           {isCurrent
-            ? "Plan actual"
+            ? "Current plan"
             : isBusy
-              ? "Redirigiendo…"
+              ? "Redirecting…"
               : isEnterprise
-                ? "Hablar con sales"
+                ? "Talk to sales"
                 : (
                   <>
                     <Sparkles className="h-3.5 w-3.5" />
@@ -633,15 +633,15 @@ function PlanCard({
       <div className="mt-3">
         <p className="text-2xl font-semibold text-[var(--color-ink-deep)]">
           {USD_FORMAT.format(monthlyEffective)}
-          <span className="ml-1 text-xs font-normal text-neutral-500">/mes</span>
+          <span className="ml-1 text-xs font-normal text-neutral-500">/mo</span>
         </p>
         {cycle === "annual" && (
           <p className="text-xs text-neutral-500">
-            {USD_FORMAT.format(plan.annual_price_floor)} al año
+            {USD_FORMAT.format(plan.annual_price_floor)} per year
           </p>
         )}
         <p className="mt-1 text-xs text-neutral-500">
-          desde {formatCredits(plan.credits_floor)} créditos/mes
+          starting from {formatCredits(plan.credits_floor)} credits/month
         </p>
       </div>
       <button
@@ -649,10 +649,10 @@ function PlanCard({
         disabled={disabled}
         className="mt-4 inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--color-ink-deep)] px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
       >
-        {isCurrent ? "Plan actual" : busy ? "Redirigiendo…" : (
+        {isCurrent ? "Current plan" : busy ? "Redirecting…" : (
           <>
             <Sparkles className="h-3.5 w-3.5" />
-            Seleccionar
+            Select
           </>
         )}
       </button>
@@ -674,33 +674,33 @@ function LedgerSection({
     <div className="mt-8">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-[var(--color-ink-deep)]">
-          Movimientos recientes
+          Recent activity
         </h2>
         <button
           onClick={onRefresh}
           className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-white px-2.5 py-1 text-xs text-neutral-600 hover:bg-neutral-50"
         >
           <RefreshCw className="h-3 w-3" />
-          Refrescar
+          Refresh
         </button>
       </div>
       <div className="mt-3 overflow-hidden rounded-xl border border-[var(--color-border)] bg-white">
         {loading && (
-          <div className="p-4 text-xs text-neutral-500">Cargando…</div>
+          <div className="p-4 text-xs text-neutral-500">Loading…</div>
         )}
         {!loading && entries.length === 0 && (
           <div className="p-6 text-center text-xs text-neutral-500">
-            Aún no hay movimientos.
+            No activity yet.
           </div>
         )}
         {!loading && entries.length > 0 && (
           <table className="w-full text-xs">
             <thead className="border-b border-[var(--color-border)] bg-neutral-50 text-neutral-500">
               <tr>
-                <th className="px-3 py-2 text-left font-medium">Cuándo</th>
-                <th className="px-3 py-2 text-left font-medium">Tipo</th>
-                <th className="px-3 py-2 text-right font-medium">Cambio</th>
-                <th className="px-3 py-2 text-right font-medium">Saldo</th>
+                <th className="px-3 py-2 text-left font-medium">When</th>
+                <th className="px-3 py-2 text-left font-medium">Type</th>
+                <th className="px-3 py-2 text-right font-medium">Change</th>
+                <th className="px-3 py-2 text-right font-medium">Balance</th>
               </tr>
             </thead>
             <tbody>
@@ -746,7 +746,7 @@ function LoadingCard() {
 function ErrorCard({ message }: { message: string }) {
   return (
     <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
-      No pudimos cargar tu billing: {message}
+      We couldn't load your billing: {message}
     </div>
   );
 }
