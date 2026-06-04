@@ -81,17 +81,6 @@ export default function Footer() {
         />
         <FooterCol
           col="md:col-[5/span_2] md:row-2"
-          title="Company"
-          items={[
-            { label: "Partner program", href: "#" },
-            { label: "Affiliate program", href: "#" },
-            { label: "About us", href: "#" },
-            { label: "Brand kit", href: "#" },
-            { label: "Careers", href: "#" },
-          ]}
-        />
-        <FooterCol
-          col="md:col-[8/span_2] md:row-2"
           title="Resources"
           items={[
             { label: "Blog", href: "#" },
@@ -100,7 +89,7 @@ export default function Footer() {
           ]}
         />
         <FooterCol
-          col="md:col-[11/span_2] md:row-2"
+          col="md:col-[8/span_2] md:row-2"
           title="Legal & Docs"
           items={[
             { label: "Terms of service", href: "/terms" },

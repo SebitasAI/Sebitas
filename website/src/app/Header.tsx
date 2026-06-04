@@ -4,8 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 // Dropdown contents. Solutions routes to dedicated `/solutions/<slug>`
-// pages (one config + shared SolutionPage layout). Company items still
-// point at `#` until those pages exist.
+// pages (one config + shared SolutionPage layout).
 const MENUS: Record<string, { label: string; href: string }[]> = {
   Solutions: [
     { label: "Customer Support", href: "/solutions/customer-support" },
@@ -13,12 +12,6 @@ const MENUS: Record<string, { label: string; href: string }[]> = {
     { label: "Marketing & Growth", href: "/solutions/marketing" },
     { label: "Operations", href: "/solutions/operations" },
     { label: "Sales", href: "/solutions/sales" },
-  ],
-  Company: [
-    { label: "About", href: "#" },
-    { label: "Careers", href: "#" },
-    { label: "Blog", href: "#" },
-    { label: "Contact", href: "#" },
   ],
 };
 
@@ -99,7 +92,7 @@ export default function Header() {
             <p className={linkText}>Pricing</p>
           </Link>
 
-          {(["Solutions", "Company"] as const).map((name) => {
+          {(["Solutions"] as const).map((name) => {
             const isOpen = open === name;
             return (
               <div key={name} className="relative">
