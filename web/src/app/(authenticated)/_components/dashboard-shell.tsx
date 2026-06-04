@@ -54,9 +54,9 @@ type NavItem = {
 };
 
 const MAIN_NAV: NavItem[] = [
-  { href: "/dashboard", label: "Inicio", icon: <HomeIcon /> },
+  { href: "/dashboard", label: "Home", icon: <HomeIcon /> },
   { href: "/skills", label: "Skills", icon: <SkillsIcon /> },
-  { href: "/integrations", label: "Integraciones", icon: <IntegrationsIcon /> },
+  { href: "/integrations", label: "Integrations", icon: <IntegrationsIcon /> },
   // Outline icon (lucide) here is intentional: the filled SVGs in
   // ./nav-icons were ported from Antiff and don't have a calendar variant.
   // strokeWidth tuned to read at the same visual weight as the filled set.

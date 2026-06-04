@@ -154,12 +154,12 @@ function SkillsBody() {
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <p className="max-w-2xl text-sm text-neutral-500">
-          Las skills son archivos markdown que le dan a Misterr contexto /
-          playbooks adicionales. Subí desde acá o mandándole un{" "}
+          Skills are markdown files that give Misterr extra context and
+          playbooks. Upload from here or send a{" "}
           <code className="rounded bg-[var(--color-surface-fog)] px-1 text-[12px]">
             .md
           </code>{" "}
-          por DM a Misterr.
+          file to Misterr by DM.
         </p>
         <button
           type="button"
@@ -167,7 +167,7 @@ function SkillsBody() {
           className="inline-flex items-center gap-1.5 rounded-md bg-[#FF5200] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#e54a00]"
         >
           <Upload className="size-3.5" strokeWidth={2} />
-          Subir skill
+          Upload skill
         </button>
       </div>
 
@@ -179,7 +179,7 @@ function SkillsBody() {
         <SkeletonGrid />
       ) : skillsQuery.isError ? (
         <ErrorState
-          message={(skillsQuery.error as Error)?.message ?? "Error desconocido"}
+          message={(skillsQuery.error as Error)?.message ?? "Unknown error"}
           onRetry={() => skillsQuery.refetch()}
         />
       ) : visible.length === 0 ? (
@@ -232,7 +232,7 @@ function SearchBar({
         type="search"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="Buscar skills por nombre o descripción"
+        placeholder="Search skills by name or description"
         className="w-full rounded-lg border border-[var(--color-border)] bg-white py-2 pl-9 pr-3 text-sm text-[var(--color-ink-deep)] placeholder:text-neutral-400 focus:border-[#FF5200] focus:outline-none focus:ring-1 focus:ring-[#FF5200]/30"
       />
     </label>
@@ -303,16 +303,16 @@ function SkeletonGrid() {
 function EmptyState({ tab, search }: { tab: FilterMode; search: string }) {
   let message: string;
   if (search.trim()) {
-    message = `No hay skills que matcheen "${search}".`;
+    message = `No skills match "${search}".`;
   } else if (tab === "installed") {
     message =
-      "Todavía no instalaste ninguna skill. Tocá Install en alguna de la lista (tab All).";
+      "You haven't installed any skills yet. Tap Install on one in the list (All tab).";
   } else if (tab === "mine") {
     message =
-      "Todavía no subiste ninguna skill propia. Mandá un archivo .md a Misterr por DM y decile 'instalala como skill'.";
+      "You haven't uploaded any skills yet. Send a .md file to Misterr by DM and ask it to 'install as skill'.";
   } else {
     message =
-      "No hay skills en este workspace todavía. Subí la primera mandándole un .md a Misterr por DM.";
+      "No skills in this workspace yet. Upload the first one by sending a .md to Misterr by DM.";
   }
   return (
     <div className="rounded-lg border border-dashed border-[var(--color-border)] bg-white py-10 text-center text-sm text-neutral-500">
@@ -330,14 +330,14 @@ function ErrorState({
 }) {
   return (
     <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-      <div className="font-medium">No pude cargar las skills.</div>
+      <div className="font-medium">Couldn't load skills.</div>
       <div className="mt-1 text-xs text-red-600">{message}</div>
       <button
         type="button"
         onClick={onRetry}
         className="mt-3 rounded-md border border-red-300 bg-white px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
       >
-        Reintentar
+        Retry
       </button>
     </div>
   );
@@ -369,7 +369,7 @@ function SkillCard({
           </div>
           {skill.created_by_user_id ? null : (
             <div className="mt-0.5 text-[11px] text-neutral-400">
-              Sin autor (subida CLI o legacy)
+              No author (CLI or legacy upload)
             </div>
           )}
         </div>
@@ -378,10 +378,10 @@ function SkillCard({
             type="button"
             onClick={onView}
             className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-white px-2 py-1.5 text-xs font-medium text-neutral-600 hover:text-[var(--color-ink-deep)]"
-            title="Ver contenido del .md"
+            title="View .md content"
           >
             <Eye className="size-3.5" strokeWidth={1.75} />
-            Ver
+            View
           </button>
           {skill.is_installed ? (
             <button
@@ -390,7 +390,7 @@ function SkillCard({
               className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-fog)] px-2.5 py-1.5 text-xs font-medium text-neutral-700 hover:bg-white hover:text-[var(--color-ink-deep)]"
             >
               <Minus className="size-3.5" strokeWidth={2} />
-              Desinstalar
+              Uninstall
             </button>
           ) : (
             <button
@@ -399,7 +399,7 @@ function SkillCard({
               className="inline-flex items-center gap-1 rounded-md bg-[var(--color-ink-deep)] px-2.5 py-1.5 text-xs font-medium text-white hover:bg-black"
             >
               <Plus className="size-3.5" strokeWidth={2.25} />
-              Instalar
+              Install
             </button>
           )}
         </div>

@@ -209,10 +209,10 @@ function AutomationsBody() {
   return (
     <div className="flex flex-col gap-5">
       <p className="text-sm text-neutral-500">
-        Las automations disparan al agente cuando llega un evento externo.
-        Tres tipos: URL directa (POSTeá JSON desde donde quieras), o vía
-        Pipedream / Composio para conectar apps con OAuth + filtros.
-        Se crean y editan hablándole a Misterr por chat.
+        Automations trigger the agent when an external event arrives.
+        Three types: direct URL (POST JSON from anywhere), or via
+        Pipedream / Composio to connect apps with OAuth + filters.
+        Create and edit them by chatting with Misterr.
       </p>
 
       <SearchBar value={search} onChange={setSearch} />
@@ -223,7 +223,7 @@ function AutomationsBody() {
         <SkeletonList />
       ) : listQuery.isError ? (
         <ErrorState
-          message={(listQuery.error as Error)?.message ?? "Error desconocido"}
+          message={(listQuery.error as Error)?.message ?? "Unknown error"}
           onRetry={() => listQuery.refetch()}
         />
       ) : visible.length === 0 ? (
@@ -269,7 +269,7 @@ function SearchBar({
         type="search"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="Buscar por nombre, descripción o source"
+        placeholder="Search by name, description, or source"
         className="w-full rounded-lg border border-[var(--color-border)] bg-white py-2 pl-9 pr-3 text-sm text-[var(--color-ink-deep)] placeholder:text-neutral-400 focus:border-[#FF5200] focus:outline-none focus:ring-1 focus:ring-[#FF5200]/30"
       />
     </label>
@@ -348,12 +348,12 @@ function EmptyState({
 }) {
   let message: string;
   if (search.trim()) {
-    message = `No hay automations que matcheen "${search}".`;
+    message = `No automations match "${search}".`;
   } else if (tab === "mine") {
     message =
-      "Todavía no creaste automations. Pedile a Misterr en Slack: \"creá una automation con source direct\" para empezar.";
+      "You haven't created any automations yet. Ask Misterr on Slack: \"create an automation with source direct\" to get started.";
   } else {
-    message = "No hay automations en este workspace todavía.";
+    message = "No automations in this workspace yet.";
   }
   return (
     <div className="rounded-lg border border-dashed border-[var(--color-border)] bg-white py-10 text-center text-sm text-neutral-500">
@@ -371,14 +371,14 @@ function ErrorState({
 }) {
   return (
     <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-      <div className="font-medium">No pude cargar las automations.</div>
+      <div className="font-medium">Couldn't load automations.</div>
       <div className="mt-1 text-xs text-red-600">{message}</div>
       <button
         type="button"
         onClick={onRetry}
         className="mt-3 rounded-md border border-red-300 bg-white px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
       >
-        Reintentar
+        Retry
       </button>
     </div>
   );
@@ -414,7 +414,7 @@ function AutomationCard({
     ? formatDistanceToNow(new Date(automation.last_fired_at), {
         addSuffix: true,
       })
-    : "nunca";
+    : "never";
 
   const createdRelative = formatDistanceToNow(
     new Date(automation.created_at),
@@ -502,7 +502,7 @@ function AutomationCard({
                   {automation.destination_channel}
                 </span>
               ) : (
-                <span className="italic">DM al creador (default)</span>
+                <span className="italic">DM to creator (default)</span>
               )}
             </Field>
             <Field label="Source">{automation.source}</Field>
@@ -538,7 +538,7 @@ function AutomationCard({
 
           {automation.last_fire_error ? (
             <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-2 text-[11px] text-red-700">
-              <span className="font-medium">Último error:</span>{" "}
+              <span className="font-medium">Last error:</span>{" "}
               {automation.last_fire_error}
             </div>
           ) : null}
@@ -576,7 +576,7 @@ function DirectWebhookPanel({
   return (
     <div className="rounded-md border border-[#FF5200]/20 bg-[#FF5200]/5 p-3">
       <div className="text-[10px] font-medium uppercase tracking-wide text-[#FF5200]">
-        Webhook URL (mantenelo secreto)
+        Webhook URL (keep it secret)
       </div>
       <div className="mt-1 flex items-center gap-2">
         <code className="flex-1 break-all rounded bg-white px-2 py-1 font-mono text-[11px] text-neutral-800">
@@ -586,25 +586,25 @@ function DirectWebhookPanel({
           type="button"
           onClick={onCopy}
           className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-white px-2 py-1 text-[11px] text-neutral-700 hover:bg-[var(--color-surface-fog)]"
-          title="Copiar al portapapeles"
+          title="Copy to clipboard"
         >
           <Copy className="size-3" strokeWidth={1.75} />
-          {copied ? "copiado" : "copiar"}
+          {copied ? "copied" : "copy"}
         </button>
         <button
           type="button"
           onClick={onRotate}
           disabled={isRotating}
           className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-white px-2 py-1 text-[11px] text-neutral-700 hover:bg-[var(--color-surface-fog)] disabled:opacity-50"
-          title="Regenerar URL (la anterior deja de funcionar)"
+          title="Regenerate URL (the previous one stops working)"
         >
           <KeyRound className="size-3" strokeWidth={1.75} />
-          {isRotating ? "rotando…" : "rotar"}
+          {isRotating ? "rotating…" : "rotate"}
         </button>
       </div>
       <p className="mt-1 text-[10px] text-neutral-500">
-        Cualquiera con esta URL puede disparar la automation. Si se filtra,
-        rotala.
+        Anyone with this URL can trigger the automation. If it leaks,
+        rotate it.
       </p>
     </div>
   );
@@ -622,17 +622,17 @@ function RunHistoryPanel({
   return (
     <div className="mt-3 border-t border-[var(--color-border)] pt-3">
       <div className="text-[10px] font-medium uppercase tracking-wide text-neutral-500">
-        Historial de fires
+        Fire history
       </div>
       {isLoading ? (
-        <div className="mt-1 text-[11px] text-neutral-500">Cargando…</div>
+        <div className="mt-1 text-[11px] text-neutral-500">Loading…</div>
       ) : isError ? (
         <div className="mt-1 text-[11px] text-red-600">
-          No pude cargar el historial.
+          Couldn't load history.
         </div>
       ) : !runs || runs.length === 0 ? (
         <div className="mt-1 text-[11px] text-neutral-500">
-          Sin fires registrados todavía.
+          No fires recorded yet.
         </div>
       ) : (
         <ul className="mt-1 flex flex-col gap-2">
@@ -753,7 +753,7 @@ function SourceBadge({ source }: { source: AutomationSource }) {
 function PausedBadge() {
   return (
     <span className="inline-flex items-center rounded-full bg-yellow-100 px-2 py-0.5 text-[10px] font-medium text-yellow-700">
-      Pausada
+      Paused
     </span>
   );
 }

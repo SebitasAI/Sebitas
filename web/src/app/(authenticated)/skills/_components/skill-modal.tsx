@@ -1,6 +1,6 @@
 "use client";
 
-// Unified modal for "Ver" (read-only) and "Subir nueva" (upload) flows.
+// Unified modal for "View" (read-only) and "Upload new" flows.
 // Mode is implicit: when a `skillName` prop is given, we fetch the detail
 // and render read-only. Otherwise we render the upload form.
 
@@ -60,11 +60,11 @@ function ViewModal({
     >
       {detailQuery.isLoading ? (
         <div className="flex h-40 items-center justify-center text-sm text-neutral-500">
-          Cargando…
+          Loading…
         </div>
       ) : detailQuery.isError ? (
         <ErrorBlock
-          message={(detailQuery.error as Error)?.message ?? "Error desconocido"}
+          message={(detailQuery.error as Error)?.message ?? "Unknown error"}
         />
       ) : detailQuery.data ? (
         <ViewBody detail={detailQuery.data} />
@@ -79,10 +79,10 @@ function ViewBody({ detail }: { detail: SkillDetail }) {
       <MetadataGrid detail={detail} />
       <div>
         <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-neutral-500">
-          Contenido del .md
+          .md content
         </div>
         <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap rounded-md border border-[var(--color-border)] bg-[var(--color-surface-fog)] p-3 font-mono text-[12px] leading-relaxed text-[var(--color-ink-deep)]">
-          {detail.body || "(vacío)"}
+          {detail.body || "(empty)"}
         </pre>
       </div>
     </div>
@@ -104,19 +104,19 @@ function MetadataGrid({ detail }: { detail: SkillDetail }) {
           )}
         </span>
       </MetaField>
-      <MetaField label="Activación">
+      <MetaField label="Activation">
         {detail.effective_activation === "always_active"
           ? "Always on"
           : "On demand"}
       </MetaField>
-      <MetaField label="Estado">
-        {detail.is_installed ? "Instalada" : "No instalada"}
+      <MetaField label="Status">
+        {detail.is_installed ? "Installed" : "Not installed"}
       </MetaField>
-      <MetaField label="Versión">v{detail.version}</MetaField>
-      <MetaField label="Tamaño">
+      <MetaField label="Version">v{detail.version}</MetaField>
+      <MetaField label="Size">
         {Math.max(1, Math.round(detail.size_bytes / 1024))} KB
       </MetaField>
-      <MetaField label="Fuente">{detail.source}</MetaField>
+      <MetaField label="Source">{detail.source}</MetaField>
     </dl>
   );
 }
@@ -195,7 +195,7 @@ function UploadModal({ onClose }: { onClose: () => void }) {
       onClose();
     },
     onError: (err: Error & { status?: number }) => {
-      setError(err.message || "Error desconocido");
+      setError(err.message || "Unknown error");
     },
   });
 
@@ -203,15 +203,15 @@ function UploadModal({ onClose }: { onClose: () => void }) {
     setError(null);
     const trimmedName = name.trim();
     if (!trimmedName) {
-      setError("El nombre es obligatorio.");
+      setError("Name is required.");
       return;
     }
     if (!description.trim()) {
-      setError("La descripción es obligatoria.");
+      setError("Description is required.");
       return;
     }
     if (!body.trim()) {
-      setError("El contenido (.md) no puede estar vacío.");
+      setError("Content (.md) can't be empty.");
       return;
     }
     const links = linksRaw
@@ -230,8 +230,8 @@ function UploadModal({ onClose }: { onClose: () => void }) {
 
   return (
     <ModalShell
-      title="Subir skill"
-      subtitle="Arrastrá un .md o llená los campos manualmente."
+      title="Upload skill"
+      subtitle="Drag in a .md or fill the fields manually."
       onClose={onClose}
     >
       <div className="flex flex-col gap-4">
@@ -243,23 +243,23 @@ function UploadModal({ onClose }: { onClose: () => void }) {
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <TextField
-            label="Nombre (slug kebab-case)"
+            label="Name (kebab-case slug)"
             value={name}
             onChange={setName}
-            placeholder="mi-skill"
+            placeholder="my-skill"
             mono
           />
           <TextField
-            label="Descripción (1 línea)"
+            label="Description (1 line)"
             value={description}
             onChange={setDescription}
-            placeholder="Qué hace esta skill en una oración"
+            placeholder="What this skill does in one sentence"
           />
         </div>
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <RadioGroup
-            label="Activación"
+            label="Activation"
             value={activation}
             onChange={(v) => setActivation(v as typeof activation)}
             options={[
@@ -272,14 +272,14 @@ function UploadModal({ onClose }: { onClose: () => void }) {
             value={scope}
             onChange={(v) => setScope(v as typeof scope)}
             options={[
-              { value: "personal", label: "Personal (solo vos)" },
-              { value: "workspace", label: "Workspace (todos)" },
+              { value: "personal", label: "Personal (only you)" },
+              { value: "workspace", label: "Workspace (everyone)" },
             ]}
           />
         </div>
 
         <TextField
-          label="Tags / links (comma-separated, opcional)"
+          label="Tags / links (comma-separated, optional)"
           value={linksRaw}
           onChange={setLinksRaw}
           placeholder="seo, analytics"
@@ -287,13 +287,13 @@ function UploadModal({ onClose }: { onClose: () => void }) {
 
         <div>
           <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-neutral-500">
-            Contenido del .md
+            .md content
           </div>
           <textarea
             value={body}
             onChange={(e) => setBody(e.target.value)}
             rows={12}
-            placeholder="# Mi skill\n\nInstrucciones que Misterr va a leer..."
+            placeholder="# My skill\n\nInstructions Misterr will read..."
             className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface-fog)] p-3 font-mono text-[12px] leading-relaxed text-[var(--color-ink-deep)] focus:border-[#FF5200] focus:outline-none focus:ring-1 focus:ring-[#FF5200]/30"
           />
         </div>
@@ -306,7 +306,7 @@ function UploadModal({ onClose }: { onClose: () => void }) {
             onClick={onClose}
             className="rounded-md px-3 py-1.5 text-sm text-neutral-600 hover:text-[var(--color-ink-deep)]"
           >
-            Cancelar
+            Cancel
           </button>
           <button
             type="button"
@@ -315,7 +315,7 @@ function UploadModal({ onClose }: { onClose: () => void }) {
             className="inline-flex items-center gap-1 rounded-md bg-[#FF5200] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#e54a00] disabled:opacity-60"
           >
             <Upload className="size-3.5" strokeWidth={2} />
-            {createMut.isPending ? "Subiendo…" : "Subir skill"}
+            {createMut.isPending ? "Uploading…" : "Upload skill"}
           </button>
         </div>
       </div>
@@ -340,7 +340,7 @@ function DropZone({
     const file = e.dataTransfer.files?.[0];
     if (!file) return;
     if (!file.name.toLowerCase().endsWith(".md")) {
-      alert("Solo aceptamos archivos .md");
+      alert("We only accept .md files");
       return;
     }
     onFile(file);
@@ -367,10 +367,10 @@ function DropZone({
           <strong className="font-medium text-[var(--color-ink-deep)]">
             {fileName}
           </strong>{" "}
-          cargado · click o drop para reemplazar
+          loaded · click or drop to replace
         </span>
       ) : (
-        <span>Arrastrá un .md acá o click para seleccionar</span>
+        <span>Drag a .md here or click to select</span>
       )}
       <input
         ref={fileInputRef}
@@ -503,7 +503,7 @@ function ModalShell({
             type="button"
             onClick={onClose}
             className="rounded-md p-1 text-neutral-500 hover:bg-[var(--color-surface-fog)] hover:text-[var(--color-ink-deep)]"
-            aria-label="Cerrar"
+            aria-label="Close"
           >
             <X className="size-4" strokeWidth={1.75} />
           </button>

@@ -100,12 +100,12 @@ function InstallModal({ slackInstallUrl }: { slackInstallUrl: string }) {
             id="install-gate-title"
             className="text-2xl font-semibold text-[var(--color-ink-deep)]"
           >
-            Conectá Misterr a tu Slack
+            Connect Misterr to your Slack
           </h1>
           <p className="mt-3 text-sm leading-relaxed text-neutral-600">
-            Misterr vive dentro de tu workspace de Slack. Antes de seguir,
-            instalá la app en el workspace de tu equipo. Te toma ~30 segundos
-            (autorizás, volvés acá, listo).
+            Misterr lives inside your Slack workspace. Before continuing,
+            install the app in your team&apos;s workspace. It takes about 30 seconds
+            (authorize, come back here, done).
           </p>
 
           <a
@@ -115,12 +115,12 @@ function InstallModal({ slackInstallUrl }: { slackInstallUrl: string }) {
             className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-ink-deep)] px-4 py-3 text-sm font-semibold text-white hover:opacity-90"
           >
             <SlackIcon className="size-5" />
-            Instalar Misterr en Slack
+            Install Misterr on Slack
           </a>
 
           <p className="mt-4 text-[11px] text-neutral-500">
-            Esperando tu instalación. La página se desbloquea automáticamente
-            apenas Slack confirme.
+            Waiting for your installation. This page unlocks automatically
+            as soon as Slack confirms.
           </p>
         </div>
       </div>
