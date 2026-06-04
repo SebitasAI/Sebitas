@@ -3,14 +3,16 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
-// Dropdown contents: swap hrefs for real routes when they exist.
+// Dropdown contents. Solutions routes to dedicated `/solutions/<slug>`
+// pages (one config + shared SolutionPage layout). Company items still
+// point at `#` until those pages exist.
 const MENUS: Record<string, { label: string; href: string }[]> = {
   Solutions: [
-    { label: "Customer Support", href: "#" },
-    { label: "Engineering", href: "#" },
-    { label: "Marketing & Growth", href: "#" },
-    { label: "Operations", href: "#" },
-    { label: "Sales", href: "#" },
+    { label: "Customer Support", href: "/solutions/customer-support" },
+    { label: "Engineering", href: "/solutions/engineering" },
+    { label: "Marketing & Growth", href: "/solutions/marketing" },
+    { label: "Operations", href: "/solutions/operations" },
+    { label: "Sales", href: "/solutions/sales" },
   ],
   Company: [
     { label: "About", href: "#" },
@@ -92,7 +94,7 @@ export default function Header() {
         <nav ref={navRef} className="hidden items-center gap-[2px] shrink-0 lg:flex">
           <Link
             href="/pricing"
-            className="flex h-[39px] items-center rounded-[12px] px-[16px] hover:bg-[#f3f3f3]"
+            className="flex h-[39px] items-center rounded-[12px] px-[16px]"
           >
             <p className={linkText}>Pricing</p>
           </Link>
@@ -105,7 +107,7 @@ export default function Header() {
                   type="button"
                   onClick={() => setOpen(isOpen ? null : name)}
                   aria-expanded={isOpen}
-                  className="flex h-[39px] items-center gap-[3.99px] rounded-[12px] px-[16px] hover:bg-[#f3f3f3]"
+                  className="flex h-[39px] items-center gap-[3.99px] rounded-[12px] px-[16px]"
                 >
                   <p className={linkText}>{name}</p>
                   <img
@@ -123,7 +125,7 @@ export default function Header() {
                         key={item.label}
                         href={item.href}
                         onClick={() => setOpen(null)}
-                        className="block rounded-[8px] px-[12px] py-[9px] font-[family-name:var(--font-inter)] text-[15px] text-[#4a4a4a] hover:bg-[#f3f3f3]"
+                        className="block rounded-[8px] px-[12px] py-[9px] font-[family-name:var(--font-inter)] text-[15px] text-[#4a4a4a]"
                       >
                         {item.label}
                       </Link>
@@ -136,7 +138,7 @@ export default function Header() {
 
           <Link
             href="#security"
-            className="flex h-[39px] items-center rounded-[12px] px-[16px] hover:bg-[#f3f3f3]"
+            className="flex h-[39px] items-center rounded-[12px] px-[16px]"
           >
             <p className={linkText}>Security</p>
           </Link>
