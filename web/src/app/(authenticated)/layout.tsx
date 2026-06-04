@@ -11,7 +11,7 @@ import { InstallGate } from "./_components/install-gate";
 // re-querying. Belt + suspenders.
 //
 // On top of auth, `InstallGate` covers the dashboard with a forced
-// "instalá Misterr en Slack" modal until the user has at least one
+// "install Misterr on Slack" modal until the user has at least one
 // workspace where the bot is installed. Without that there's nothing
 // useful for them to do inside the app.
 //

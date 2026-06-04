@@ -25,10 +25,10 @@ export function ComingSoon({
         <p className="text-xs text-neutral-500">{description}</p>
         <div className="mt-5 rounded-xl border border-dashed border-[var(--color-border)] bg-white p-8 text-center">
           <p className="text-sm font-medium text-[var(--color-ink-deep)]">
-            Próximamente
+            Coming soon
           </p>
           <p className="mt-1 text-xs text-neutral-500">
-            Esta sección está en construcción.
+            This section is under construction.
           </p>
         </div>
       </PageBody>

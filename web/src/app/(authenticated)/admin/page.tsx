@@ -51,26 +51,26 @@ function AdminBody() {
   });
 
   if (meQuery.isLoading) {
-    return <div className="text-sm text-neutral-500">Verificando permisos…</div>;
+    return <div className="text-sm text-neutral-500">Checking permissions…</div>;
   }
   if (meQuery.isError) {
     return (
       <ErrorBlock
-        message={(meQuery.error as Error)?.message ?? "Error desconocido"}
+        message={(meQuery.error as Error)?.message ?? "Unknown error"}
       />
     );
   }
   if (!meQuery.data?.is_admin) {
     return (
       <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
-        <div className="font-medium">No tenés permisos de platform admin.</div>
+        <div className="font-medium">You don&apos;t have platform admin permissions.</div>
         <p className="mt-1 text-xs text-amber-700">
-          Tu email{" "}
+          Your email{" "}
           <code className="rounded bg-white/60 px-1">
-            {meQuery.data?.email ?? "(desconocido)"}
+            {meQuery.data?.email ?? "(unknown)"}
           </code>{" "}
-          no está en la lista <code>PLATFORM_ADMINS</code>. Si necesitás
-          acceso, pediselo a quien gestione Doppler.
+          is not on the <code>PLATFORM_ADMINS</code> list. If you need
+          access, ask whoever manages Doppler.
         </p>
       </div>
     );
@@ -99,8 +99,8 @@ function AdminDashboard() {
   return (
     <div className="flex flex-col gap-5">
       <p className="text-sm text-neutral-500">
-        Read-only overview de toda la plataforma. Filtrá por workspace usando
-        el dropdown a la derecha de cada tab.
+        Read-only overview of the whole platform. Filter by workspace using
+        the dropdown to the right of each tab.
       </p>
 
       <Tabs value={tab} onChange={setTab} />
@@ -180,12 +180,12 @@ function WorkspacesTab({
   onPickWorkspace: (id: string) => void;
 }) {
   if (query.isLoading) {
-    return <div className="text-sm text-neutral-500">Cargando workspaces…</div>;
+    return <div className="text-sm text-neutral-500">Loading workspaces…</div>;
   }
   if (query.isError) {
     return (
       <ErrorBlock
-        message={(query.error as Error)?.message ?? "Error desconocido"}
+        message={(query.error as Error)?.message ?? "Unknown error"}
       />
     );
   }
@@ -193,7 +193,7 @@ function WorkspacesTab({
   if (workspaces.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-[var(--color-border)] bg-white py-10 text-center text-sm text-neutral-500">
-        No hay workspaces todavía.
+        No workspaces yet.
       </div>
     );
   }
@@ -261,13 +261,13 @@ function WorkspaceRow({
               <span>🔌 {workspace.integration_count} integrations</span>
               {workspace.installed_at ? (
                 <span>
-                  instalado{" "}
+                  installed{" "}
                   {formatDistanceToNow(new Date(workspace.installed_at), {
                     addSuffix: true,
                   })}
                 </span>
               ) : (
-                <span className="text-amber-600">no instalado</span>
+                <span className="text-amber-600">not installed</span>
               )}
             </div>
           </div>
@@ -277,21 +277,21 @@ function WorkspaceRow({
           onClick={() => onPickWorkspace(workspace.id)}
           className="rounded-md border border-[var(--color-border)] bg-white px-2.5 py-1 text-[11px] font-medium text-neutral-600 hover:text-[var(--color-ink-deep)]"
         >
-          Filtrar
+          Filter
         </button>
       </header>
       {expanded ? (
         <div className="border-t border-[var(--color-border)] bg-[var(--color-surface-fog)]/40 px-4 py-3 text-xs">
           {usersQuery.isLoading ? (
-            <div className="text-neutral-500">Cargando users…</div>
+            <div className="text-neutral-500">Loading users…</div>
           ) : usersQuery.isError ? (
             <ErrorBlock
               message={
-                (usersQuery.error as Error)?.message ?? "Error desconocido"
+                (usersQuery.error as Error)?.message ?? "Unknown error"
               }
             />
           ) : usersQuery.data?.users.length === 0 ? (
-            <div className="text-neutral-500">Sin users registrados.</div>
+            <div className="text-neutral-500">No users registered.</div>
           ) : (
             <table className="w-full text-left">
               <thead className="text-[10px] uppercase tracking-wide text-neutral-500">
@@ -300,7 +300,7 @@ function WorkspaceRow({
                   <th>Email</th>
                   <th>TZ</th>
                   <th>Slack id</th>
-                  <th>Estado</th>
+                  <th>Status</th>
                 </tr>
               </thead>
               <tbody>
@@ -433,12 +433,12 @@ function FollowUpsTable({
         <thead className="bg-[var(--color-surface-fog)] text-[10px] uppercase tracking-wide text-neutral-500">
           <tr>
             <th className="px-3 py-2">Workspace</th>
-            <th className="px-3 py-2">Usuario</th>
-            <th className="px-3 py-2">Motivo</th>
-            <th className="px-3 py-2">Estado</th>
+            <th className="px-3 py-2">User</th>
+            <th className="px-3 py-2">Reason</th>
+            <th className="px-3 py-2">Status</th>
             <th className="px-3 py-2">Nudges</th>
-            <th className="px-3 py-2">Programado</th>
-            <th className="px-3 py-2 text-right">Acciones</th>
+            <th className="px-3 py-2">Scheduled</th>
+            <th className="px-3 py-2 text-right">Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -475,7 +475,7 @@ function FollowUpsTable({
                       onClick={() => {
                         if (
                           window.confirm(
-                            `¿Cancelar este follow-up? Motivo:\n\n${r.reason}`,
+                            `Cancel this follow-up? Reason:\n\n${r.reason}`,
                           )
                         ) {
                           cancelMutation.mutate(r.id);
@@ -484,7 +484,7 @@ function FollowUpsTable({
                       disabled={cancelMutation.isPending}
                       className="rounded border border-red-300 bg-white px-2 py-1 text-[11px] font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
                     >
-                      Cancelar
+                      Cancel
                     </button>
                   ) : (
                     <span className="text-[11px] text-neutral-400">—</span>
@@ -518,7 +518,7 @@ function WorkspaceFilter({
         onChange={(e) => onChange(e.target.value || null)}
         className="rounded-md border border-[var(--color-border)] bg-white px-2 py-1 text-sm text-[var(--color-ink-deep)] focus:border-[#FF5200] focus:outline-none focus:ring-1 focus:ring-[#FF5200]/30"
       >
-        <option value="">Todos</option>
+        <option value="">All</option>
         {workspaces.map((w) => (
           <option key={w.id} value={w.id}>
             {w.name ?? w.slack_team_id}
@@ -550,7 +550,7 @@ function ScheduledTasksTable({
             <th className="px-3 py-2">Cron</th>
             <th className="px-3 py-2">Next</th>
             <th className="px-3 py-2">Last</th>
-            <th className="px-3 py-2">Estado</th>
+            <th className="px-3 py-2">Status</th>
           </tr>
         </thead>
         <tbody>
@@ -624,10 +624,10 @@ function SkillsTable({
               <th className="px-3 py-2">Name</th>
               <th className="px-3 py-2">Source</th>
               <th className="px-3 py-2">Scope</th>
-              <th className="px-3 py-2">Activación</th>
+              <th className="px-3 py-2">Activation</th>
               <th className="px-3 py-2">Size</th>
-              <th className="px-3 py-2">Descripción</th>
-              <th className="px-3 py-2 text-right">Acciones</th>
+              <th className="px-3 py-2">Description</th>
+              <th className="px-3 py-2 text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -660,7 +660,7 @@ function SkillsTable({
                     onClick={() => setSelectedId(s.id)}
                     className="rounded border border-[var(--color-border)] bg-white px-2 py-1 text-[11px] font-medium hover:bg-neutral-50"
                   >
-                    Ver / Editar
+                    View / Edit
                   </button>
                 </td>
               </tr>
@@ -760,7 +760,7 @@ function SkillDetailModal({
             type="button"
             onClick={onClose}
             className="rounded p-1 text-neutral-500 hover:bg-neutral-100"
-            aria-label="Cerrar"
+            aria-label="Close"
           >
             <X className="h-4 w-4" />
           </button>
@@ -768,10 +768,10 @@ function SkillDetailModal({
 
         {isMemory && (
           <div className="mx-5 mt-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-            <strong>Memoria.</strong> Mantené las secciones{" "}
-            <code className="font-mono">## Curated summary</code> y{" "}
-            <code className="font-mono">## Observations log</code>. Editar mal
-            puede romper la compactación.
+            <strong>Memory.</strong> Keep the{" "}
+            <code className="font-mono">## Curated summary</code> and{" "}
+            <code className="font-mono">## Observations log</code> sections. Editing badly
+            can break compaction.
           </div>
         )}
 
@@ -802,7 +802,7 @@ function SkillDetailModal({
             onClick={() => {
               if (
                 window.confirm(
-                  `¿Borrar "${summary?.name}"? Esta acción no se puede deshacer.`,
+                  `Delete "${summary?.name}"? This action can't be undone.`,
                 )
               ) {
                 deleteMutation.mutate();
@@ -811,7 +811,7 @@ function SkillDetailModal({
             disabled={deleteMutation.isPending}
             className="rounded border border-red-300 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
           >
-            {deleteMutation.isPending ? "Borrando..." : "Borrar"}
+            {deleteMutation.isPending ? "Deleting..." : "Delete"}
           </button>
           <div className="flex gap-2">
             <button
@@ -819,7 +819,7 @@ function SkillDetailModal({
               onClick={onClose}
               className="rounded border border-[var(--color-border)] bg-white px-3 py-1.5 text-xs font-medium hover:bg-neutral-50"
             >
-              Cerrar
+              Close
             </button>
             <button
               type="button"
@@ -829,7 +829,7 @@ function SkillDetailModal({
               disabled={!isDirty || saveMutation.isPending}
               className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {saveMutation.isPending ? "Guardando..." : "Guardar"}
+              {saveMutation.isPending ? "Saving..." : "Save"}
             </button>
           </div>
         </div>
@@ -859,8 +859,8 @@ function IntegrationsTable({
               <th className="px-3 py-2">Workspace</th>
               <th className="px-3 py-2">App</th>
               <th className="px-3 py-2">Provider</th>
-              <th className="px-3 py-2">Estado</th>
-              <th className="px-3 py-2">Creado</th>
+              <th className="px-3 py-2">Status</th>
+              <th className="px-3 py-2">Created</th>
               <th className="px-3 py-2 text-right">Skill</th>
             </tr>
           </thead>
@@ -888,14 +888,14 @@ function IntegrationsTable({
                       type="button"
                       onClick={() => setOpenSkillId(r.linked_skill_id)}
                       className="rounded border border-[var(--color-border)] bg-white px-2 py-1 text-[11px] font-medium hover:bg-neutral-50"
-                      title={`Abrir integrations/${r.app}`}
+                      title={`Open integrations/${r.app}`}
                     >
-                      Ver skill
+                      View skill
                     </button>
                   ) : (
                     <span
                       className="text-[11px] text-neutral-400"
-                      title="No hay skill auto-generada (probablemente Composio o aún no se generó)"
+                      title="No auto-generated skill (likely Composio or not yet generated)"
                     >
                       —
                     </span>
@@ -921,7 +921,7 @@ function IntegrationsTable({
 // --------------------------------------------------------------------------- //
 
 function Loader() {
-  return <div className="text-sm text-neutral-500">Cargando…</div>;
+  return <div className="text-sm text-neutral-500">Loading…</div>;
 }
 
 function ErrorBlock({ message }: { message: string }) {
@@ -935,7 +935,7 @@ function ErrorBlock({ message }: { message: string }) {
 function EmptyBlock({ label }: { label: string }) {
   return (
     <div className="rounded-lg border border-dashed border-[var(--color-border)] bg-white py-10 text-center text-sm text-neutral-500">
-      No hay {label} todavía.
+      No {label} yet.
     </div>
   );
 }
