@@ -15,7 +15,7 @@
 // windowing entirely: the filter is the user's intent and they
 // expect to see everything that matches.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useAuth } from "@clerk/nextjs";
 import { useQuery } from "@tanstack/react-query";
@@ -31,11 +31,14 @@ import {
 const CATALOG_KEY = ["integrations", "catalog", "all"] as const;
 const CONNECTIONS_KEY = ["integrations", "connections", "all"] as const;
 
-// Lazy-load tuning. 60 fits 20 rows of 3 cards on a desktop grid;
-// the user sees a full screen + a bit before the sentinel triggers
-// the next batch. Step 60 keeps growth smooth without 200-row jumps.
-const INITIAL_WINDOW = 60;
-const WINDOW_STEP = 60;
+// Lazy-load tuning. The catalog has 3K+ apps; rendering them all on
+// first paint took several seconds. We show this many cards initially
+// and grow the window by `WINDOW_STEP` whenever the sentinel at the
+// bottom of the list scrolls into view. 100 is a round, user-readable
+// number that fits ~33 rows of 3 on a desktop grid -- one full
+// screenful plus a bit of headroom before the next batch triggers.
+const INITIAL_WINDOW = 100;
+const WINDOW_STEP = 100;
 
 type Tab = "all" | "popular";
 
@@ -174,13 +177,15 @@ function IntegrationsBody() {
             ))}
           </ul>
           {hasMore ? (
-            <div
+            <LoadMoreSentinel
               ref={sentinelRef}
-              className="flex items-center justify-center py-6 text-xs text-neutral-400"
-              aria-hidden="true"
-            >
-              Cargando más…
-            </div>
+              shown={rendered.length}
+              total={visible.length}
+              step={WINDOW_STEP}
+              onLoadMore={() =>
+                setWindowSize((n) => Math.min(n + WINDOW_STEP, visible.length))
+              }
+            />
           ) : null}
         </>
       )}
@@ -325,6 +330,44 @@ function AppCard({ app, connections }: { app: CatalogApp; connections: Connectio
     </Link>
   );
 }
+
+// Visible "load more" sentinel + button shown at the bottom of the
+// integrations grid. Auto-loads via IntersectionObserver in the parent
+// (the ref) as the user scrolls; the button is a manual fallback for
+// keyboard users / unusually slow connections where the observer hasn't
+// fired yet. Shows progress so the user knows how much is left.
+const LoadMoreSentinel = React.forwardRef<
+  HTMLDivElement,
+  {
+    shown: number;
+    total: number;
+    step: number;
+    onLoadMore: () => void;
+  }
+>(function LoadMoreSentinel({ shown, total, step, onLoadMore }, ref) {
+  const remaining = Math.max(0, total - shown);
+  const nextBatch = Math.min(step, remaining);
+  return (
+    <div
+      ref={ref}
+      className="mt-4 flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-[var(--color-border)] bg-white px-6 py-8"
+    >
+      <span className="inline-flex size-6 animate-spin items-center justify-center rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-ink-deep)]" />
+      <p className="text-xs text-neutral-500">
+        Mostrando <span className="font-medium text-[var(--color-ink-deep)]">{shown.toLocaleString()}</span> de{" "}
+        <span className="font-medium text-[var(--color-ink-deep)]">{total.toLocaleString()}</span> integraciones
+      </p>
+      <button
+        type="button"
+        onClick={onLoadMore}
+        className="rounded-md border border-[var(--color-border)] bg-white px-3 py-1.5 text-xs font-medium text-[var(--color-ink-deep)] hover:bg-neutral-50"
+      >
+        Cargar {nextBatch} más
+      </button>
+    </div>
+  );
+});
+
 
 function AppLogo({ app }: { app: CatalogApp }) {
   if (app.logo_url) {
