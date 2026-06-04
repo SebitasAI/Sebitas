@@ -16,6 +16,15 @@ body {
     -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
 }
 
+/* Visual scale bump. The marketing site was built to fixed pixel
+ * values (text-[40px], px-[24px], etc.) so adjusting :root font-size
+ * doesn't propagate to the arbitrary Tailwind values. `zoom: 1.1` on
+ * the body enlarges every box proportionally without re-flowing the
+ * grid -- supported in Chrome, Safari, Edge, and Firefox 126+. */
+body {
+  zoom: 1.1;
+}
+
 /* Hand cursor on every clickable control (Tailwind v4 drops it on buttons). */
 button:not(:disabled),
 [role="button"]:not([aria-disabled="true"]),
