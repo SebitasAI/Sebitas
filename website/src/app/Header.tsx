@@ -4,7 +4,10 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 // Dropdown contents. Solutions routes to dedicated `/solutions/<slug>`
-// pages (one config + shared SolutionPage layout).
+// pages (one config + shared SolutionPage layout). The Company menu
+// (About / Careers / Blog / Contact) was removed -- those pages didn't
+// exist and the dropdown of #-anchors looked broken. Bring it back
+// when we actually have pages to link to.
 const MENUS: Record<string, { label: string; href: string }[]> = {
   Solutions: [
     { label: "Customer Support", href: "/solutions/customer-support" },

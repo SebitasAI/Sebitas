@@ -142,10 +142,10 @@ export default function SecurityPage() {
             Talk to security
           </a>
           <a
-            href="mailto:security@misterr.ai"
+            href="mailto:support@misterr.ai"
             className="rounded-[12px] border border-[#191919] bg-white px-[18px] py-[12px] font-[family-name:var(--font-inter)] text-[15px] font-semibold text-[#191919] transition hover:bg-[#191919] hover:text-white"
           >
-            security@misterr.ai
+            support@misterr.ai
           </a>
         </div>
       </section>
@@ -255,10 +255,10 @@ export default function SecurityPage() {
             questionnaire are available on request for Business / Enterprise
             evaluations. Email us at{" "}
             <a
-              href="mailto:security@misterr.ai"
+              href="mailto:support@misterr.ai"
               className="font-medium text-[#ff5200] underline-offset-4 hover:underline"
             >
-              security@misterr.ai
+              support@misterr.ai
             </a>
             .
           </p>
@@ -284,10 +284,10 @@ export default function SecurityPage() {
             Agendar llamada
           </a>
           <a
-            href="mailto:security@misterr.ai"
+            href="mailto:support@misterr.ai"
             className="rounded-[12px] border border-[#191919] bg-white px-[18px] py-[12px] font-[family-name:var(--font-inter)] text-[15px] font-semibold text-[#191919] transition hover:bg-[#191919] hover:text-white"
           >
-            security@misterr.ai
+            support@misterr.ai
           </a>
           <Link
             href="/privacy"
