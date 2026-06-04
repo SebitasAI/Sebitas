@@ -35,6 +35,40 @@ from app.slack.tokens import invalidate_token_cache
 log = structlog.get_logger(__name__)
 
 
+async def _fetch_team_icon(bot_token: str) -> str | None:
+    """Call Slack's `team.info` and return the largest available team
+    icon URL. Returns None on any error (auth, network, missing image)
+    so the caller can fall back gracefully.
+
+    Slack returns several sizes in `team.icon` (image_34, image_44, ...
+    up to image_230 and image_original). We prefer the highest-resolution
+    bitmap available so the sidebar avatar stays crisp on retina
+    displays. `image_default: true` means the team never uploaded a
+    custom icon -- treat as 'no icon' in that case to avoid hanging the
+    generic Slack placeholder on the sidebar."""
+    try:
+        from slack_sdk.web.async_client import AsyncWebClient
+
+        client = AsyncWebClient(token=bot_token)
+        resp = await client.team_info()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("team_info_fetch_failed", error=str(exc)[:200])
+        return None
+    icon = ((resp.data or {}).get("team") or {}).get("icon") or {}
+    if icon.get("image_default"):
+        return None
+    # Largest -> smallest fallback chain. `image_original` is custom and
+    # may not always exist; the numeric sizes are guaranteed by Slack.
+    for key in (
+        "image_original", "image_230", "image_132", "image_102",
+        "image_88", "image_68", "image_44", "image_34",
+    ):
+        url = icon.get(key)
+        if isinstance(url, str) and url.startswith("http"):
+            return url
+    return None
+
+
 class MisterrInstallationStore(AsyncInstallationStore):
     """Maps Bolt's Installation model to our `workspace` row.
 
@@ -75,6 +109,13 @@ class MisterrInstallationStore(AsyncInstallationStore):
             if installation.team_name and not ws.name:
                 ws.name = installation.team_name
             ws.installed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            # Pull the team icon from Slack so the web WorkspaceSelector
+            # shows the workspace's actual logo instead of the initial-
+            # letter fallback. Best-effort: a failure here just leaves
+            # icon_url NULL and the next roster sweep retries.
+            icon_url = await _fetch_team_icon(plain)
+            if icon_url:
+                ws.slack_team_icon_url = icon_url
             await session.commit()
             ws_id = ws.id
             ws_home_channel = ws.bot_home_channel_id
