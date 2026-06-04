@@ -4,8 +4,18 @@
 // grid of cards (one per app), search, All vs Popular tabs, connected-only
 // toggle, "N accounts connected" badge per card. Clicking a card navigates
 // to /integrations/[slug] for the detail / connect flow.
+//
+// Rendering 3K+ cards up front (one node per app in the catalog) was
+// killing first paint -- the page took several seconds to become
+// interactive even on fast machines. We render the first
+// `INITIAL_WINDOW` cards immediately and grow the window by
+// `WINDOW_STEP` whenever an IntersectionObserver sentinel at the
+// bottom of the list enters the viewport. When the user actively
+// filters (search, popular tab, connected-only), we drop the
+// windowing entirely: the filter is the user's intent and they
+// expect to see everything that matches.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useAuth } from "@clerk/nextjs";
 import { useQuery } from "@tanstack/react-query";
@@ -20,6 +30,12 @@ import {
 
 const CATALOG_KEY = ["integrations", "catalog", "all"] as const;
 const CONNECTIONS_KEY = ["integrations", "connections", "all"] as const;
+
+// Lazy-load tuning. 60 fits 20 rows of 3 cards on a desktop grid;
+// the user sees a full screen + a bit before the sentinel triggers
+// the next batch. Step 60 keeps growth smooth without 200-row jumps.
+const INITIAL_WINDOW = 60;
+const WINDOW_STEP = 60;
 
 type Tab = "all" | "popular";
 
@@ -88,13 +104,43 @@ function IntegrationsBody() {
     return pool;
   }, [apps, tab, search, connectedOnly, connCountBySlug]);
 
+  // When ANY filter is active, the user wants the full filtered set,
+  // so we skip windowing. Without a filter (default "All integrations"
+  // tab), we paginate visually via the sentinel below.
+  const isFiltering = tab !== "all" || connectedOnly || search.trim().length > 0;
+  const [windowSize, setWindowSize] = useState(INITIAL_WINDOW);
+  // Reset the window whenever the filter set changes (otherwise
+  // clearing search after scrolling would leave a huge window).
+  useEffect(() => {
+    setWindowSize(INITIAL_WINDOW);
+  }, [tab, connectedOnly, search]);
+  const rendered = isFiltering ? visible : visible.slice(0, windowSize);
+  const hasMore = !isFiltering && windowSize < visible.length;
+
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!hasMore) return;
+    const node = sentinelRef.current;
+    if (!node) return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setWindowSize((n) => Math.min(n + WINDOW_STEP, visible.length));
+        }
+      },
+      { rootMargin: "400px" }, // pre-fetch a bit before the bottom hits
+    );
+    obs.observe(node);
+    return () => obs.disconnect();
+  }, [hasMore, visible.length]);
+
   const popularCount = apps.filter((a) => a.popular).length;
 
   return (
     <div className="flex flex-col gap-5">
       <p className="text-sm text-neutral-500">
-        Conectá las apps que usás y dejá que Misterr ejecute tareas en
-        ellas. Cuando una app está en Composio y Pipedream, usamos Composio.
+        Conecta las apps que usas y deja que Misterr ejecute tareas en
+        ellas.
       </p>
 
       <SearchBar value={search} onChange={setSearch} />
@@ -119,13 +165,24 @@ function IntegrationsBody() {
       ) : visible.length === 0 ? (
         <EmptyState search={search} tab={tab} connectedOnly={connectedOnly} />
       ) : (
-        <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {visible.map((app) => (
-            <li key={app.slug}>
-              <AppCard app={app} connections={connections.filter((c) => c.app === app.slug)} />
-            </li>
-          ))}
-        </ul>
+        <>
+          <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {rendered.map((app) => (
+              <li key={app.slug}>
+                <AppCard app={app} connections={connections.filter((c) => c.app === app.slug)} />
+              </li>
+            ))}
+          </ul>
+          {hasMore ? (
+            <div
+              ref={sentinelRef}
+              className="flex items-center justify-center py-6 text-xs text-neutral-400"
+              aria-hidden="true"
+            >
+              Cargando más…
+            </div>
+          ) : null}
+        </>
       )}
     </div>
   );
@@ -276,6 +333,8 @@ function AppLogo({ app }: { app: CatalogApp }) {
       <img
         src={app.logo_url}
         alt=""
+        loading="lazy"
+        decoding="async"
         className="size-9 shrink-0 rounded-md object-contain"
       />
     );
