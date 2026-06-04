@@ -9,7 +9,7 @@ import Faq from "./Faq";
 export const metadata: Metadata = {
   title: "Pricing | Misterr",
   description:
-    "Misterr pricing: empezá gratis con 50,000 créditos/mes. Pagás $1 por cada 1,000 créditos. Sin per-user, sin sorpresas.",
+    "Misterr pricing: start free with 50,000 credits/mo. Pay $1 per 1,000 credits. No per-user fees, no surprises.",
 };
 
 export default function PricingPage() {
@@ -23,8 +23,8 @@ export default function PricingPage() {
           Pricing that scales with you
         </h1>
         <p className="max-w-[560px] font-[family-name:var(--font-inter)] text-[18px] font-medium leading-[1.45] tracking-[-0.4px] text-[#626262]">
-          Empezá gratis con 50,000 créditos al mes. Pagás $1 por cada 1,000
-          créditos extra. Sin per-user, sin sorpresas.
+          Start free with 50,000 credits a month. Pay $1 per 1,000 extra
+          credits. No per-user fees, no surprises.
         </p>
       </section>
 
