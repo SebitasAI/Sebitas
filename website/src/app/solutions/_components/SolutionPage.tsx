@@ -12,9 +12,9 @@
 // BOOK_SALES_URL (Google Calendar appointment scheduling). Same
 // constants the Header + Pricing CTAs already use.
 
-import Link from "next/link";
 import type { ReactNode } from "react";
 
+import { CtaButton } from "../../_components/CtaButton";
 import Footer from "../../Footer";
 import Header from "../../Header";
 import { APP_SIGN_UP_URL, BOOK_SALES_URL } from "@/lib/app-url";
@@ -64,20 +64,12 @@ export default function SolutionPage({
           {lede}
         </p>
         <div className="mt-[8px] flex flex-wrap items-center justify-center gap-[10px]">
-          <Link
-            href={APP_SIGN_UP_URL}
-            className="rounded-[12px] bg-[#ff5200] px-[18px] py-[12px] font-[family-name:var(--font-inter)] text-[15px] font-semibold text-white shadow-[0px_4px_0px_0px_#cc4a00] transition active:translate-y-[2px] hover:bg-[#ff6a23]"
-          >
+          <CtaButton href={APP_SIGN_UP_URL} variant="primary">
             Empezar gratis
-          </Link>
-          <a
-            href={BOOK_SALES_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="rounded-[12px] border border-[#191919] bg-white px-[18px] py-[12px] font-[family-name:var(--font-inter)] text-[15px] font-semibold text-[#191919] transition hover:bg-[#191919] hover:text-white"
-          >
+          </CtaButton>
+          <CtaButton href={BOOK_SALES_URL} variant="secondary">
             Talk to sales
-          </a>
+          </CtaButton>
         </div>
         {intro && (
           <div className="mt-[12px] max-w-[640px] font-[family-name:var(--font-inter)] text-[15px] leading-[1.55] text-[#626262]">
@@ -143,20 +135,12 @@ export default function SolutionPage({
           Empezá gratis con 50,000 créditos al mes. Sin tarjeta, sin compromiso.
         </p>
         <div className="mt-[8px] flex flex-wrap items-center justify-center gap-[10px]">
-          <Link
-            href={APP_SIGN_UP_URL}
-            className="rounded-[12px] bg-[#ff5200] px-[18px] py-[12px] font-[family-name:var(--font-inter)] text-[15px] font-semibold text-white shadow-[0px_4px_0px_0px_#cc4a00] transition active:translate-y-[2px] hover:bg-[#ff6a23]"
-          >
+          <CtaButton href={APP_SIGN_UP_URL} variant="primary">
             Empezar gratis
-          </Link>
-          <a
-            href={BOOK_SALES_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="rounded-[12px] border border-[#191919] bg-white px-[18px] py-[12px] font-[family-name:var(--font-inter)] text-[15px] font-semibold text-[#191919] transition hover:bg-[#191919] hover:text-white"
-          >
+          </CtaButton>
+          <CtaButton href={BOOK_SALES_URL} variant="secondary">
             Talk to sales
-          </a>
+          </CtaButton>
         </div>
       </section>
 
