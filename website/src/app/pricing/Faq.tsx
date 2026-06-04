@@ -37,7 +37,7 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: "How much does a credit cost?",
-    a: "$1.00 per 1,000 credits, the same flat rate across all plans. Anual subscriptions get 20% off. (Large teams and high-volume customers get custom volume pricing. See Enterprise below.)",
+    a: "$1.00 per 1,000 credits, the same flat rate across all plans. Annual subscriptions get 20% off. (Large teams and high-volume customers get custom volume pricing. See Enterprise below.)",
   },
   {
     q: "Is there a per-seat charge?",
