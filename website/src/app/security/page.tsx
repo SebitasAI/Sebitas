@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 
+import { CtaButton } from "../_components/CtaButton";
 import Footer from "../Footer";
 import Header from "../Header";
 import { BOOK_SALES_URL } from "@/lib/app-url";
@@ -133,20 +133,12 @@ export default function SecurityPage() {
           herramientas. Específico, no marketing.
         </p>
         <div className="mt-[8px] flex flex-wrap items-center justify-center gap-[10px]">
-          <a
-            href={BOOK_SALES_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="rounded-[12px] bg-[#191919] px-[18px] py-[12px] font-[family-name:var(--font-inter)] text-[15px] font-semibold text-white transition active:translate-y-[2px] hover:bg-black"
-          >
+          <CtaButton href={BOOK_SALES_URL} variant="dark">
             Talk to security
-          </a>
-          <a
-            href="mailto:support@misterr.ai"
-            className="rounded-[12px] border border-[#191919] bg-white px-[18px] py-[12px] font-[family-name:var(--font-inter)] text-[15px] font-semibold text-[#191919] transition hover:bg-[#191919] hover:text-white"
-          >
+          </CtaButton>
+          <CtaButton href="mailto:support@misterr.ai" variant="secondary">
             support@misterr.ai
-          </a>
+          </CtaButton>
         </div>
       </section>
 
@@ -275,26 +267,15 @@ export default function SecurityPage() {
           sin marketing.
         </p>
         <div className="mt-[8px] flex flex-wrap items-center justify-center gap-[10px]">
-          <a
-            href={BOOK_SALES_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="rounded-[12px] bg-[#ff5200] px-[18px] py-[12px] font-[family-name:var(--font-inter)] text-[15px] font-semibold text-white shadow-[0px_4px_0px_0px_#cc4a00] transition active:translate-y-[2px] hover:bg-[#ff6a23]"
-          >
+          <CtaButton href={BOOK_SALES_URL} variant="primary">
             Agendar llamada
-          </a>
-          <a
-            href="mailto:support@misterr.ai"
-            className="rounded-[12px] border border-[#191919] bg-white px-[18px] py-[12px] font-[family-name:var(--font-inter)] text-[15px] font-semibold text-[#191919] transition hover:bg-[#191919] hover:text-white"
-          >
+          </CtaButton>
+          <CtaButton href="mailto:support@misterr.ai" variant="secondary">
             support@misterr.ai
-          </a>
-          <Link
-            href="/privacy"
-            className="rounded-[12px] border border-[#191919] bg-white px-[18px] py-[12px] font-[family-name:var(--font-inter)] text-[15px] font-semibold text-[#191919] transition hover:bg-[#191919] hover:text-white"
-          >
+          </CtaButton>
+          <CtaButton href="/privacy" variant="secondary">
             Privacy policy
-          </Link>
+          </CtaButton>
         </div>
       </section>
 
