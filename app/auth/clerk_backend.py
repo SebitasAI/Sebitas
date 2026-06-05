@@ -176,6 +176,18 @@ async def remove_org_member(clerk_org_id: str, user_id: str) -> None:
     )
 
 
+async def update_org_member_role(
+    clerk_org_id: str, user_id: str, *, role: str
+) -> dict[str, Any]:
+    """Promote / demote a member. `role` must be 'org:admin' or
+    'org:member'. Clerk's PATCH endpoint replaces the role outright."""
+    return await _request(
+        "PATCH",
+        f"/organizations/{clerk_org_id}/memberships/{user_id}",
+        json={"role": role},
+    )
+
+
 async def list_org_members(
     clerk_org_id: str, *, limit: int = 100
 ) -> list[dict[str, Any]]:
@@ -247,6 +259,7 @@ __all__ = [
     "delete_organization",
     # Memberships
     "add_org_member",
+    "update_org_member_role",
     "remove_org_member",
     "list_org_members",
     "find_org_membership",

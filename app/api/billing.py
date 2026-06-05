@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from sqlalchemy import desc, select
 
 from app.auth.clerk import ResolvedAppUser, require_app_user
+from app.auth.rbac import require_workspace_admin
 from app.billing import stripe_client
 from app.billing.plans import (
     ALL_PLANS,
@@ -267,9 +268,12 @@ async def ledger(
 async def create_checkout(
     body: CheckoutRequest,
     me: ResolvedAppUser = Depends(require_app_user),
+    _: object = Depends(require_workspace_admin),
 ) -> CheckoutResponse:
     """Start a Stripe Checkout session for the requested (plan, cycle).
-    Returns the URL the browser should redirect to."""
+    Returns the URL the browser should redirect to.
+
+    Admin-only: only workspace admins (org:admin) can change the plan."""
     if not stripe_client.is_configured():
         raise HTTPException(503, detail="Billing is not configured for this environment")
 
@@ -315,11 +319,15 @@ async def create_checkout(
 @router.post("/portal", response_model=PortalResponse)
 async def create_portal(
     me: ResolvedAppUser = Depends(require_app_user),
+    _: object = Depends(require_workspace_admin),
 ) -> PortalResponse:
     """Return a Stripe Customer Portal URL for the current workspace.
     The portal is where the customer manages payment methods, sees
     invoices, and cancels. Requires an already-existing Stripe Customer
-    (you can't 'manage' a subscription you don't have)."""
+    (you can't 'manage' a subscription you don't have).
+
+    Admin-only: changing payment methods, cancelling subs, downloading
+    invoices is restricted to org admins."""
     if not stripe_client.is_configured():
         raise HTTPException(503, detail="Billing is not configured for this environment")
 

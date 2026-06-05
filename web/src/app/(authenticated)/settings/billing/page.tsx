@@ -17,7 +17,9 @@ import { useEffect, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { useQuery } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
-import { CreditCard, ExternalLink, RefreshCw, Sparkles } from "lucide-react";
+import { CreditCard, ExternalLink, Lock, RefreshCw, Sparkles } from "lucide-react";
+
+import { useUserRole } from "@/lib/hooks/useUserRole";
 
 import { PageBody, PageHeader } from "../../_components/page-header";
 import {
@@ -58,10 +60,14 @@ function planAccent(plan: string): { surface: string; accent: string } {
 
 export default function SettingsBillingPage() {
   const { getToken } = useAuth();
+  const { isAdmin, isLoaded: roleLoaded } = useUserRole();
   const [cycle, setCycle] = useState<BillingCycle>("monthly");
   const [busyPlan, setBusyPlan] = useState<string | null>(null);
   const [portalBusy, setPortalBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Treat 'not yet loaded' as admin to avoid flashing the lock state on
+  // first paint for actual admins. Backend enforces the gate regardless.
+  const billingLocked = roleLoaded && !isAdmin;
 
   const overviewQuery = useQuery<BillingOverview>({
     queryKey: ["billing", "overview"],
@@ -99,6 +105,10 @@ export default function SettingsBillingPage() {
   const overview = overviewQuery.data;
 
   async function startCheckout(plan: PlanOption) {
+    if (billingLocked) {
+      setErrorMsg("Only workspace admins can change the plan. Ask your admin.");
+      return;
+    }
     setErrorMsg(null);
     setBusyPlan(plan.name);
     try {
@@ -117,6 +127,10 @@ export default function SettingsBillingPage() {
   }
 
   async function openPortal() {
+    if (billingLocked) {
+      setErrorMsg("Only workspace admins can manage billing in Stripe.");
+      return;
+    }
     setErrorMsg(null);
     setPortalBusy(true);
     try {
@@ -149,10 +163,24 @@ export default function SettingsBillingPage() {
 
         {overview && (
           <>
+            {billingLocked && (
+              <div className="mb-4 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                <Lock className="mt-0.5 size-3.5 shrink-0" strokeWidth={1.75} />
+                <div>
+                  <p className="font-medium">Billing is admin-only.</p>
+                  <p className="mt-0.5">
+                    Only workspace admins can change the plan or open the
+                    Stripe portal. Ask an admin to make the change, or to
+                    promote you in <span className="font-medium">Settings &rarr; Team</span>.
+                  </p>
+                </div>
+              </div>
+            )}
             <CurrentPlanCard
               overview={overview}
               onOpenPortal={openPortal}
               portalBusy={portalBusy}
+              billingLocked={billingLocked}
             />
 
             {errorMsg && (
@@ -182,6 +210,7 @@ export default function SettingsBillingPage() {
                   availablePlans={overview.available_plans}
                   currentPlan={overview.plan}
                   stripeConfigured={overview.stripe_configured}
+                  billingLocked={billingLocked}
                   busy={busyPlan}
                   onSelect={(plan) => startCheckout(plan)}
                 />
@@ -200,10 +229,12 @@ function CurrentPlanCard({
   overview,
   onOpenPortal,
   portalBusy,
+  billingLocked,
 }: {
   overview: BillingOverview;
   onOpenPortal: () => void;
   portalBusy: boolean;
+  billingLocked: boolean;
 }) {
   const cyclePart = overview.billing_cycle ? ` (${overview.billing_cycle})` : "";
   const accent = planAccent(overview.plan);
@@ -242,21 +273,36 @@ function CurrentPlanCard({
         {overview.has_active_subscription && (
           <button
             onClick={onOpenPortal}
-            disabled={portalBusy}
-            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-white px-3 py-1.5 text-xs font-medium text-[var(--color-ink-deep)] hover:bg-neutral-50 disabled:opacity-50"
+            disabled={portalBusy || billingLocked}
+            title={billingLocked ? "Admin only" : undefined}
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-white px-3 py-1.5 text-xs font-medium text-[var(--color-ink-deep)] hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <ExternalLink className="h-3.5 w-3.5" />
+            {billingLocked ? (
+              <Lock className="h-3.5 w-3.5" strokeWidth={1.75} />
+            ) : (
+              <ExternalLink className="h-3.5 w-3.5" />
+            )}
             {portalBusy ? "Opening…" : "Manage"}
           </button>
         )}
         {!overview.has_active_subscription && !overview.is_unlimited && (
-          <a
-            href="#planes"
-            className="inline-flex items-center gap-1.5 rounded-md bg-[var(--color-ink-deep)] px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            Upgrade
-          </a>
+          billingLocked ? (
+            <span
+              title="Admin only"
+              className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-md bg-neutral-200 px-3 py-1.5 text-xs font-medium text-neutral-500"
+            >
+              <Lock className="h-3.5 w-3.5" strokeWidth={1.75} />
+              Upgrade
+            </span>
+          ) : (
+            <a
+              href="#planes"
+              className="inline-flex items-center gap-1.5 rounded-md bg-[var(--color-ink-deep)] px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              Upgrade
+            </a>
+          )
         )}
       </div>
 
@@ -433,6 +479,7 @@ function CreditSliderPicker({
   availablePlans,
   currentPlan,
   stripeConfigured,
+  billingLocked,
   busy,
   onSelect,
 }: {
@@ -440,6 +487,7 @@ function CreditSliderPicker({
   availablePlans: PlanOption[];
   currentPlan: string;
   stripeConfigured: boolean;
+  billingLocked: boolean;
   busy: string | null;
   onSelect: (plan: PlanOption) => void;
 }) {
@@ -454,6 +502,7 @@ function CreditSliderPicker({
             availablePlans={availablePlans}
             currentPlan={currentPlan}
             stripeConfigured={stripeConfigured}
+            billingLocked={billingLocked}
             busy={busy}
             onSelect={onSelect}
           />
@@ -470,6 +519,7 @@ function TierSliderCard({
   availablePlans,
   currentPlan,
   stripeConfigured,
+  billingLocked,
   busy,
   onSelect,
 }: {
@@ -478,6 +528,7 @@ function TierSliderCard({
   availablePlans: PlanOption[];
   currentPlan: string;
   stripeConfigured: boolean;
+  billingLocked: boolean;
   busy: string | null;
   onSelect: (plan: PlanOption) => void;
 }) {
@@ -497,7 +548,7 @@ function TierSliderCard({
     !!plan &&
     stripeConfigured &&
     (cycle === "monthly" ? plan.has_monthly_checkout : plan.has_annual_checkout);
-  const disabled = !checkoutAvailable || isBusy || isCurrent || !plan;
+  const disabled = !checkoutAvailable || isBusy || isCurrent || !plan || billingLocked;
   const isEnterprise = tier.name === "enterprise";
 
   const tagClass = tier.popular
@@ -563,6 +614,7 @@ function TierSliderCard({
       <button
         onClick={() => plan && onSelect(plan)}
         disabled={disabled}
+        title={billingLocked ? "Admin only" : undefined}
         className={`mt-auto pt-4`}
       >
         <span
@@ -576,16 +628,23 @@ function TierSliderCard({
         >
           {isCurrent
             ? "Current plan"
-            : isBusy
-              ? "Redirecting…"
-              : isEnterprise
-                ? "Talk to sales"
-                : (
-                  <>
-                    <Sparkles className="h-3.5 w-3.5" />
-                    Get {tier.display}
-                  </>
-                )}
+            : billingLocked
+              ? (
+                <>
+                  <Lock className="h-3.5 w-3.5" strokeWidth={1.75} />
+                  Admin only
+                </>
+              )
+              : isBusy
+                ? "Redirecting…"
+                : isEnterprise
+                  ? "Talk to sales"
+                  : (
+                    <>
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Get {tier.display}
+                    </>
+                  )}
         </span>
       </button>
 

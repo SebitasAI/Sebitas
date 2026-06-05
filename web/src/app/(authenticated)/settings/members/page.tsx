@@ -10,9 +10,11 @@
 // deleted/deactivated) and offers a confirm-then-apply step.
 
 import { useEffect, useState } from "react";
-import { useAuth, useOrganization } from "@clerk/nextjs";
+import { useAuth, useOrganization, useUser } from "@clerk/nextjs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowDown,
+  ArrowUp,
   Check,
   Copy,
   RefreshCw,
@@ -24,6 +26,7 @@ import {
 
 import {
   teamApi,
+  type MemberRole,
   type SlackRosterEntry,
   type SlackRosterResponse,
   type SyncSlackResponse,
@@ -39,9 +42,11 @@ const APP_SIGN_UP_URL = `${process.env.NEXT_PUBLIC_APP_URL ?? "https://app.miste
 
 export default function SettingsMembersPage() {
   const { getToken } = useAuth();
+  const { user: clerkUser } = useUser();
   const { organization, isLoaded: orgLoaded, membership } = useOrganization();
   const queryClient = useQueryClient();
   const isAdmin = membership?.role === "org:admin";
+  const selfClerkUserId = clerkUser?.id ?? null;
 
   const membersQuery = useQuery({
     queryKey: TEAM_QUERY_KEY,
@@ -89,6 +94,7 @@ export default function SettingsMembersPage() {
           <TeamView
             membersQuery={membersQuery}
             isAdmin={!!isAdmin}
+            selfClerkUserId={selfClerkUserId}
             queryClient={queryClient}
             getToken={getToken}
           />
@@ -148,11 +154,13 @@ function NoOrgState({ provisioning }: { provisioning: boolean }) {
 function TeamView({
   membersQuery,
   isAdmin,
+  selfClerkUserId,
   queryClient,
   getToken,
 }: {
   membersQuery: ReturnType<typeof useQuery>;
   isAdmin: boolean;
+  selfClerkUserId: string | null;
   queryClient: ReturnType<typeof useQueryClient>;
   getToken: ReturnType<typeof useAuth>["getToken"];
 }) {
@@ -190,6 +198,19 @@ function TeamView({
       return teamApi.remove(clerkUserId, token);
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: TEAM_QUERY_KEY });
+    },
+    onError: (e: Error) => setErrorMsg(e.message),
+  });
+
+  const roleMut = useMutation({
+    mutationFn: async (vars: { clerkUserId: string; role: MemberRole }) => {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("No token");
+      return teamApi.updateMemberRole(vars.clerkUserId, vars.role, token);
+    },
+    onSuccess: () => {
+      setErrorMsg(null);
       queryClient.invalidateQueries({ queryKey: TEAM_QUERY_KEY });
     },
     onError: (e: Error) => setErrorMsg(e.message),
@@ -265,17 +286,54 @@ function TeamView({
                     ) : null}
                   </div>
                 </div>
-                {isAdmin ? (
-                  <button
-                    type="button"
-                    onClick={() => removeMut.mutate(m.clerk_user_id)}
-                    disabled={removeMut.isPending}
-                    className="inline-flex size-7 items-center justify-center rounded-md text-neutral-500 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
-                    title="Remove from team"
-                    aria-label="Remove from team"
-                  >
-                    <Trash2 className="size-3.5" strokeWidth={1.75} />
-                  </button>
+                {isAdmin && m.clerk_user_id !== selfClerkUserId ? (
+                  <div className="flex items-center gap-1">
+                    {m.role === "org:admin" ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          roleMut.mutate({
+                            clerkUserId: m.clerk_user_id,
+                            role: "org:member",
+                          })
+                        }
+                        disabled={roleMut.isPending}
+                        className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-white px-2 py-1 text-[11px] font-medium text-neutral-700 hover:bg-[var(--color-surface-fog)] disabled:opacity-50"
+                        title="Demote to member"
+                        aria-label="Demote to member"
+                      >
+                        <ArrowDown className="size-3" strokeWidth={1.75} />
+                        Demote
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          roleMut.mutate({
+                            clerkUserId: m.clerk_user_id,
+                            role: "org:admin",
+                          })
+                        }
+                        disabled={roleMut.isPending}
+                        className="inline-flex items-center gap-1 rounded-md border border-[#FF5200]/30 bg-[#FF5200]/5 px-2 py-1 text-[11px] font-medium text-[#FF5200] hover:bg-[#FF5200]/10 disabled:opacity-50"
+                        title="Promote to admin"
+                        aria-label="Promote to admin"
+                      >
+                        <ArrowUp className="size-3" strokeWidth={1.75} />
+                        Promote
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => removeMut.mutate(m.clerk_user_id)}
+                      disabled={removeMut.isPending}
+                      className="inline-flex size-7 items-center justify-center rounded-md text-neutral-500 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                      title="Remove from team"
+                      aria-label="Remove from team"
+                    >
+                      <Trash2 className="size-3.5" strokeWidth={1.75} />
+                    </button>
+                  </div>
                 ) : null}
               </li>
             ))}

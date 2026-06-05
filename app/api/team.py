@@ -30,6 +30,7 @@ from sqlalchemy import func, select
 
 from app.auth import clerk_backend as clerk_api
 from app.auth.clerk import ResolvedAppUser, require_app_user, require_clerk_user, ClerkClaims
+from app.auth.rbac import require_workspace_admin
 from app.auth.clerk_provisioning import (
     provision_and_backfill_all_workspaces,
     provision_legacy_workspace,
@@ -282,6 +283,89 @@ async def remove_team_member(
         org_id=org_id,
         target_clerk_user_id=target_clerk_user_id,
         actor=clerk.sub,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# POST /api/team/members/{clerk_user_id}/role (admin only)
+# --------------------------------------------------------------------------- #
+
+
+class UpdateMemberRoleRequest(BaseModel):
+    role: str = Field(pattern=r"^org:(admin|member)$")
+
+
+class UpdateMemberRoleResponse(BaseModel):
+    clerk_user_id: str
+    role: str
+
+
+@router.post(
+    "/members/{target_clerk_user_id}/role", response_model=UpdateMemberRoleResponse
+)
+async def update_member_role(
+    target_clerk_user_id: str,
+    body: UpdateMemberRoleRequest,
+    user: ResolvedAppUser = Depends(require_app_user),
+    clerk: ClerkClaims = Depends(require_workspace_admin),
+) -> UpdateMemberRoleResponse:
+    """Promote a teammate to admin or demote them back to member. Admin-only.
+
+    Guardrails:
+      - Self-edits are blocked. An admin trying to demote themselves would
+        leave the workspace with no admin until someone else promotes them
+        again. Force them to ask another admin to do it.
+      - If demoting would leave zero admins in the org, refuse with 409.
+        Misterr's "billing changes require admin" gate would lock the
+        workspace out otherwise.
+    """
+    if target_clerk_user_id == clerk.sub:
+        raise HTTPException(
+            400, detail="Use another admin to change your own role."
+        )
+    _, org_id = await _current_workspace_and_org(user)
+
+    # Zero-admin check (only when demoting).
+    if body.role == "org:member":
+        try:
+            members = await clerk_api.list_org_members(org_id, limit=200)
+        except clerk_api.ClerkApiError as exc:
+            raise HTTPException(502, detail=str(exc.body)) from exc
+        admin_count = sum(
+            1
+            for m in members
+            if (m.get("role") or "").lower() == "org:admin"
+            and (m.get("public_user_data") or {}).get("user_id")
+            != target_clerk_user_id
+        )
+        if admin_count == 0:
+            raise HTTPException(
+                409,
+                detail=(
+                    "Cannot demote the last admin. Promote another teammate "
+                    "to admin first."
+                ),
+            )
+
+    try:
+        await clerk_api.update_org_member_role(
+            org_id, target_clerk_user_id, role=body.role
+        )
+    except clerk_api.ClerkApiError as exc:
+        raise HTTPException(
+            status_code=exc.status if 400 <= exc.status < 500 else 502,
+            detail=str(exc.body),
+        ) from exc
+
+    log.info(
+        "team_member_role_changed",
+        org_id=org_id,
+        target=target_clerk_user_id,
+        new_role=body.role,
+        actor=clerk.sub,
+    )
+    return UpdateMemberRoleResponse(
+        clerk_user_id=target_clerk_user_id, role=body.role
     )
 
 
@@ -577,15 +661,16 @@ async def list_slack_roster(
 async def invite_via_slack_dm(
     body: SlackDmInviteRequest,
     user: ResolvedAppUser = Depends(require_app_user),
+    _admin: object = Depends(require_workspace_admin),
 ) -> SlackDmInviteResponse:
     """Send a one-shot DM through the workspace's bot, pointing the
     target Slack user at the web app's sign-up flow. Idempotent only
     at the user's discretion: re-sending fires another DM.
 
-    Permission model: any workspace member can fire this. The bot's
-    DM is plain (not impersonating), and the target user already has
-    Slack-level access to the workspace, so this can't escalate
-    information they don't already have."""
+    Admin-only (2026-06-05): even though Slack workspace members can
+    DM each other directly, the bot's DM carries Misterr's brand and
+    nudges new sign-ups. Restricting to admins keeps the bot from
+    becoming a spam vector that any teammate can trigger."""
     from app.config import get_settings
     from app.slack.crypto import TokenCryptoError, decrypt_token
 
