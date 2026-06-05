@@ -133,4 +133,43 @@ export const teamApi = {
     await expectOk(res);
     return res.json();
   },
+  slackRoster: async (token: string): Promise<SlackRosterResponse> => {
+    const res = await fetch(`${backendBase()}/api/team/slack-roster`, {
+      headers: authHeaders(token),
+    });
+    await expectOk(res);
+    return res.json();
+  },
+  inviteViaSlackDm: async (
+    slackUserId: string,
+    token: string,
+  ): Promise<SlackDmInviteResponse> => {
+    const res = await fetch(`${backendBase()}/api/team/invite-via-slack-dm`, {
+      method: "POST",
+      headers: authHeaders(token),
+      body: JSON.stringify({ slack_user_id: slackUserId }),
+    });
+    await expectOk(res);
+    return res.json();
+  },
+};
+
+
+export type SlackRosterEntry = {
+  slack_user_id: string;
+  display_name: string | null;
+  real_name: string | null;
+  email: string | null;
+  is_bot: boolean;
+  is_app_user: boolean;
+};
+
+export type SlackRosterResponse = {
+  entries: SlackRosterEntry[];
+  total: number;
+};
+
+export type SlackDmInviteResponse = {
+  sent: boolean;
+  slack_user_id: string;
 };

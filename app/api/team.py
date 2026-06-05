@@ -480,4 +480,184 @@ async def provision_my_workspaces(
     )
 
 
+# --------------------------------------------------------------------------- #
+# Slack-native invite flow (2026-06-05)
+#
+# The Clerk email-invitations API was unusable here: our Clerk instance is
+# Slack-OAuth-only, so the API returns `invitations_not_supported`. The
+# product reality is that Misterr's workspace == the Slack workspace, so
+# "inviting" a teammate is really one of two things:
+#
+#   1. They're in your Slack already -> share the sign-up link and let
+#      them click "Continue with Slack". No invite needed; the SlackUser
+#      roster is the source of truth.
+#
+#   2. They're in your Slack but haven't visited the web app yet -> the
+#      bot can DM them the sign-up link directly. That's the endpoint
+#      below.
+#
+# Both surface in the new /settings/members panel; the legacy
+# `/invite` (Clerk-backed) endpoint stays around for now in case any
+# old client hits it, but the web UI no longer calls it.
+# --------------------------------------------------------------------------- #
+
+
+class SlackRosterEntry(BaseModel):
+    """One member of the Slack workspace roster, surfaced for the
+    invite-via-DM picker. `is_app_user` flags people who already have
+    a SlackUser <-> AppUser link (i.e., they've signed into the web
+    app at least once)."""
+
+    slack_user_id: str
+    display_name: str | None
+    real_name: str | None
+    email: str | None
+    is_bot: bool
+    is_app_user: bool
+
+
+class SlackRosterResponse(BaseModel):
+    entries: list[SlackRosterEntry]
+    total: int
+
+
+class SlackDmInviteRequest(BaseModel):
+    slack_user_id: str = Field(min_length=2, max_length=32)
+
+
+class SlackDmInviteResponse(BaseModel):
+    sent: bool
+    slack_user_id: str
+
+
+@router.get("/slack-roster", response_model=SlackRosterResponse)
+async def list_slack_roster(
+    user: ResolvedAppUser = Depends(require_app_user),
+) -> SlackRosterResponse:
+    """List every non-deleted Slack user in the calling workspace,
+    annotated with whether they already have an AppUser. The frontend
+    uses this to show 'who could be invited via DM' + 'who already
+    signed in'.
+
+    No admin gate: any signed-in workspace member can see who else
+    is in their Slack workspace (that information is public to them
+    in Slack itself)."""
+    async with get_session() as session:
+        rows = (
+            await session.execute(
+                select(SlackUser, AppUser.id.label("app_user_id"))
+                .outerjoin(
+                    AppUser,
+                    (AppUser.workspace_id == SlackUser.workspace_id)
+                    & (AppUser.slack_user_id == SlackUser.slack_user_id),
+                )
+                .where(
+                    SlackUser.workspace_id == user.workspace_id,
+                    SlackUser.deleted == False,  # noqa: E712
+                )
+                .order_by(SlackUser.display_name.asc())
+            )
+        ).all()
+
+    entries = [
+        SlackRosterEntry(
+            slack_user_id=r.SlackUser.slack_user_id,
+            display_name=r.SlackUser.display_name,
+            real_name=r.SlackUser.real_name,
+            email=r.SlackUser.email,
+            is_bot=bool(r.SlackUser.is_bot),
+            is_app_user=r.app_user_id is not None,
+        )
+        for r in rows
+    ]
+    return SlackRosterResponse(entries=entries, total=len(entries))
+
+
+@router.post("/invite-via-slack-dm", response_model=SlackDmInviteResponse)
+async def invite_via_slack_dm(
+    body: SlackDmInviteRequest,
+    user: ResolvedAppUser = Depends(require_app_user),
+) -> SlackDmInviteResponse:
+    """Send a one-shot DM through the workspace's bot, pointing the
+    target Slack user at the web app's sign-up flow. Idempotent only
+    at the user's discretion: re-sending fires another DM.
+
+    Permission model: any workspace member can fire this. The bot's
+    DM is plain (not impersonating), and the target user already has
+    Slack-level access to the workspace, so this can't escalate
+    information they don't already have."""
+    from app.config import get_settings
+    from app.slack.crypto import TokenCryptoError, decrypt_token
+
+    # Pull the bot token for the calling workspace.
+    async with get_session() as session:
+        ws = await session.get(Workspace, user.workspace_id)
+    if ws is None or not ws.bot_token:
+        raise HTTPException(
+            status_code=409,
+            detail="Workspace has no bot token; reinstall Misterr in Slack.",
+        )
+    try:
+        token = decrypt_token(ws.bot_token)
+    except TokenCryptoError:
+        raise HTTPException(
+            status_code=500, detail="Workspace token decryption failed."
+        )
+
+    # Avoid DM-ing bots. Slack returns a 'cannot_dm_bot' error anyway,
+    # but a pre-check makes the UX message friendlier.
+    async with get_session() as session:
+        target_su = (
+            await session.execute(
+                select(SlackUser).where(
+                    SlackUser.workspace_id == user.workspace_id,
+                    SlackUser.slack_user_id == body.slack_user_id,
+                    SlackUser.deleted == False,  # noqa: E712
+                )
+            )
+        ).scalar_one_or_none()
+    if target_su is None:
+        raise HTTPException(404, "Slack user not found in this workspace.")
+    if target_su.is_bot:
+        raise HTTPException(400, "Cannot DM a bot.")
+
+    base = get_settings().web_base_url.rstrip("/")
+    signup_url = f"{base}/sign-up"
+    inviter_label = user.email or "your teammate"
+    text = (
+        f"¡Hola! {inviter_label} te invitó a usar *Misterr*. "
+        f"Misterr es un AI coworker dentro de este workspace de Slack.\n\n"
+        f"Para empezar: {signup_url}\n\n"
+        f'Una vez que hagas "Continue with Slack" y elijas este '
+        f"workspace, aparecés automáticamente en la lista del equipo."
+    )
+
+    from slack_sdk.web.async_client import AsyncWebClient
+    client = AsyncWebClient(token=token)
+    try:
+        # chat_postMessage to channel=<user_id> auto-opens the IM and
+        # delivers the message. No need to call conversations.open first.
+        await client.chat_postMessage(
+            channel=body.slack_user_id,
+            text=text,
+            unfurl_links=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "slack_dm_invite_failed",
+            workspace_id=str(user.workspace_id),
+            target=body.slack_user_id,
+            error=str(exc)[:200],
+        )
+        raise HTTPException(502, f"Slack rejected the DM: {exc}")
+
+    log.info(
+        "slack_dm_invite_sent",
+        workspace_id=str(user.workspace_id),
+        inviter=user.email,
+        target=body.slack_user_id,
+    )
+    return SlackDmInviteResponse(sent=True, slack_user_id=body.slack_user_id)
+
+
 __all__ = ["router"]
