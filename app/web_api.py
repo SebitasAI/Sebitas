@@ -78,6 +78,12 @@ async def list_workspaces_for_user(request: Request, email: str):
                 "slackTeamId": w.slack_team_id,
                 "iconUrl": w.slack_team_icon_url,
                 "primaryEmail": needle,
+                # `clerk_org_id` lets the install gate decide whether the
+                # currently-active Clerk organization corresponds to a
+                # Slack-installed workspace. Without it, the gate could
+                # only count workspaces globally and would miss the
+                # "user just created a fresh Clerk org" case.
+                "clerkOrgId": w.clerk_org_id,
             }
             for w in workspaces
         ]
