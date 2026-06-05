@@ -144,7 +144,20 @@ function InstallModal({ slackInstallUrl }: { slackInstallUrl: string }) {
             Install Misterr on Slack
           </a>
 
-          <p className="mt-4 text-[11px] text-neutral-500">
+          <p className="mt-3 text-[11px] text-neutral-500">
+            Slack will install Misterr in whichever workspace you have
+            active in this browser.{" "}
+            <a
+              href="https://slack.com/signin"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline decoration-dotted underline-offset-2 hover:text-[var(--color-ink-deep)]"
+            >
+              Wrong workspace? Sign into the right one first.
+            </a>
+          </p>
+
+          <p className="mt-2 text-[11px] text-neutral-500">
             Waiting for your installation. This page unlocks automatically
             as soon as Slack confirms.
           </p>
