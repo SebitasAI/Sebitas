@@ -1,10 +1,19 @@
 import { NextResponse } from "next/server";
-import { auth, currentUser } from "@clerk/nextjs/server";
+import { auth, clerkClient, currentUser } from "@clerk/nextjs/server";
 
-// Returns the workspaces where Misterr is installed AND the current Clerk
-// user is a Slack member (matched by email against the cached SlackUser
-// roster). Resolves the user server-side so the browser can't forge
-// requests for someone else's email.
+// Returns the workspaces the current user can access. Matched two ways
+// (the backend unions the results):
+//
+//   1. EMAIL match against the cached Slack user roster -- works for
+//      users whose Clerk email is the same as their Slack email.
+//
+//   2. CLERK ORG match against `workspace.clerk_org_id` -- works for
+//      users invited to a workspace via Clerk Organization (their Clerk
+//      email may differ from their Slack email, e.g. Alberto signed up
+//      as alberto@misterr.ai but is `alberto@antiff.io` in Slack).
+//
+// Without (2), invited users see the install gate forever even though
+// Misterr is already installed in the team they joined.
 //
 // Required env vars:
 // - MISTERR_BACKEND_URL: e.g. https://sebitas.onrender.com
@@ -24,7 +33,23 @@ export async function GET() {
   const email = user?.emailAddresses.find(
     (e) => e.id === user?.primaryEmailAddressId,
   )?.emailAddress;
-  if (!email) {
+
+  // List the Clerk orgs the user belongs to. Best-effort: if Clerk
+  // fails we fall back to email-only matching rather than 500.
+  let orgIds: string[] = [];
+  try {
+    const client = await clerkClient();
+    const memberships =
+      await client.users.getOrganizationMembershipList({ userId });
+    orgIds = (memberships?.data ?? [])
+      .map((m) => m.organization?.id)
+      .filter((id): id is string => Boolean(id));
+  } catch {
+    orgIds = [];
+  }
+
+  if (!email && orgIds.length === 0) {
+    // No way to identify the user against any workspace.
     return NextResponse.json({ workspaces: [] });
   }
 
@@ -36,7 +61,10 @@ export async function GET() {
 
   try {
     const url = new URL("/api/web/workspaces", backendUrl);
-    url.searchParams.set("email", email);
+    if (email) url.searchParams.set("email", email);
+    if (orgIds.length > 0) {
+      url.searchParams.set("org_ids", orgIds.join(","));
+    }
     const res = await fetch(url, {
       headers: { "x-misterr-web-token": apiKey },
       cache: "no-store",

@@ -36,31 +36,60 @@ def _verify_token(request: Request) -> None:
 
 
 @router.get("/api/web/workspaces")
-async def list_workspaces_for_user(request: Request, email: str):
-    """Return the workspaces where Misterr is installed AND the given email
-    appears in the cached Slack roster. The email comes from the Clerk
-    session on the web side; the backend trusts the shared-secret + the
-    fact that the request originated from the Next.js server."""
+async def list_workspaces_for_user(
+    request: Request,
+    email: str | None = None,
+    org_ids: str | None = None,
+):
+    """Return the workspaces where Misterr is installed AND the user is
+    a member, matched by EITHER:
+
+      - email against the cached Slack roster (works for users whose
+        Clerk email = Slack email), OR
+      - workspace.clerk_org_id against the user's Clerk Org IDs (works
+        for users invited via Clerk -- their Clerk email may differ
+        from their Slack email, e.g. invited members).
+
+    The Next.js route handler is responsible for binding both inputs
+    to the verified Clerk session. The backend trusts the shared
+    secret + the fact that the request originated server-side.
+    """
     _verify_token(request)
     needle = (email or "").strip().lower()
-    if not needle:
+    org_id_list = [s.strip() for s in (org_ids or "").split(",") if s.strip()]
+    if not needle and not org_id_list:
         return {"workspaces": []}
 
     async with get_session() as session:
-        # Case-insensitive match: Slack-cached emails preserve the case
-        # the user typed at signup, but Clerk normalises to lowercase.
-        # Compare via LOWER() on both sides to avoid missed matches.
-        slack_users = (
-            await session.execute(
-                select(SlackUser).where(
-                    func.lower(SlackUser.email) == needle,
-                    SlackUser.deleted == False,  # noqa: E712
+        workspace_ids: set[uuid.UUID] = set()
+
+        # Path 1: email match against the cached roster.
+        if needle:
+            slack_users = (
+                await session.execute(
+                    select(SlackUser).where(
+                        func.lower(SlackUser.email) == needle,
+                        SlackUser.deleted == False,  # noqa: E712
+                    )
                 )
-            )
-        ).scalars().all()
-        if not slack_users:
+            ).scalars().all()
+            for su in slack_users:
+                workspace_ids.add(su.workspace_id)
+
+        # Path 2: Clerk Org membership.
+        if org_id_list:
+            org_ws = (
+                await session.execute(
+                    select(Workspace.id).where(
+                        Workspace.clerk_org_id.in_(org_id_list),
+                    )
+                )
+            ).scalars().all()
+            workspace_ids.update(org_ws)
+
+        if not workspace_ids:
             return {"workspaces": []}
-        workspace_ids: list[uuid.UUID] = list({su.workspace_id for su in slack_users})
+
         workspaces = (
             await session.execute(
                 select(Workspace).where(
@@ -77,7 +106,7 @@ async def list_workspaces_for_user(request: Request, email: str):
                 "name": w.name or w.slack_team_id,
                 "slackTeamId": w.slack_team_id,
                 "iconUrl": w.slack_team_icon_url,
-                "primaryEmail": needle,
+                "primaryEmail": needle or None,
                 # `clerk_org_id` lets the install gate decide whether the
                 # currently-active Clerk organization corresponds to a
                 # Slack-installed workspace. Without it, the gate could
