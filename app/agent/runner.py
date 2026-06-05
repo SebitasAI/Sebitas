@@ -899,9 +899,13 @@ async def _post_preamble_before_gate(client, ctx: dict, result: dict) -> None:
         return
     _last_preamble_by_run[run_id] = norm
     rendered = await _render_outbound(text, ctx)
+    from app.slack.render import text_to_blocks
     try:
         await client.chat_postMessage(
-            channel=ctx["channel"], thread_ts=ctx.get("reply_thread_ts"), text=rendered,
+            channel=ctx["channel"],
+            thread_ts=ctx.get("reply_thread_ts"),
+            text=rendered[:300] or rendered,
+            blocks=text_to_blocks(rendered),
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("preamble_post_failed", error=str(exc))
@@ -1197,8 +1201,16 @@ async def _drive(client, ctx: dict, result: dict, *, lock_handle: ThreadLockHand
             if final:
                 break
     rendered_final = await _render_outbound(final, ctx) if final else "(sin respuesta)"
+    # Render to Block Kit so tables / headings / code blocks display
+    # correctly. `text` stays as the notification fallback (required
+    # by Slack for screen readers + mobile previews).
+    from app.slack.render import text_to_blocks
+    blocks = text_to_blocks(rendered_final)
     await client.chat_postMessage(
-        channel=ctx["channel"], thread_ts=ctx.get("reply_thread_ts"), text=rendered_final,
+        channel=ctx["channel"],
+        thread_ts=ctx.get("reply_thread_ts"),
+        text=rendered_final[:300] or "(sin respuesta)",
+        blocks=blocks,
     )
 
     # Memory post-pass (slice T-X Phase B). Fire-and-forget: extract durable
