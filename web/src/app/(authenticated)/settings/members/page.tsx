@@ -12,11 +12,30 @@
 import { useEffect, useState } from "react";
 import { useAuth, useOrganization } from "@clerk/nextjs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Users, UserPlus, RefreshCw, Trash2 } from "lucide-react";
+import {
+  Check,
+  Copy,
+  RefreshCw,
+  Send,
+  Share2,
+  Trash2,
+  Users,
+} from "lucide-react";
 
-import { teamApi, type SyncSlackResponse, type TeamMember } from "@/lib/api/team";
+import {
+  teamApi,
+  type SlackRosterEntry,
+  type SlackRosterResponse,
+  type SyncSlackResponse,
+  type TeamMember,
+} from "@/lib/api/team";
 
 const TEAM_QUERY_KEY = ["team", "members"] as const;
+const ROSTER_QUERY_KEY = ["team", "slack-roster"] as const;
+
+// Public sign-up URL we tell teammates to visit. Override via
+// NEXT_PUBLIC_APP_URL if/when we use a different host.
+const APP_SIGN_UP_URL = `${process.env.NEXT_PUBLIC_APP_URL ?? "https://app.misterr.ai"}/sign-up`;
 
 export default function SettingsMembersPage() {
   const { getToken } = useAuth();
@@ -138,21 +157,28 @@ function TeamView({
   getToken: ReturnType<typeof useAuth>["getToken"];
 }) {
   const data = membersQuery.data as { members: TeamMember[]; total: number } | undefined;
-  const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState<"org:admin" | "org:member">("org:member");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [syncResult, setSyncResult] = useState<SyncSlackResponse | null>(null);
 
-  const inviteMut = useMutation({
-    mutationFn: async () => {
+  // Slack roster: list of Slack workspace members, used by the
+  // invite-via-DM panel.
+  const rosterQuery = useQuery<SlackRosterResponse>({
+    queryKey: ROSTER_QUERY_KEY,
+    queryFn: async () => {
       const token = await getToken({ template: "backend" });
       if (!token) throw new Error("No token");
-      return teamApi.invite({ email: inviteEmail, role: inviteRole }, token);
+      return teamApi.slackRoster(token);
+    },
+  });
+
+  const dmInviteMut = useMutation({
+    mutationFn: async (slackUserId: string) => {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("No token");
+      return teamApi.inviteViaSlackDm(slackUserId, token);
     },
     onSuccess: () => {
-      setInviteEmail("");
       setErrorMsg(null);
-      queryClient.invalidateQueries({ queryKey: TEAM_QUERY_KEY });
     },
     onError: (e: Error) => setErrorMsg(e.message),
   });
@@ -257,45 +283,12 @@ function TeamView({
         </section>
       )}
 
-      {isAdmin ? (
-        <section className="rounded-lg border border-[var(--color-border)] bg-white p-4">
-          <h2 className="text-sm font-medium text-[var(--color-ink-deep)] mb-2 flex items-center gap-1.5">
-            <UserPlus className="size-4" strokeWidth={1.75} />
-            Invite teammate
-          </h2>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (inviteEmail.trim()) inviteMut.mutate();
-            }}
-            className="flex flex-wrap items-center gap-2"
-          >
-            <input
-              type="email"
-              required
-              value={inviteEmail}
-              onChange={(e) => setInviteEmail(e.target.value)}
-              placeholder="teammate@example.com"
-              className="flex-1 min-w-[200px] rounded-md border border-[var(--color-border)] bg-white px-3 py-1.5 text-sm focus:border-[#FF5200] focus:outline-none focus:ring-1 focus:ring-[#FF5200]/30"
-            />
-            <select
-              value={inviteRole}
-              onChange={(e) => setInviteRole(e.target.value as "org:admin" | "org:member")}
-              className="rounded-md border border-[var(--color-border)] bg-white px-2 py-1.5 text-sm"
-            >
-              <option value="org:member">Member</option>
-              <option value="org:admin">Admin</option>
-            </select>
-            <button
-              type="submit"
-              disabled={inviteMut.isPending || !inviteEmail.trim()}
-              className="rounded-md bg-[#FF5200] px-3 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {inviteMut.isPending ? "Sending..." : "Send invite"}
-            </button>
-          </form>
-        </section>
-      ) : null}
+      <ShareLinkPanel url={APP_SIGN_UP_URL} />
+
+      <SlackRosterPanel
+        rosterQuery={rosterQuery}
+        dmInviteMut={dmInviteMut}
+      />
 
       {syncResult ? (
         <section className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm">
@@ -345,6 +338,215 @@ function TeamView({
     </div>
   );
 }
+
+function ShareLinkPanel({ url }: { url: string }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copyToClipboard() {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      // clipboard unavailable (older browsers / iframe sandbox). The
+      // URL is still selectable manually in the input below.
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-[var(--color-border)] bg-white p-4">
+      <h2 className="mb-1 flex items-center gap-1.5 text-sm font-medium text-[var(--color-ink-deep)]">
+        <Share2 className="size-4" strokeWidth={1.75} />
+        Share Misterr with your team
+      </h2>
+      <p className="mb-3 text-xs text-neutral-500">
+        Anyone in your Slack workspace can sign in. Share this link, they
+        click &quot;Continue with Slack&quot;, and they appear here automatically.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="text"
+          value={url}
+          readOnly
+          onFocus={(e) => e.currentTarget.select()}
+          className="flex-1 min-w-[240px] rounded-md border border-[var(--color-border)] bg-[var(--color-surface-fog)] px-3 py-1.5 text-sm font-mono text-[var(--color-ink-deep)] focus:outline-none focus:ring-1 focus:ring-[#FF5200]/30"
+        />
+        <button
+          type="button"
+          onClick={copyToClipboard}
+          className="inline-flex items-center gap-1.5 rounded-md bg-[var(--color-ink-deep)] px-3 py-1.5 text-sm font-medium text-white hover:opacity-90"
+        >
+          {copied ? (
+            <>
+              <Check className="size-3.5" strokeWidth={2} />
+              Copied
+            </>
+          ) : (
+            <>
+              <Copy className="size-3.5" strokeWidth={1.75} />
+              Copy
+            </>
+          )}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+
+function SlackRosterPanel({
+  rosterQuery,
+  dmInviteMut,
+}: {
+  rosterQuery: ReturnType<typeof useQuery<SlackRosterResponse>>;
+  dmInviteMut: ReturnType<typeof useMutation<unknown, Error, string>>;
+}) {
+  const [filter, setFilter] = useState("");
+  const [sentTo, setSentTo] = useState<Set<string>>(new Set());
+
+  const data = rosterQuery.data;
+  const filtered = (data?.entries ?? [])
+    .filter((e) => !e.is_bot)
+    .filter((e) => {
+      if (!filter.trim()) return true;
+      const needle = filter.trim().toLowerCase();
+      return (
+        (e.display_name ?? "").toLowerCase().includes(needle) ||
+        (e.real_name ?? "").toLowerCase().includes(needle) ||
+        (e.email ?? "").toLowerCase().includes(needle)
+      );
+    });
+
+  // People who haven't signed in to the web app yet -- these are the
+  // natural targets for an invite DM. Already-app-users are shown
+  // with a "Signed in" badge so the operator knows.
+  const notSignedIn = filtered.filter((e) => !e.is_app_user);
+  const alreadyIn = filtered.filter((e) => e.is_app_user);
+
+  function send(slackUserId: string) {
+    dmInviteMut.mutate(slackUserId, {
+      onSuccess: () => setSentTo((prev) => new Set(prev).add(slackUserId)),
+    });
+  }
+
+  return (
+    <section className="rounded-lg border border-[var(--color-border)] bg-white p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="flex items-center gap-1.5 text-sm font-medium text-[var(--color-ink-deep)]">
+            <Send className="size-4" strokeWidth={1.75} />
+            Invite via Slack DM
+          </h2>
+          <p className="mt-0.5 text-xs text-neutral-500">
+            The Misterr bot will DM each person their sign-up link directly.
+          </p>
+        </div>
+        <input
+          type="search"
+          placeholder="Search by name or email"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          className="min-w-[200px] rounded-md border border-[var(--color-border)] bg-white px-3 py-1.5 text-xs focus:border-[#FF5200] focus:outline-none focus:ring-1 focus:ring-[#FF5200]/30"
+        />
+      </div>
+
+      {rosterQuery.isLoading ? (
+        <div className="flex flex-col gap-2">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div
+              key={i}
+              className="h-12 animate-pulse rounded-md border border-[var(--color-border)] bg-[var(--color-surface-fog)]"
+            />
+          ))}
+        </div>
+      ) : data == null || data.total === 0 ? (
+        <div className="rounded-md border border-dashed border-[var(--color-border)] py-6 text-center text-xs text-neutral-500">
+          No Slack members synced yet. Click &quot;Check Slack members&quot; above
+          to fetch the roster from Slack.
+        </div>
+      ) : notSignedIn.length === 0 && alreadyIn.length === 0 ? (
+        <div className="rounded-md border border-dashed border-[var(--color-border)] py-6 text-center text-xs text-neutral-500">
+          No matches for &quot;{filter}&quot;.
+        </div>
+      ) : (
+        <ul className="divide-y divide-[var(--color-border)] rounded-md border border-[var(--color-border)]">
+          {notSignedIn.map((e) => {
+            const sent = sentTo.has(e.slack_user_id);
+            const pending =
+              dmInviteMut.isPending &&
+              (dmInviteMut.variables as string) === e.slack_user_id;
+            return (
+              <li
+                key={e.slack_user_id}
+                className="flex items-center gap-3 px-3 py-2"
+              >
+                <RosterAvatar entry={e} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm text-[var(--color-ink-deep)]">
+                    {e.display_name || e.real_name || e.slack_user_id}
+                  </div>
+                  <div className="truncate text-xs text-neutral-500">
+                    {e.email ?? "—"}
+                  </div>
+                </div>
+                {sent ? (
+                  <span className="inline-flex items-center gap-1 rounded-md bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+                    <Check className="size-3" strokeWidth={2} />
+                    DM sent
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => send(e.slack_user_id)}
+                    disabled={pending}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-white px-2.5 py-1 text-xs text-[var(--color-ink-deep)] hover:bg-[var(--color-surface-fog)] disabled:opacity-50"
+                  >
+                    <Send className="size-3" strokeWidth={1.75} />
+                    {pending ? "Sending…" : "Send invite"}
+                  </button>
+                )}
+              </li>
+            );
+          })}
+          {alreadyIn.map((e) => (
+            <li
+              key={e.slack_user_id}
+              className="flex items-center gap-3 px-3 py-2 opacity-70"
+            >
+              <RosterAvatar entry={e} />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm text-[var(--color-ink-deep)]">
+                  {e.display_name || e.real_name || e.slack_user_id}
+                </div>
+                <div className="truncate text-xs text-neutral-500">
+                  {e.email ?? "—"}
+                </div>
+              </div>
+              <span className="inline-flex items-center gap-1 rounded-md bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-600">
+                Already signed in
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+
+function RosterAvatar({ entry }: { entry: SlackRosterEntry }) {
+  const initial =
+    (entry.display_name || entry.real_name || entry.email || "?")
+      .trim()
+      .charAt(0)
+      .toUpperCase() || "?";
+  return (
+    <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-md bg-[#FF5200]/15 text-xs font-bold text-[#FF5200]">
+      {initial}
+    </span>
+  );
+}
+
 
 function Avatar({ member }: { member: TeamMember }) {
   const fallback =
