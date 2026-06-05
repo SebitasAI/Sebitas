@@ -1,34 +1,31 @@
 "use client";
 
-// Forced-install gate. After Clerk sign-up (or after creating a NEW
-// Clerk Organization via the org switcher), the user lands inside the
-// authenticated layout but the current org may not have a Slack
-// workspace where Misterr is installed. Without an installation there
-// is nothing for the app to do (no agent to talk to, no usage, no
-// billing state). This modal covers the dashboard with an unmissable
-// "Install Misterr in Slack" prompt until the current org is linked
-// to a Slack install.
+// Forced-install gate. Blocks the dashboard until the user has at
+// least one Slack workspace where Misterr is installed.
 //
-// Important: the gate decides per CURRENT CLERK ORG, not per user.
-// The earlier version only counted workspaces globally and missed
-// the "user already has one Slack workspace + just created a fresh
-// Clerk org" case -- the gate stayed closed because the OTHER org
-// still had Slack installed, even though the active org didn't.
+// The earlier strict per-Clerk-org check (PR #163) trapped real
+// users behind the modal: invited members whose Clerk email differs
+// from their Slack email, users sitting in Personal Account who own
+// orgs they aren't actively switched into, and users with an
+// existing Slack install alongside a freshly-created Clerk org.
+// All of them have legitimate workspace access; gating them was
+// hostile.
+//
+// New rule: the gate closes whenever `/api/workspaces` returns ANY
+// workspace for the current user (the backend already matches by
+// email roster + Clerk Org membership). The "create new Clerk org
+// -> show install modal" UX from the strict version is a follow-up
+// problem better solved by surfacing an explicit "Install Misterr
+// here" CTA in the workspace selector -- NOT by gating the whole
+// dashboard on it.
 //
 // Lifecycle:
-//   1. Mount: read `useOrganization()` -> active Clerk org id, then
-//      call `/api/workspaces`. Match the workspace whose
-//      `clerkOrgId` equals the active org id.
-//   2. If no match -> show the install modal. If the user is in
-//      Clerk's "Personal account" (no active org), defer to the
-//      legacy "any workspace counts" behavior so existing users
-//      who haven't migrated to per-org workspaces still see the
-//      gate close.
-//   3. While the modal is open, poll `/api/workspaces` every 5s so
-//      it auto-dismisses once the OAuth lands.
+//   1. Mount: GET /api/workspaces. Empty list -> open. Non-empty -> close.
+//   2. While the modal is open, poll every 5s so an OAuth completion
+//      in another tab auto-dismisses the modal.
 
 import { useEffect, useState } from "react";
-import { useOrganization, useUser } from "@clerk/nextjs";
+import { useUser } from "@clerk/nextjs";
 
 // Routes through Bolt's default install page. We tried 302-ing straight
 // to slack.com/oauth/v2/authorize and it broke for users signed into
@@ -45,13 +42,11 @@ const POLL_MS = 5000;
 
 export function InstallGate({ children }: { children: React.ReactNode }) {
   const { isLoaded: userLoaded } = useUser();
-  const { organization, isLoaded: orgLoaded } = useOrganization();
   const [hasWorkspace, setHasWorkspace] = useState<boolean | null>(null);
 
   useEffect(() => {
-    if (!userLoaded || !orgLoaded) return;
+    if (!userLoaded) return;
     let cancelled = false;
-    const activeOrgId = organization?.id ?? null;
 
     async function check() {
       try {
@@ -63,19 +58,11 @@ export function InstallGate({ children }: { children: React.ReactNode }) {
           if (!cancelled) setHasWorkspace(true);
           return;
         }
-        const data = (await res.json()) as {
-          workspaces?: { clerkOrgId?: string | null }[];
-        };
-        const list = Array.isArray(data.workspaces) ? data.workspaces : [];
-        let ok: boolean;
-        if (activeOrgId) {
-          // Current Clerk org has a Slack-installed workspace?
-          ok = list.some((w) => w.clerkOrgId === activeOrgId);
-        } else {
-          // No active org (Personal account). Fall back to the
-          // "any workspace counts" check for backward compat.
-          ok = list.length > 0;
-        }
+        const data = (await res.json()) as { workspaces?: unknown[] };
+        // Backend has already done the matching (email roster + Clerk
+        // Org membership). If anything came back, the user has
+        // workspace access -- gate closes.
+        const ok = Array.isArray(data.workspaces) && data.workspaces.length > 0;
         if (!cancelled) setHasWorkspace(ok);
       } catch {
         if (!cancelled) setHasWorkspace(true);
@@ -95,7 +82,7 @@ export function InstallGate({ children }: { children: React.ReactNode }) {
     };
     // We intentionally re-run when the active org changes so switching
     // orgs in the header dropdown re-evaluates the gate immediately.
-  }, [userLoaded, orgLoaded, organization?.id, hasWorkspace]);
+  }, [userLoaded, hasWorkspace]);
 
   // While the first check is in flight, render children so the page
   // doesn't flicker for users that already have a workspace. The modal
