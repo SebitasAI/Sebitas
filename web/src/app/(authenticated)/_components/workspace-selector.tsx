@@ -19,7 +19,8 @@ import { Check, ChevronsUpDown, Plus } from "lucide-react";
 //
 // "Add workspace" sends the user through Slack OAuth to install
 // Misterr in another team. The install URL is the backend's
-// /slack/install endpoint (Slack OAuth flow there already exists).
+// /slack/install/direct endpoint, which 302s straight to slack.com
+// without rendering Bolt's intermediate "Add to Slack" page.
 
 type Workspace = {
   id: string;
@@ -30,7 +31,7 @@ type Workspace = {
 
 const SLACK_INSTALL_URL =
   process.env.NEXT_PUBLIC_SLACK_INSTALL_URL ??
-  "https://sebitas.onrender.com/slack/install";
+  "https://sebitas.onrender.com/slack/install/direct";
 
 export function WorkspaceSelector() {
   const { user } = useUser();

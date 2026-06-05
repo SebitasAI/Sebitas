@@ -269,6 +269,35 @@ async def slack_install(req: Request):
     return await _get_slack_request_handler().handle(req)
 
 
+@app.get("/slack/install/direct")
+async def slack_install_direct(req: Request):
+    """Skip Bolt's intermediate "Add to Slack" HTML page and 302 the browser
+    straight to slack.com/oauth/v2/authorize.
+
+    Used by the InstallGate modal and other in-product CTAs where the user
+    already saw a localized "Install Misterr on Slack" button -- a second
+    page that just hosts another button is friction.
+
+    Generates a fresh CSRF state via Bolt's state_store so the round-trip
+    through /slack/oauth_redirect validates the same way the default flow
+    does."""
+    from fastapi import HTTPException
+    from starlette.responses import RedirectResponse
+
+    slack_app = init_slack_app()
+    flow = slack_app.oauth_flow
+    if flow is None:
+        # OAuth not configured (CLI-install dev path). Fall back to the
+        # default install page which itself returns 404 in that mode.
+        raise HTTPException(
+            status_code=404,
+            detail="Slack OAuth is not configured on this server.",
+        )
+    state = await flow.issue_new_state(req)
+    url = flow.build_authorize_url(state)
+    return RedirectResponse(url=url, status_code=302)
+
+
 @app.get("/slack/oauth_redirect")
 async def slack_oauth_redirect(req: Request):
     return await _get_slack_request_handler().handle(req)
