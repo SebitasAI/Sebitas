@@ -280,21 +280,26 @@ async def slack_install_direct(req: Request):
 
     Generates a fresh CSRF state via Bolt's state_store so the round-trip
     through /slack/oauth_redirect validates the same way the default flow
-    does."""
+    does.
+
+    Bypasses Bolt's `issue_new_state` + `build_authorize_url` wrappers --
+    both require an `AsyncBoltRequest` (not a FastAPI `Request`). Going
+    one level deeper to `state_store.async_issue` + `authorize_url_generator.generate`
+    avoids constructing a fake Bolt request just to satisfy a signature.
+    """
     from fastapi import HTTPException
     from starlette.responses import RedirectResponse
 
     slack_app = init_slack_app()
     flow = slack_app.oauth_flow
     if flow is None:
-        # OAuth not configured (CLI-install dev path). Fall back to the
-        # default install page which itself returns 404 in that mode.
+        # OAuth not configured (CLI-install dev path).
         raise HTTPException(
             status_code=404,
             detail="Slack OAuth is not configured on this server.",
         )
-    state = await flow.issue_new_state(req)
-    url = flow.build_authorize_url(state)
+    state = await flow.settings.state_store.async_issue()
+    url = flow.settings.authorize_url_generator.generate(state=state)
     return RedirectResponse(url=url, status_code=302)
 
 
