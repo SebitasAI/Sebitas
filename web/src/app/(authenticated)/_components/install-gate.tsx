@@ -30,9 +30,12 @@
 import { useEffect, useState } from "react";
 import { useOrganization, useUser } from "@clerk/nextjs";
 
+// Direct 302 to slack.com/oauth/v2/authorize -- skips Bolt's intermediate
+// "Add to Slack" HTML page so the user lands at Slack's consent screen
+// in one click. The backend mints a fresh CSRF state and redirects.
 const SLACK_INSTALL_URL =
   process.env.NEXT_PUBLIC_SLACK_INSTALL_URL ??
-  "https://sebitas.onrender.com/slack/install";
+  "https://sebitas.onrender.com/slack/install/direct";
 
 const POLL_MS = 5000;
 
