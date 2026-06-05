@@ -47,6 +47,13 @@ export type ProvisionResponse = {
   members_linked: number;
 };
 
+export type MemberRole = "org:admin" | "org:member";
+
+export type UpdateMemberRoleResponse = {
+  clerk_user_id: string;
+  role: MemberRole;
+};
+
 function backendBase(): string {
   const url = process.env.NEXT_PUBLIC_BACKEND_URL;
   if (!url) {
@@ -149,6 +156,22 @@ export const teamApi = {
       headers: authHeaders(token),
       body: JSON.stringify({ slack_user_id: slackUserId }),
     });
+    await expectOk(res);
+    return res.json();
+  },
+  updateMemberRole: async (
+    clerkUserId: string,
+    role: MemberRole,
+    token: string,
+  ): Promise<UpdateMemberRoleResponse> => {
+    const res = await fetch(
+      `${backendBase()}/api/team/members/${encodeURIComponent(clerkUserId)}/role`,
+      {
+        method: "POST",
+        headers: authHeaders(token),
+        body: JSON.stringify({ role }),
+      },
+    );
     await expectOk(res);
     return res.json();
   },
