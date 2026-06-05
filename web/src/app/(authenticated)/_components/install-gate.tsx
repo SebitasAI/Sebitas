@@ -30,12 +30,15 @@
 import { useEffect, useState } from "react";
 import { useOrganization, useUser } from "@clerk/nextjs";
 
-// Direct 302 to slack.com/oauth/v2/authorize -- skips Bolt's intermediate
-// "Add to Slack" HTML page so the user lands at Slack's consent screen
-// in one click. The backend mints a fresh CSRF state and redirects.
+// Routes through Bolt's default install page. We tried 302-ing straight
+// to slack.com/oauth/v2/authorize and it broke for users signed into
+// multiple Slack workspaces (Slack auto-routed to whichever was "most
+// recently active", which was sometimes a restricted one). Bolt's page
+// is one extra click but it lets Slack render its workspace picker
+// reliably. Keep this until we ship a Sign-In-With-Slack picker.
 const SLACK_INSTALL_URL =
   process.env.NEXT_PUBLIC_SLACK_INSTALL_URL ??
-  "https://sebitas.onrender.com/slack/install/direct";
+  "https://sebitas.onrender.com/slack/install";
 
 const POLL_MS = 5000;
 
@@ -144,20 +147,7 @@ function InstallModal({ slackInstallUrl }: { slackInstallUrl: string }) {
             Install Misterr on Slack
           </a>
 
-          <p className="mt-3 text-[11px] text-neutral-500">
-            Slack will install Misterr in whichever workspace you have
-            active in this browser.{" "}
-            <a
-              href="https://slack.com/signin"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline decoration-dotted underline-offset-2 hover:text-[var(--color-ink-deep)]"
-            >
-              Wrong workspace? Sign into the right one first.
-            </a>
-          </p>
-
-          <p className="mt-2 text-[11px] text-neutral-500">
+          <p className="mt-4 text-[11px] text-neutral-500">
             Waiting for your installation. This page unlocks automatically
             as soon as Slack confirms.
           </p>
