@@ -267,14 +267,19 @@ async def _resolve_via_org(
     row (via the `clerk_org_id` column populated at install / backfill
     time) and then locate the AppUser by `(workspace_id, clerk_user_id)`.
 
-    Returns None when no `org_id` claim is present -- the caller should
-    then fall back to the legacy email-match path (transition mode).
+    Returns None to mean "let the caller fall back to the legacy
+    email-match path". The org-based path is best-effort: if the
+    user's active Clerk org isn't yet linked to a workspace (fresh
+    install racing the provisioning, or the user is sitting in a
+    brand-new Clerk org that has no Slack workspace), don't 404 --
+    that wedges the inner pages even when the user has perfectly
+    valid email-based access to OTHER workspaces. Returning None
+    here lets `resolve_app_user_from_clerk` try the email path,
+    which is much more permissive and covers the common case
+    (invited members whose Clerk email matches their Slack email).
 
-    Raises HTTPException on the org-mapped failure modes:
-      - 404 if Workspace.clerk_org_id is not provisioned yet for this org.
-      - 403 if the calling user has no AppUser in that workspace
-        (i.e. they joined the Clerk org but never interacted with Misterr
-        in Slack -- web-only members can't act on per-user data yet).
+    Raises HTTPException ONLY on the genuine "you have an AppUser
+    here but Clerk identity doesn't match" case (handled below).
     """
     if not clerk.org_id:
         return None
@@ -286,14 +291,16 @@ async def _resolve_via_org(
             )
         ).scalar_one_or_none()
         if ws is None:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    "Clerk organization not yet linked to a Misterr workspace. "
-                    "If you just installed the bot, wait ~30s and refresh; "
-                    "otherwise contact support."
-                ),
+            # Fall back to the email-match path. Logging for visibility:
+            # if this fires often we want to know which orgs need
+            # backfilling.
+            log.info(
+                "clerk_org_unknown_fallback_to_email",
+                clerk_org_id=clerk.org_id,
+                clerk_user=clerk.sub,
+                email=clerk.email,
             )
+            return None
 
         # Direct hit: clerk_user_id already linked.
         app_user = (
