@@ -112,17 +112,78 @@ async def _create_org_and_link(
     return org_id
 
 
+async def _resolve_installer_email(
+    workspace_id: uuid.UUID,
+    installer_slack_user_id: str,
+    bot_token: str | None,
+) -> str | None:
+    """Get the installer's email so we can map them to a Clerk user.
+
+    Tries the cached SlackUser roster first (zero-latency, works once
+    the roster sync has happened). Falls back to calling Slack's
+    `users.info` directly with the workspace's freshly-minted bot
+    token -- this works at install time when the roster is still empty
+    (the classic chicken-and-egg the install path used to lose to).
+
+    Returns None when both paths fail (network error, scope missing,
+    user has no email on file).
+    """
+    # Path 1: cached roster.
+    async with get_session() as session:
+        slack_user = (
+            await session.execute(
+                select(SlackUser).where(
+                    SlackUser.workspace_id == workspace_id,
+                    SlackUser.slack_user_id == installer_slack_user_id,
+                )
+            )
+        ).scalar_one_or_none()
+    if slack_user is not None and slack_user.email:
+        return slack_user.email
+
+    # Path 2: live Slack `users.info` with the bot token. The OAuth
+    # response handed install_store.async_save the bot token already,
+    # so this round-trip is cheap (one HTTP call) and unblocks
+    # provisioning during the same install handler.
+    if not bot_token:
+        return None
+    try:
+        from slack_sdk.web.async_client import AsyncWebClient
+
+        client = AsyncWebClient(token=bot_token)
+        resp = await client.users_info(user=installer_slack_user_id)
+        # `users:read.email` scope is required for the `email` field.
+        # If the workspace didn't grant it the field is absent and we
+        # return None -- the legacy "deferred to web-side provision"
+        # path still covers that edge case.
+        profile = (resp.data or {}).get("user", {}) if isinstance(resp.data, dict) else {}
+        prof = profile.get("profile") or {}
+        email = (prof.get("email") or "").strip()
+        return email or None
+    except Exception as exc:  # noqa: BLE001
+        log.info(
+            "clerk_provision_users_info_failed",
+            workspace_id=str(workspace_id),
+            installer_slack_user_id=installer_slack_user_id,
+            error=str(exc)[:200],
+        )
+        return None
+
+
 async def provision_for_installer(
     workspace_id: uuid.UUID, installer_slack_user_id: str
 ) -> str | None:
     """Provision the Clerk org for a freshly-installed Slack workspace.
 
-    Looks up the installer's email from the cached SlackUser roster (the
-    roster sync from Slack -> SlackUser usually runs lazily but at install
-    time we don't have it yet; the function tolerates that by skipping
-    silently). If the installer's email maps to a Clerk user, create the
-    org. Otherwise log "deferred" and return None -- the web-side
-    provision endpoint takes over once the installer signs up.
+    Resolves the installer's email via `_resolve_installer_email`,
+    which tries the cached roster first then falls back to a live
+    Slack `users.info` call against the workspace's bot token. The
+    fallback removes the install-vs-roster-sync race that previously
+    left fresh workspaces with `clerk_org_id=NULL` indefinitely.
+
+    If the installer's email maps to a Clerk user, create the org.
+    Otherwise log "deferred" and return None -- the web-side provision
+    endpoint takes over once the installer signs up.
     """
     async with get_session() as session:
         ws = (
@@ -135,32 +196,44 @@ async def provision_for_installer(
             return None
         if ws.clerk_org_id:
             return ws.clerk_org_id  # already provisioned
+        # Bot token captured for the live Slack lookup fallback.
+        bot_token_enc = ws.bot_token
 
-        slack_user = (
-            await session.execute(
-                select(SlackUser).where(
-                    SlackUser.workspace_id == workspace_id,
-                    SlackUser.slack_user_id == installer_slack_user_id,
-                )
+    bot_token: str | None = None
+    if bot_token_enc:
+        try:
+            from app.slack.crypto import TokenCryptoError, decrypt_token
+
+            bot_token = decrypt_token(bot_token_enc)
+        except Exception as exc:  # noqa: BLE001
+            log.info(
+                "clerk_provision_token_decrypt_failed",
+                workspace_id=str(workspace_id), error=str(exc)[:200],
             )
-        ).scalar_one_or_none()
+            bot_token = None
 
-    if slack_user is None or not slack_user.email:
+    email = await _resolve_installer_email(
+        workspace_id, installer_slack_user_id, bot_token
+    )
+    if not email:
         log.info(
-            "clerk_org_deferred_no_roster",
+            "clerk_org_deferred_no_email",
             workspace_id=str(workspace_id),
             installer_slack_user_id=installer_slack_user_id,
-            reason="installer not yet in SlackUser cache or has no email",
+            reason=(
+                "installer not in SlackUser cache, users.info call failed "
+                "or returned no email"
+            ),
         )
         return None
 
     try:
-        user = await clerk_api.find_user_by_email(slack_user.email)
+        user = await clerk_api.find_user_by_email(email)
     except clerk_api.ClerkApiError as exc:
         log.warning(
             "clerk_org_install_lookup_failed",
             workspace_id=str(workspace_id),
-            email=slack_user.email,
+            email=email,
             error=str(exc),
         )
         return None
@@ -169,7 +242,7 @@ async def provision_for_installer(
         log.info(
             "clerk_org_deferred_no_clerk_user",
             workspace_id=str(workspace_id),
-            email=slack_user.email,
+            email=email,
         )
         return None
 
