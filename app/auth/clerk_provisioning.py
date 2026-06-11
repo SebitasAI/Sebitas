@@ -26,6 +26,7 @@ from sqlalchemy import func, select
 
 from app.auth import clerk_backend as clerk_api
 from app.db.models import AppUser, SlackUser, Workspace
+from app.db.repository import upsert_app_user
 from app.db.session import get_session
 
 log = structlog.get_logger(__name__)
@@ -34,23 +35,20 @@ log = structlog.get_logger(__name__)
 async def _link_app_user_clerk_id(
     workspace_id: uuid.UUID, slack_user_id: str, clerk_user_id: str
 ) -> None:
-    """Set AppUser.clerk_user_id for the (workspace, slack_user) row. No-op
-    if no AppUser exists yet -- the Clerk user joined the org but hasn't
-    DM'd Misterr from Slack so we don't have a row to link."""
+    """Ensure an AppUser exists for (workspace, slack_user) and link it to
+    `clerk_user_id`.
+
+    This used to be a no-op when no AppUser row existed yet -- the rationale
+    being "the Clerk user joined the org but hasn't DM'd Misterr from Slack".
+    That was the root cause of freshly-installed workspaces showing "0 users"
+    and the installer getting locked out of the web app (403 "DM the bot
+    first") despite having completed the install/signup flow. We now create
+    the membership row on the spot so signing up + completing the Slack flow
+    is enough to be a connected user."""
     async with get_session() as session:
-        row = (
-            await session.execute(
-                select(AppUser).where(
-                    AppUser.workspace_id == workspace_id,
-                    AppUser.slack_user_id == slack_user_id,
-                )
-            )
-        ).scalar_one_or_none()
-        if row is None:
-            return
-        if row.clerk_user_id == clerk_user_id:
-            return
-        row.clerk_user_id = clerk_user_id
+        await upsert_app_user(
+            session, workspace_id, slack_user_id, clerk_user_id=clerk_user_id
+        )
         await session.commit()
 
 

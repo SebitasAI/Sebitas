@@ -26,6 +26,7 @@ from sqlalchemy import select
 
 from app.auth.clerk_provisioning import provision_for_installer
 from app.db.models import Workspace
+from app.db.repository import upsert_app_user
 from app.db.session import get_session
 from app.memory.seed import ensure_company_skill, ensure_team_skill
 from app.scheduled_tasks.repository import seed_system_tasks_for_workspace
@@ -161,12 +162,31 @@ class MisterrInstallationStore(AsyncInstallationStore):
                 team_id=team_id,
                 error=str(exc),
             )
+        # Register the installer as an AppUser right away. The installer is,
+        # by definition, a member of the workspace -- creating the row here
+        # means the workspace shows >=1 user immediately after install instead
+        # of "0 users" until they happen to DM the bot. clerk_user_id is
+        # backfilled later (by provision_for_installer below, or on first web
+        # login). Best-effort: a failure here must not abort the install.
+        installer_uid = getattr(installation, "user_id", None)
+        if installer_uid:
+            try:
+                async with get_session() as session:
+                    await upsert_app_user(session, ws_id, installer_uid)
+                    await session.commit()
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "workspace_install_appuser_seed_failed",
+                    workspace_id=str(ws_id),
+                    team_id=team_id,
+                    installer_slack_user_id=installer_uid,
+                    error=str(exc)[:200],
+                )
         # Provision the Clerk Organization for this workspace (slice T-5).
         # Best-effort: if the installer doesn't have a Clerk user yet
         # (Slack-first onboarding), provision_for_installer returns None and
         # logs a deferred event. The web app's first-login provision endpoint
         # picks it up later. Never fail the install over Clerk hiccups.
-        installer_uid = getattr(installation, "user_id", None)
         if installer_uid:
             try:
                 org_id = await provision_for_installer(ws_id, installer_uid)
