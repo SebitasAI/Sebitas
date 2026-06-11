@@ -27,8 +27,20 @@ async def upsert_workspace(
 
 
 async def upsert_app_user(
-    session: AsyncSession, workspace_id: uuid.UUID, slack_user_id: str
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    slack_user_id: str,
+    *,
+    clerk_user_id: str | None = None,
 ) -> AppUser:
+    """Get-or-create the AppUser for (workspace_id, slack_user_id).
+
+    When `clerk_user_id` is passed, also link it: set it on a freshly-created
+    row, or backfill it on an existing row whose `clerk_user_id` is still
+    null. We never OVERWRITE a non-null clerk_user_id with a different value
+    here -- that would silently re-point a membership row and is a caller bug,
+    not an upsert concern.
+    """
     result = await session.execute(
         select(AppUser).where(
             AppUser.workspace_id == workspace_id,
@@ -37,8 +49,15 @@ async def upsert_app_user(
     )
     user = result.scalar_one_or_none()
     if user is None:
-        user = AppUser(workspace_id=workspace_id, slack_user_id=slack_user_id)
+        user = AppUser(
+            workspace_id=workspace_id,
+            slack_user_id=slack_user_id,
+            clerk_user_id=clerk_user_id,
+        )
         session.add(user)
+        await session.flush()
+    elif clerk_user_id and user.clerk_user_id is None:
+        user.clerk_user_id = clerk_user_id
         await session.flush()
     return user
 

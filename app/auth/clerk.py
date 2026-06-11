@@ -37,6 +37,7 @@ from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.db.models import AppUser, SlackUser, Workspace
+from app.db.repository import upsert_app_user
 from app.db.session import get_session
 
 log = structlog.get_logger(__name__)
@@ -221,10 +222,18 @@ class ResolvedAppUser:
     email: str
 
 
-async def _candidate_app_users_for_email(email: str) -> list[AppUser]:
-    """Find every AppUser in the system whose workspace contains a SlackUser
-    with this email (case-insensitive). One Clerk user -> potentially many
-    AppUsers if they're in multiple Slack workspaces."""
+async def _candidate_app_users_for_email(
+    email: str, clerk_user_id: str | None = None
+) -> list[AppUser]:
+    """Find (and provision if missing) every AppUser whose workspace contains
+    a SlackUser with this email (case-insensitive). One Clerk user ->
+    potentially many AppUsers if they're in multiple Slack workspaces.
+
+    Workspaces where the user is in the cached roster but never DM'd /
+    mentioned Misterr previously had no AppUser row and were silently skipped,
+    which locked the user out of those workspaces. We now create the
+    membership row on the spot (linking `clerk_user_id` when supplied) so
+    being in the Slack roster + signed up is enough to be connected."""
     needle = (email or "").strip().lower()
     if not needle:
         return []
@@ -239,23 +248,14 @@ async def _candidate_app_users_for_email(email: str) -> list[AppUser]:
         ).scalars().all()
         if not slack_users:
             return []
-        # For each (workspace_id, slack_user_id) hit, find the matching AppUser.
-        # Workspaces where the user is in the cached roster but never DM'd /
-        # mentioned Misterr will not yet have an AppUser row -- skip those
-        # transparently.
         pairs = [(su.workspace_id, su.slack_user_id) for su in slack_users]
         results: list[AppUser] = []
         for ws_id, sk_id in pairs:
-            row = (
-                await session.execute(
-                    select(AppUser).where(
-                        AppUser.workspace_id == ws_id,
-                        AppUser.slack_user_id == sk_id,
-                    )
-                )
-            ).scalar_one_or_none()
-            if row is not None:
-                results.append(row)
+            row = await upsert_app_user(
+                session, ws_id, sk_id, clerk_user_id=clerk_user_id
+            )
+            results.append(row)
+        await session.commit()
         return results
 
 
@@ -312,9 +312,13 @@ async def _resolve_via_org(
             )
         ).scalar_one_or_none()
 
-        # Lazy link: not linked yet, but the user's email matches a
-        # SlackUser in this workspace and that SlackUser has an AppUser.
-        # Bind them so subsequent requests are O(1).
+        # Lazy provision + link: not linked yet, but the user's email matches
+        # a SlackUser in this workspace. Create the AppUser membership row if
+        # it doesn't exist yet and bind clerk_user_id so subsequent requests
+        # are O(1). Previously we only linked a PRE-EXISTING AppUser and 403'd
+        # otherwise ("DM the bot first") -- that left users who signed up and
+        # joined the org but never messaged Misterr permanently locked out and
+        # invisible in the workspace's user count.
         if app_user is None and clerk.email:
             needle = clerk.email.strip().lower()
             slack_user = (
@@ -327,31 +331,35 @@ async def _resolve_via_org(
                 )
             ).scalar_one_or_none()
             if slack_user is not None:
-                app_user = (
+                created = (
                     await session.execute(
                         select(AppUser).where(
                             AppUser.workspace_id == ws.id,
                             AppUser.slack_user_id == slack_user.slack_user_id,
                         )
                     )
-                ).scalar_one_or_none()
-                if app_user is not None and app_user.clerk_user_id != clerk.sub:
-                    app_user.clerk_user_id = clerk.sub
-                    await session.commit()
-                    log.info(
-                        "clerk_user_lazily_linked",
-                        app_user_id=str(app_user.id),
-                        clerk_user_id=clerk.sub,
-                        workspace_id=str(ws.id),
-                    )
+                ).scalar_one_or_none() is None
+                app_user = await upsert_app_user(
+                    session, ws.id, slack_user.slack_user_id,
+                    clerk_user_id=clerk.sub,
+                )
+                await session.commit()
+                log.info(
+                    "clerk_user_provisioned_and_linked"
+                    if created else "clerk_user_lazily_linked",
+                    app_user_id=str(app_user.id),
+                    clerk_user_id=clerk.sub,
+                    workspace_id=str(ws.id),
+                )
 
         if app_user is None:
             raise HTTPException(
                 status_code=403,
                 detail=(
-                    "Your Clerk account is in this organization but has not "
-                    "interacted with Misterr in Slack yet. Send the bot any "
-                    "DM in Slack to finish setup, then refresh."
+                    "Your Clerk account is in this organization but we can't "
+                    "match you to a Slack member of this workspace yet. If you "
+                    "just installed Misterr, give the roster a moment to sync "
+                    "and refresh."
                 ),
             )
 
@@ -435,7 +443,7 @@ async def require_app_user(
             detail="Clerk token has no email claim; cannot map to a workspace.",
         )
 
-    candidates = await _candidate_app_users_for_email(clerk.email)
+    candidates = await _candidate_app_users_for_email(clerk.email, clerk.sub)
     if not candidates:
         raise HTTPException(
             status_code=403,
